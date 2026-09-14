@@ -1,6 +1,6 @@
 [project]
 name = "cv-archive-api"
-version = "0.1.0"
+version = "1.0.0"
 description = "API for the computer vision asset archive"
 requires-python = ">=3.12"
 dependencies = [
