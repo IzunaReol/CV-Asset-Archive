@@ -1,0 +1,28 @@
+.state-panel { min-height:420px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:9px; color:var(--muted); text-align:center; }
+.state-panel>b { color:var(--ink); font-size:18px; }
+.state-panel p { margin:0 0 8px; }
+.state-panel>span { width:42px; height:42px; border:1px solid var(--line); border-radius:50%; display:grid; place-items:center; font-size:20px; color:var(--accent); }
+.state-panel button { border:1px solid var(--line); border-radius:7px; background:var(--panel); color:var(--ink); padding:9px 14px; }
+.spinner { width:34px; height:34px; border:3px solid var(--line); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; }
+.error-state>span { color:#b6453c; }
+@keyframes spin { to { transform:rotate(360deg); } }
+
+.login-stage { position:fixed; z-index:100; inset:0; background:linear-gradient(135deg,#0d1718eF,#243437eF); display:grid; place-items:center; padding:20px; }
+.login-stage:before { content:""; position:absolute; inset:0; background:radial-gradient(circle at 25% 20%,color-mix(in srgb,var(--accent) 32%,transparent),transparent 35%); }
+.login-close { position:absolute; z-index:2; top:24px; right:26px; border:1px solid #ffffff55; background:#ffffff18; color:#fff; width:38px; height:38px; border-radius:50%; font-size:22px; }
+.login-card { position:relative; z-index:1; width:min(420px,100%); background:var(--panel); color:var(--ink); border:1px solid var(--line); border-radius:12px; padding:34px; box-shadow:0 30px 80px #0006; }
+.login-brand { display:flex; align-items:center; gap:10px; margin-bottom:34px; }
+.login-card h1 { margin:6px 0 9px; font-size:27px; letter-spacing:-.03em; }
+.login-card>p:not(.eyebrow) { color:var(--muted); margin:0 0 25px; line-height:1.6; }
+.login-card>label { display:grid; gap:7px; margin:14px 0; font-size:13px; font-weight:650; }
+.login-card>label input { border:1px solid var(--line); background:color-mix(in srgb,var(--panel) 92%,var(--ink)); color:var(--ink); border-radius:7px; padding:11px 12px; outline:none; }
+.login-card>label input:focus { border-color:var(--accent); }
+.login-option { display:flex; justify-content:space-between; align-items:center; margin:8px 0 20px; font-size:12px; color:var(--muted); }
+.login-option button { border:0; background:transparent; color:var(--accent); }
+.login-card>small { display:block; color:var(--muted); text-align:center; margin-top:14px; }
+
+@media (max-width:760px) {
+  .review-tools select { display:none; }
+  .review-tools button { padding:5px 7px; }
+  .login-card { padding:26px 22px; }
+}

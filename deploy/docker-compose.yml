@@ -1,0 +1,89 @@
+name: cv-archive
+
+services:
+  frontend:
+    build:
+      context: ..
+      dockerfile: deploy/frontend.Dockerfile
+      args:
+        DOCKER_REGISTRY_PREFIX: ${DOCKER_REGISTRY_PREFIX:-}
+    ports: ["8080:80"]
+    depends_on: [api]
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/api.Dockerfile
+      args:
+        DOCKER_REGISTRY_PREFIX: ${DOCKER_REGISTRY_PREFIX:-}
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      MONGODB_URI: mongodb://mongodb:27017
+      MINIO_ENDPOINT: minio:9000
+      MINIO_PUBLIC_ENDPOINT: localhost:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      STORAGE_DATA_PATH: /storage-data
+      REDIS_URL: redis://redis:6379/0
+    volumes: ["minio-data:/storage-data:ro"]
+    depends_on:
+      mongodb: { condition: service_healthy }
+      minio: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    ports: ["8000:8000"]
+    healthcheck: { test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live')"], interval: 10s, timeout: 5s, retries: 10 }
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/worker.Dockerfile
+      args:
+        DOCKER_REGISTRY_PREFIX: ${DOCKER_REGISTRY_PREFIX:-}
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      MONGODB_URI: mongodb://mongodb:27017
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      REDIS_URL: redis://redis:6379/0
+      WORKER_TEMP_DIR: /var/tmp/cv-archive
+    depends_on:
+      mongodb: { condition: service_healthy }
+      minio: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  mongodb:
+    image: ${DOCKER_REGISTRY_PREFIX:-}library/mongo:8.0
+    volumes: ["mongodb-data:/data/db"]
+    healthcheck: { test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand('ping').ok"], interval: 10s, timeout: 5s, retries: 10 }
+    restart: unless-stopped
+
+  minio:
+    image: ${DOCKER_REGISTRY_PREFIX:-}minio/minio:RELEASE.2025-07-23T15-54-02Z
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    volumes: ["minio-data:/data"]
+    ports: ["9000:9000", "9001:9001"]
+    healthcheck: { test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"], interval: 10s, timeout: 5s, retries: 10 }
+    restart: unless-stopped
+
+  redis:
+    image: ${DOCKER_REGISTRY_PREFIX:-}library/redis:8.2-alpine
+    command: redis-server --appendonly yes
+    volumes: ["redis-data:/data"]
+    healthcheck: { test: ["CMD", "redis-cli", "ping"], interval: 10s, timeout: 5s, retries: 10 }
+    restart: unless-stopped
+
+volumes:
+  mongodb-data:
+  minio-data:
+  redis-data:

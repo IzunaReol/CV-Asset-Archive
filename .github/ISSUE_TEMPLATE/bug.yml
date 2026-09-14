@@ -1,0 +1,28 @@
+name: 缺陷报告
+description: 报告可复现的产品问题
+title: "bug: "
+labels: [bug]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      placeholder: 请使用合成数据描述，不要附真实素材或凭据。
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望结果
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 版本或提交

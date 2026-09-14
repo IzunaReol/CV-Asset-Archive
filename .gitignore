@@ -1,0 +1,49 @@
+# Dependencies and build output
+node_modules/
+dist/
+.vite/
+coverage/
+__pycache__/
+*.egg-info/
+*.tsbuildinfo
+.venv/
+.runtime/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+backend/test-tmp-external/
+
+# Runtime data and secrets
+.env
+.env.*
+!.env.example
+data/
+uploads/
+exports/
+*.zip
+*.tar
+*.log
+
+# Large CV artifacts
+*.pt
+*.pth
+*.onnx
+*.engine
+*.weights
+*.ckpt
+*.safetensors
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+~$*.docx
+
+# Local review artifacts
+.docx-review/
+
+# Private planning sources (local only; never publish)
+plan.md
+计算机视觉基础设施实施方案.docx
