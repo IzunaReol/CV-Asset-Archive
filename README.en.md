@@ -16,6 +16,8 @@ CV Asset Archive is an asset and relationship management system for computer vis
 - Soft deletion, recycle-bin recovery, and background physical cleanup
 - Background ZIP exports with progress tracking and expiring downloads
 - User, role, tag, format, and audit management
+- Dataset membership, immutable versions, custom version names, comparison, and restoration
+- Dataset duplication, version-specific model relationships, and dataset exports
 - Light and dark themes
 
 ## Technology
@@ -103,6 +105,12 @@ npm run build
 ```
 
 The isolated API workflow test is available at `scripts/runtime-e2e.py`. See the [testing guide](docs/testing.md) and [v1.0.0 release checklist](docs/release-checklist.md) for the full scope.
+
+## Upgrading to v1.1.0
+
+Back up MongoDB and MinIO before upgrading. Stop the API and workers, update the source and dependencies, then rebuild the frontend. Startup applies an idempotent collection-to-dataset migration; stored objects are unchanged. Restore the pre-upgrade database backup before rolling back to v1.0.0.
+
+See the [dataset guide](docs/datasets.md) and [release notes](docs/releases/v1.1.0.md) for behavior and known limitations.
 
 ## Documentation
 

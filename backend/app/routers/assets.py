@@ -380,6 +380,44 @@ async def get_asset(asset_id: str, user: ReadUser) -> dict[str, Any]:
             {"$or": [{"source_id": asset_id}, {"target_id": asset_id}], "status": "active"}
         ).limit(100)
     ]
+    current_dataset_ids = await db.dataset_memberships.distinct("dataset_id", {"asset_id": asset_id})
+    version_rows = await db.dataset_version_memberships.find(
+        {"asset_id": asset_id}, {"version_id": 1}
+    ).to_list(length=1000)
+    model_version_ids = await db.relations.distinct(
+        "target_id",
+        {"source_id": asset_id, "relation_type": "trained_on", "status": "active"},
+    )
+    version_ids = list({item["version_id"] for item in version_rows} | set(model_version_ids))
+    versions = (
+        await db.dataset_versions.find({"id": {"$in": version_ids}}).to_list(length=len(version_ids))
+        if version_ids
+        else []
+    )
+    dataset_ids = list(set(current_dataset_ids) | {item["dataset_id"] for item in versions})
+    datasets = {
+        item["id"]: item
+        for item in (
+            await db.datasets.find({"id": {"$in": dataset_ids}, "deleted_at": None}).to_list(
+                length=len(dataset_ids)
+            )
+            if dataset_ids
+            else []
+        )
+    }
+    versions_by_dataset: dict[str, list[str]] = {}
+    for version in versions:
+        if version["dataset_id"] in datasets:
+            versions_by_dataset.setdefault(version["dataset_id"], []).append(version["version"])
+    result["datasets"] = [
+        {
+            "id": dataset_id,
+            "name": dataset["name"],
+            "in_current_dataset": dataset_id in current_dataset_ids,
+            "versions": versions_by_dataset.get(dataset_id, []),
+        }
+        for dataset_id, dataset in datasets.items()
+    ]
     return result
 
 
@@ -486,19 +524,42 @@ async def batch_tags(body: BatchTagRequest, request: Request, user: WriteUser) -
 async def batch_delete(
     body: BatchAssetDeleteRequest, request: Request, user: WriteUser
 ) -> dict[str, Any]:
+    requested_ids = list(dict.fromkeys(body.asset_ids))
+    current_member_ids = set(
+        await db.dataset_memberships.distinct("asset_id", {"asset_id": {"$in": requested_ids}})
+    )
+    protected_version_cursor = await db.dataset_version_memberships.aggregate(
+        [
+            {"$match": {"asset_id": {"$in": requested_ids}}},
+            {"$lookup": {"from": "dataset_versions", "localField": "version_id", "foreignField": "id", "as": "version"}},
+            {"$unwind": "$version"},
+            {"$lookup": {"from": "datasets", "localField": "version.dataset_id", "foreignField": "id", "as": "dataset"}},
+            {"$unwind": "$dataset"},
+            {"$match": {"dataset.deleted_at": None}},
+            {"$project": {"asset_id": 1}},
+        ]
+    )
+    protected_version_rows = await protected_version_cursor.to_list(length=len(requested_ids))
+    version_member_ids = {item["asset_id"] for item in protected_version_rows}
+    protected_ids = current_member_ids | version_member_ids
+    deletable_ids = [asset_id for asset_id in requested_ids if asset_id not in protected_ids]
     timestamp = now()
     result = await db.assets.update_many(
-        {"id": {"$in": body.asset_ids}, "archived_at": None},
+        {"id": {"$in": deletable_ids}, "archived_at": None},
         {"$set": {"archived_at": timestamp, "updated_at": timestamp}},
     )
     existing = set(
-        await db.assets.distinct("id", {"id": {"$in": body.asset_ids}, "archived_at": timestamp})
+        await db.assets.distinct("id", {"id": {"$in": deletable_ids}, "archived_at": timestamp})
     )
-    succeeded = [asset_id for asset_id in body.asset_ids if asset_id in existing]
+    succeeded = [asset_id for asset_id in requested_ids if asset_id in existing]
     failed = [
+        {"id": asset_id, "code": "ASSET_IN_DATASET", "message": "该素材已添加到数据集，无法删除"}
+        for asset_id in requested_ids
+        if asset_id in protected_ids
+    ] + [
         {"id": asset_id, "code": "ASSET_NOT_FOUND", "message": "素材不存在"}
-        for asset_id in body.asset_ids
-        if asset_id not in existing
+        for asset_id in requested_ids
+        if asset_id not in existing and asset_id not in protected_ids
     ]
     await record_audit(
         actor=user,
@@ -516,7 +577,7 @@ async def archive_asset(asset_id: str, request: Request, user: WriteUser) -> dic
     result = await batch_delete(BatchAssetDeleteRequest(asset_ids=[asset_id]), request, user)
     if result["failed"]:
         failure = result["failed"][0]
-        status_code = 409 if failure["code"] == "ASSET_PROCESSING" else 404
+        status_code = 409 if failure["code"] in {"ASSET_PROCESSING", "ASSET_IN_DATASET"} else 404
         raise AppError(status_code, failure["code"], failure["message"])
     return {"id": asset_id, "status": "archived"}
 

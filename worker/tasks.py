@@ -405,32 +405,16 @@ def import_cvat_yolo_bundle(path: Path, bundle: dict) -> dict:
                 imported_annotations += 1
 
             existing_relation = database.relations.find_one(
-                {
-                    "source_id": annotation_asset["id"],
-                    "target_id": image_asset["id"],
-                    "relation_type": "annotates",
-                    "status": "active",
-                }
+                {"source_id": annotation_asset["id"], "target_id": image_asset["id"], "relation_type": "annotates", "status": "active"}
             )
             if existing_relation is None:
-                timestamp = utcnow()
-                database.relations.insert_one(
-                    {
-                        "id": str(uuid.uuid4()),
-                        "source_id": annotation_asset["id"],
-                        "target_id": image_asset["id"],
-                        "relation_type": "annotates",
-                        "provenance": {
-                            "source": "cvat_import",
-                            "bundle_asset_id": bundle["id"],
-                        },
-                        "revision": 1,
-                        "status": "active",
-                        "created_by": bundle["created_by"],
-                        "created_by_name": creator_name,
-                        "created_at": timestamp,
-                    }
-                )
+                database.relations.insert_one({
+                    "id": str(uuid.uuid4()), "source_id": annotation_asset["id"],
+                    "target_id": image_asset["id"], "relation_type": "annotates",
+                    "provenance": {"source": "cvat_import", "bundle_asset_id": bundle["id"]},
+                    "revision": 1, "status": "active", "created_by": bundle["created_by"],
+                    "created_by_name": creator_name, "created_at": utcnow(),
+                })
                 imported_relations += 1
     return {
         "detected": True,
@@ -640,20 +624,13 @@ def import_cvat_annotation_bundle(path: Path, bundle: dict) -> dict:
                 imported_annotations += 1
                 for image_entry in spec["matches"]:
                     image_asset = image_assets[image_entry]
-                    database.relations.insert_one(
-                        {
-                            "id": str(uuid.uuid4()),
-                            "source_id": annotation_id,
-                            "target_id": image_asset["id"],
-                            "relation_type": "annotates",
-                            "provenance": {"source": "cvat_import", "bundle_asset_id": bundle_id},
-                            "revision": 1,
-                            "status": "active",
-                            "created_by": bundle["created_by"],
-                            "created_by_name": creator_name,
-                            "created_at": utcnow(),
-                        }
-                    )
+                    database.relations.insert_one({
+                        "id": str(uuid.uuid4()), "source_id": annotation_id,
+                        "target_id": image_asset["id"], "relation_type": "annotates",
+                        "provenance": {"source": "cvat_import", "bundle_asset_id": bundle_id},
+                        "revision": 1, "status": "active", "created_by": bundle["created_by"],
+                        "created_by_name": creator_name, "created_at": utcnow(),
+                    })
                     imported_relations += 1
         return {
             "detected": True,

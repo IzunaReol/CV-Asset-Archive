@@ -112,6 +112,41 @@ class CollectionCreate(BaseModel):
     freeze: bool = False
 
 
+class DatasetCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    remark: str = Field(default="", max_length=1000)
+    status: str = Field(default="待整理", min_length=1, max_length=50)
+
+
+class DatasetUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    remark: str = Field(default="", max_length=1000)
+    status: str = Field(min_length=1, max_length=50)
+
+
+class DatasetMembersRequest(BaseModel):
+    asset_ids: list[str] = Field(min_length=1, max_length=100000)
+
+
+class DatasetPublishRequest(BaseModel):
+    version: str = Field(pattern=r"^v?[A-Za-z0-9][A-Za-z0-9._-]{0,31}$")
+    release_note: str = Field(default="", max_length=2000)
+
+
+class DatasetRestoreRequest(BaseModel):
+    version_id: str
+
+
+class DatasetExportRequest(BaseModel):
+    name: str | None = Field(default=None, max_length=120)
+
+
+class DatasetModelLinkRequest(BaseModel):
+    model_id: str
+    version_id: str
+    remark: str = Field(default="", max_length=1000)
+
+
 class SavedViewCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     query: dict[str, Any]

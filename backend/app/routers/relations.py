@@ -43,10 +43,8 @@ def relation_type_error(
         source_type == "annotation" and target_type == "image"
     ):
         return "RELATION_TYPE_MISMATCH", "对应标注关系必须由标注指向图片"
-    if relation_type == "trained_on" and not (
-        source_type == "model" and target_type in {"image", "video", "annotation", "snapshot"}
-    ):
-        return "RELATION_TYPE_MISMATCH", "用于训练关系必须由模型指向素材或数据集"
+    if relation_type == "trained_on" and source_type != "model":
+        return "RELATION_TYPE_MISMATCH", "训练关系的源对象必须是模型"
     if relation_type == "version_of" and source_type != target_type:
         return "RELATION_TYPE_MISMATCH", "版本关系的源对象和目标对象类型必须一致"
     return None
@@ -61,7 +59,12 @@ async def preview_relation_item(item: RelationCreate) -> dict[str, Any]:
         }
     source = await db.assets.find_one({"id": item.source_id, "archived_at": None})
     target = await db.assets.find_one({"id": item.target_id, "archived_at": None})
-    target = target or await db.collections.find_one({"id": item.target_id})
+    target = (
+        target
+        or await db.dataset_versions.find_one({"id": item.target_id})
+        or await db.datasets.find_one({"id": item.target_id, "deleted_at": None})
+        or await db.collections.find_one({"id": item.target_id})
+    )
     if source is None or target is None:
         return {
             "relation": item.model_dump(mode="json"),
@@ -98,7 +101,11 @@ async def preview_relation_item(item: RelationCreate) -> dict[str, Any]:
 async def validate_relation(body: RelationCreate) -> None:
     source = await db.assets.find_one({"id": body.source_id, "archived_at": None})
     target_asset = await db.assets.find_one({"id": body.target_id, "archived_at": None})
-    target_collection = await db.collections.find_one({"id": body.target_id})
+    target_collection = (
+        await db.dataset_versions.find_one({"id": body.target_id})
+        or await db.datasets.find_one({"id": body.target_id, "deleted_at": None})
+        or await db.collections.find_one({"id": body.target_id})
+    )
     if source is None or (target_asset is None and target_collection is None):
         raise AppError(404, "RELATION_TARGET_NOT_FOUND", "源资产或目标对象不存在")
     type_error = relation_type_error(
@@ -440,9 +447,12 @@ async def get_relation(relation_id: str, user: ReadUser) -> dict[str, Any]:
     if relation is None:
         raise AppError(404, "RELATION_NOT_FOUND", "关联关系不存在")
     source = await db.assets.find_one({"id": relation["source_id"]})
-    target = await db.assets.find_one(
-        {"id": relation["target_id"]}
-    ) or await db.collections.find_one({"id": relation["target_id"]})
+    target = (
+        await db.assets.find_one({"id": relation["target_id"]})
+        or await db.dataset_versions.find_one({"id": relation["target_id"]})
+        or await db.datasets.find_one({"id": relation["target_id"]})
+        or await db.collections.find_one({"id": relation["target_id"]})
+    )
     return {
         **(public_document(relation) or {}),
         "source": public_document(source),
@@ -506,12 +516,18 @@ async def relation_graph(
         next_frontier: set[str] = set()
         async for relation in cursor:
             edge = public_document(relation) or {}
-            source = await db.assets.find_one(
-                {"id": relation["source_id"]}
-            ) or await db.collections.find_one({"id": relation["source_id"]})
-            target = await db.assets.find_one(
-                {"id": relation["target_id"]}
-            ) or await db.collections.find_one({"id": relation["target_id"]})
+            source = (
+                await db.assets.find_one({"id": relation["source_id"]})
+                or await db.dataset_versions.find_one({"id": relation["source_id"]})
+                or await db.datasets.find_one({"id": relation["source_id"]})
+                or await db.collections.find_one({"id": relation["source_id"]})
+            )
+            target = (
+                await db.assets.find_one({"id": relation["target_id"]})
+                or await db.dataset_versions.find_one({"id": relation["target_id"]})
+                or await db.datasets.find_one({"id": relation["target_id"]})
+                or await db.collections.find_one({"id": relation["target_id"]})
+            )
             edge.update(
                 {
                     "source_name": (source or {}).get("name", relation["source_id"]),
@@ -529,4 +545,27 @@ async def relation_graph(
         nodes[asset["id"]] = public_document(asset) or {}
     async for collection in db.collections.find({"id": {"$in": ids}}):
         nodes[collection["id"]] = public_document(collection) or {}
+    async for dataset in db.datasets.find({"id": {"$in": ids}}):
+        nodes[dataset["id"]] = public_document(dataset) or {}
+    version_rows = await db.dataset_versions.find({"id": {"$in": ids}}).to_list(length=len(ids))
+    version_ids = [item["id"] for item in version_rows]
+    version_counts: dict[str, dict[str, int]] = {}
+    if version_ids:
+        pipeline = [
+            {"$match": {"version_id": {"$in": version_ids}}},
+            {"$group": {"_id": {"version_id": "$version_id", "type": "$snapshot.type"}, "count": {"$sum": 1}}},
+        ]
+        version_count_cursor = await db.dataset_version_memberships.aggregate(pipeline)
+        async for row in version_count_cursor:
+            version_counts.setdefault(row["_id"]["version_id"], {})[row["_id"]["type"]] = row["count"]
+    dataset_ids = list({item.get("dataset_id") for item in version_rows if item.get("dataset_id")})
+    dataset_names = {
+        item["id"]: item.get("name", item["id"])
+        async for item in db.datasets.find({"id": {"$in": dataset_ids}}, {"id": 1, "name": 1})
+    }
+    for version in version_rows:
+        node = public_document(version) or {}
+        node["dataset_name"] = dataset_names.get(version.get("dataset_id"), version.get("name", "数据集"))
+        node["counts"] = version_counts.get(version["id"], {})
+        nodes[version["id"]] = node
     return {"nodes": list(nodes.values()), "edges": list(edges.values())}

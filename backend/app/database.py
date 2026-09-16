@@ -27,6 +27,19 @@ async def ensure_indexes() -> None:
     )
     await db.relations.create_index([("status", ASCENDING), ("created_at", DESCENDING)])
     await db.collections.create_index([("name", ASCENDING), ("revision", ASCENDING)], unique=True)
+    await db.datasets.create_index([("name", ASCENDING)], unique=True)
+    await db.datasets.create_index([("status", ASCENDING), ("updated_at", DESCENDING)])
+    await db.dataset_memberships.create_index(
+        [("dataset_id", ASCENDING), ("asset_id", ASCENDING)], unique=True
+    )
+    await db.dataset_memberships.create_index([("asset_id", ASCENDING)])
+    await db.dataset_versions.create_index(
+        [("dataset_id", ASCENDING), ("version_number", ASCENDING)], unique=True
+    )
+    await db.dataset_versions.create_index([("dataset_id", ASCENDING), ("created_at", DESCENDING)])
+    await db.dataset_version_memberships.create_index(
+        [("version_id", ASCENDING), ("asset_id", ASCENDING)], unique=True
+    )
     await db.jobs.create_index([("owner_id", ASCENDING), ("created_at", DESCENDING)])
     await db.jobs.create_index("expires_at", expireAfterSeconds=0)
     await db.tag_definitions.create_index("key", unique=True)

@@ -113,7 +113,7 @@ async def get_job(job_id: str, user: ReadUser) -> dict[str, Any]:
 
 @router.get("/exports/{job_id}/download-url")
 async def export_download_url(job_id: str, user: ReadUser) -> dict[str, Any]:
-    query: dict[str, Any] = {"id": job_id, "type": "export"}
+    query: dict[str, Any] = {"id": job_id, "type": {"$in": ["export", "dataset_export"]}}
     if not ({"admin", "data_manager"} & set(user["roles"])):
         query["owner_id"] = user["id"]
     job = await db.jobs.find_one(query)
@@ -147,13 +147,16 @@ async def retry_job(job_id: str, user: WriteUser) -> dict[str, Any]:
             {"$set": {"status": "processing", "processing_error": None, "updated_at": now()}},
         )
     task_name = (
-        "worker.tasks.build_export" if job["type"] == "export" else "worker.tasks.process_asset"
+        "worker.tasks.build_export"
+        if job["type"] in {"export", "dataset_export"}
+        else "worker.tasks.process_asset"
     )
     try:
         await asyncio.to_thread(
             celery_client.send_task,
             task_name,
-            args=[job_id] + ([job["input"]["asset_id"]] if job["type"] != "export" else []),
+            args=[job_id]
+            + ([job["input"]["asset_id"]] if job["type"] not in {"export", "dataset_export"} else []),
         )
     except Exception as exc:
         await db.jobs.update_one(

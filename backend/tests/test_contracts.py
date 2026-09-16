@@ -4,6 +4,10 @@ from pydantic import ValidationError
 from app.schemas import (
     AnnotationMatchPreviewRequest,
     AssetType,
+    DatasetCreate,
+    DatasetMembersRequest,
+    DatasetModelLinkRequest,
+    DatasetPublishRequest,
     RelationCreate,
     RevokeRelationRequest,
     SavedViewUpdate,
@@ -80,3 +84,28 @@ def test_saved_view_name_cannot_be_empty():
 def test_tag_update_rejects_invalid_color():
     with pytest.raises(ValidationError):
         TagDefinitionUpdate(name="光照", color="yellow")
+
+
+def test_dataset_contracts_support_snapshot_workflow():
+    dataset = DatasetCreate(name="训练集", status="待整理")
+    assert dataset.remark == ""
+    assert DatasetMembersRequest(asset_ids=["a1", "a2"]).asset_ids == ["a1", "a2"]
+    assert DatasetPublishRequest(version="v1.1").release_note == ""
+
+
+def test_dataset_members_cannot_be_empty():
+    with pytest.raises(ValidationError):
+        DatasetMembersRequest(asset_ids=[])
+
+
+def test_model_can_target_dataset_version():
+    assert relation_type_error(
+        {"type": "model"}, {"kind": "dataset_version"}, "trained_on"
+    ) is None
+
+
+def test_dataset_model_link_accepts_version_and_remark():
+    link = DatasetModelLinkRequest(model_id="model-1", version_id="version-1", remark="初次训练")
+    assert link.model_id == "model-1"
+    assert link.version_id == "version-1"
+    assert link.remark == "初次训练"

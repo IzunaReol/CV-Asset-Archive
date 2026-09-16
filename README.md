@@ -16,6 +16,8 @@
 - 素材软删除、回收站还原和后台物理清理
 - 后台 ZIP 导出、任务进度和限时下载
 - 用户、角色、标签、格式和审计数据管理
+- 数据集成员管理、不可变版本、自定义版本号、版本对比及恢复
+- 数据集复制、模型版本关联和数据集导出
 - 白天模式与夜间模式
 
 ## 技术栈
@@ -102,7 +104,13 @@ npm ci
 npm run build
 ```
 
-隔离数据库的 API 流程测试使用 `scripts/runtime-e2e.py`。完整范围见[测试说明](docs/testing.md)和 [v1.0.0 发布检查单](docs/release-checklist.md)。
+隔离数据库的 API 流程测试使用 `scripts/runtime-e2e.py`。完整范围见[测试说明](docs/testing.md)和 [v1.1.0 发布检查单](docs/release-checklist.md)。
+
+## v1.1.0 升级
+
+升级前备份 MongoDB 和 MinIO，停止 API 与任务进程后更新代码。启动时自动执行集合到数据集的幂等迁移；素材对象文件不迁移。更新前端依赖并重新构建，详细操作见[数据集说明](docs/datasets.md)。回退 v1.0.0 前应恢复升级前数据库备份。
+
+已知限制及后续工作见[发布说明](docs/releases/v1.1.0.md)。
 
 ## 项目文档
 
