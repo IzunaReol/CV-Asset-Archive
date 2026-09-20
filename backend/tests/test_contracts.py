@@ -68,7 +68,9 @@ def test_relation_type_direction_is_validated():
         "RELATION_TYPE_MISMATCH",
         "对应标注关系必须由标注指向图片",
     )
-    assert relation_type_error({"type": "model"}, {"kind": "snapshot"}, "trained_on") is None
+    assert relation_type_error({"type": "model"}, {"kind": "snapshot"}, "trained_on")[0] == "RELATION_TYPE_MISMATCH"
+    assert relation_type_error({"type": "model"}, {"type": "image"}, "trained_on")[0] == "RELATION_TYPE_MISMATCH"
+    assert relation_type_error({"type": "image"}, {"kind": "dataset_version"}, "contains")[0] == "RELATION_TYPE_UNSUPPORTED"
 
 
 def test_tag_key_is_storage_safe():

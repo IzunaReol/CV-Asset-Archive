@@ -424,7 +424,7 @@ def parse_yolo_overlay(content: bytes, image_name: str) -> dict[str, Any]:
             center_x, center_y, width, height = map(float, parts[1:5])
             item: dict[str, Any] = {
                 "id": f"{PurePosixPath(label_file).name}:{index + 1}",
-                "label": classes[class_id] if 0 <= class_id < len(classes) else str(class_id),
+                "label": classes[class_id] if 0 <= class_id < len(classes) else "未命名类别",
                 "bbox": _box(center_x - width / 2, center_y - height / 2, width, height),
             }
             if len(parts) > 5:
@@ -452,7 +452,7 @@ def parse_yolo_text(
         center_x, center_y, width, height = map(float, parts[1:5])
         item: dict[str, Any] = {
             "id": f"{Path(image_name).stem}.txt:{index + 1}",
-            "label": class_names[class_id] if 0 <= class_id < len(class_names) else str(class_id),
+            "label": class_names[class_id] if 0 <= class_id < len(class_names) else "未命名类别",
             "bbox": _box(center_x - width / 2, center_y - height / 2, width, height),
         }
         if len(parts) > 5:

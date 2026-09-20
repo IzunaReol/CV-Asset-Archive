@@ -80,17 +80,20 @@ async def list_jobs(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     job_type: str | None = Query(None, alias="type"),
+    download_only: bool = Query(False),
 ) -> dict[str, Any]:
     query = (
         {}
         if "admin" in user["roles"] or "data_manager" in user["roles"]
         else {"owner_id": user["id"]}
     )
-    if job_type:
+    if download_only:
+        query["type"] = {"$in": ["export", "dataset_export"]}
+    elif job_type:
         query["type"] = job_type
     total = await db.jobs.count_documents(query)
     cursor = (
-        db.jobs.find(query).sort("created_at", -1).skip((page - 1) * page_size).limit(page_size)
+        db.jobs.find(query).sort([("created_at", -1), ("id", -1)]).skip((page - 1) * page_size).limit(page_size)
     )
     return {
         "items": [public_document(item) async for item in cursor],

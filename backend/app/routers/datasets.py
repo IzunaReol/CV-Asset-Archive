@@ -83,6 +83,37 @@ def _content_digest(items: list[dict[str, Any]]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+async def annotation_membership_changes(dataset_id: str, image_ids: list[str] | None = None) -> dict[str, list[str]]:
+    """Compare annotation memberships with effective image-to-annotation relations."""
+    if image_ids is None:
+        member_ids = await db.dataset_memberships.distinct("asset_id", {"dataset_id": dataset_id})
+        images = await db.assets.find({"id": {"$in": member_ids}, "type": "image", "archived_at": None}, {"id": 1}).to_list(length=None)
+        image_ids = [item["id"] for item in images]
+    relations = await db.relations.find({"relation_type": "annotates", "status": "active", "target_id": {"$in": image_ids}}, {"source_id": 1}).to_list(length=None)
+    candidate_ids = list({item["source_id"] for item in relations})
+    annotations = await db.assets.find({"id": {"$in": candidate_ids}, "type": "annotation", "archived_at": None}, {"id": 1}).to_list(length=None)
+    desired = {item["id"] for item in annotations}
+    existing_ids = await db.dataset_memberships.distinct("asset_id", {"dataset_id": dataset_id})
+    existing_annotations = await db.assets.find({"id": {"$in": existing_ids}, "type": "annotation"}, {"id": 1}).to_list(length=None)
+    current = {item["id"] for item in existing_annotations}
+    return {"added": sorted(desired - current), "removed": sorted(current - desired)}
+
+
+async def sync_annotation_memberships(dataset_id: str, actor_id: str) -> dict[str, list[str]]:
+    changes = await annotation_membership_changes(dataset_id)
+    for annotation_id in changes["added"]:
+        await db.dataset_memberships.update_one(
+            {"dataset_id": dataset_id, "asset_id": annotation_id},
+            {"$setOnInsert": {"id": new_id(), "dataset_id": dataset_id, "asset_id": annotation_id, "created_by": actor_id, "created_at": now()}},
+            upsert=True,
+        )
+    if changes["removed"]:
+        await db.dataset_memberships.delete_many({"dataset_id": dataset_id, "asset_id": {"$in": changes["removed"]}})
+    if changes["added"] or changes["removed"]:
+        await db.datasets.update_one({"id": dataset_id}, {"$set": {"updated_at": now()}})
+    return changes
+
+
 async def _dataset_summary(dataset: dict[str, Any]) -> dict[str, Any]:
     pipeline = [
         {"$match": {"dataset_id": dataset["id"]}},
@@ -182,6 +213,7 @@ async def copy_dataset(dataset_id: str, body: DatasetCopyRequest, request: Reque
                     batch = []
             if batch:
                 await db.dataset_memberships.insert_many(batch)
+            await sync_annotation_memberships(copied["id"], user["id"])
     except Exception:
         await db.dataset_memberships.delete_many({"dataset_id": copied["id"]})
         await db.datasets.delete_one({"id": copied["id"]})
@@ -249,9 +281,9 @@ async def delete_dataset(dataset_id: str, request: Request, user: WriteUser) -> 
 
 
 @router.get("/{dataset_id}/members")
-async def list_members(dataset_id: str, user: ReadUser, page: int = Query(1, ge=1), page_size: int = Query(50, ge=0, le=200), q: str = "", asset_type: list[str] = Query(default=[]), tag: list[str] = Query(default=[]), match: str = Query("all", pattern="^(all|any)$"), no_tags: bool = False) -> dict[str, Any]:
+async def list_members(dataset_id: str, user: ReadUser, page: int = Query(1, ge=1), page_size: int = Query(50, ge=0, le=200), q: str = "", asset_type: list[str] = Query(default=[]), tag: list[str] = Query(default=[]), match: str = Query("all", pattern="^(all|any)$"), no_tags: bool = False, ids_only: bool = False) -> dict[str, Any]:
     await _get_dataset(dataset_id)
-    clauses = [{"archived_at": None}]
+    clauses = [{"archived_at": None}, {"type": {"$ne": "annotation"}}]
     if q:
         import re
         clauses.append({"$or": [{"name": {"$regex": re.escape(q), "$options": "i"}}, {"remark": {"$regex": re.escape(q), "$options": "i"}}]})
@@ -283,6 +315,8 @@ async def list_members(dataset_id: str, user: ReadUser, page: int = Query(1, ge=
         pipeline.extend([{ "$skip": (page - 1) * page_size}, {"$limit": page_size}])
     cursor = await db.dataset_memberships.aggregate(pipeline)
     asset_documents = await cursor.to_list(length=None)
+    if ids_only:
+        return {"items": [{"id": item["id"]} for item in asset_documents], "page": page, "page_size": page_size, "total": total}
     assets: dict[str, dict[str, Any]] = {}
     for item in asset_documents:
         result = public_document(item) or {}
@@ -294,7 +328,23 @@ async def list_members(dataset_id: str, user: ReadUser, page: int = Query(1, ge=
         else:
             result["preview_url"] = None
         assets[item["id"]] = result
+    image_ids = [item["id"] for item in assets.values() if item.get("type") == "image"]
+    annotated_ids = set(await db.relations.distinct("target_id", {
+        "target_id": {"$in": image_ids}, "relation_type": "annotates", "status": "active",
+    })) if image_ids else set()
+    for item in assets.values():
+        item["has_annotation"] = item["id"] in annotated_ids
     return {"items": list(assets.values()), "page": page, "page_size": page_size, "total": total}
+
+
+@router.post("/{dataset_id}/members/status")
+async def member_status(dataset_id: str, body: DatasetMembersRequest, user: ReadUser) -> dict[str, Any]:
+    await _get_dataset(dataset_id)
+    ids = list(dict.fromkeys(body.asset_ids))
+    existing = await db.dataset_memberships.distinct("asset_id", {
+        "dataset_id": dataset_id, "asset_id": {"$in": ids},
+    }) if ids else []
+    return {"existing_ids": existing}
 
 
 @router.post("/{dataset_id}/members")
@@ -303,10 +353,11 @@ async def add_members(dataset_id: str, body: DatasetMembersRequest, request: Req
     await _get_dataset(dataset_id)
     ids = list(dict.fromkeys(body.asset_ids))
     assets = await db.assets.find({"id": {"$in": ids}, "archived_at": None}).to_list(length=len(ids))
-    valid = [item for item in assets if item.get("type") != "model"]
+    valid = [item for item in assets if item.get("type") not in {"model", "annotation"}]
     invalid_ids = sorted(set(ids) - {item["id"] for item in valid})
     timestamp = now()
     added = 0
+    added_ids: list[str] = []
     for asset in valid:
         result = await db.dataset_memberships.update_one(
             {"dataset_id": dataset_id, "asset_id": asset["id"]},
@@ -314,10 +365,39 @@ async def add_members(dataset_id: str, body: DatasetMembersRequest, request: Req
             upsert=True,
         )
         added += int(result.upserted_id is not None)
+        if result.upserted_id is not None:
+            added_ids.append(asset["id"])
+    try:
+        annotation_changes = await sync_annotation_memberships(dataset_id, user["id"])
+    except Exception:
+        if added_ids:
+            await db.dataset_memberships.delete_many({"dataset_id": dataset_id, "asset_id": {"$in": added_ids}})
+        await sync_annotation_memberships(dataset_id, user["id"])
+        raise
     if added:
         await db.datasets.update_one({"id": dataset_id}, {"$set": {"updated_at": now()}})
     await record_audit(actor=user, action="dataset.members_added", object_type="dataset", object_id=dataset_id, request_id=request.state.request_id, changes={"added": added, "invalid_ids": invalid_ids})
-    return {"added": added, "unchanged": len(valid) - added, "invalid_ids": invalid_ids}
+    return {"added": added, "unchanged": len(valid) - added, "invalid_ids": invalid_ids, "annotations": annotation_changes}
+
+
+@router.post("/{dataset_id}/members/preview")
+async def preview_members(dataset_id: str, body: DatasetMembersRequest, user: ReadUser, action: str = Query("add", pattern="^(add|remove)$")) -> dict[str, Any]:
+    await _get_dataset(dataset_id)
+    requested = set(body.asset_ids)
+    assets = await db.assets.find({"id": {"$in": list(requested)}, "archived_at": None}).to_list(length=None)
+    valid = {item["id"] for item in assets if item.get("type") not in {"model", "annotation"}}
+    current = set(await db.dataset_memberships.distinct("asset_id", {"dataset_id": dataset_id}))
+    if action == "add":
+        future = current | valid
+        changed = sorted(valid - current)
+    else:
+        future = current - valid
+        changed = sorted(valid & current)
+    images = await db.assets.find({"id": {"$in": list(future)}, "type": "image", "archived_at": None}, {"id": 1}).to_list(length=None)
+    annotations = await annotation_membership_changes(dataset_id, [item["id"] for item in images])
+    annotation_ids = [*annotations["added"], *annotations["removed"]]
+    annotation_names = {item["id"]: item.get("name", item["id"]) for item in await db.assets.find({"id": {"$in": annotation_ids}}, {"id": 1, "name": 1}).to_list(length=None)}
+    return {"action": action, "asset_ids": changed, "invalid_ids": sorted(requested - valid), "annotations": annotations, "annotation_names": annotation_names}
 
 
 @router.delete("/{dataset_id}/members")
@@ -325,11 +405,21 @@ async def add_members(dataset_id: str, body: DatasetMembersRequest, request: Req
 async def remove_members(dataset_id: str, body: DatasetMembersRequest, request: Request, user: WriteUser) -> dict[str, Any]:
     await _get_dataset(dataset_id)
     ids = list(set(body.asset_ids))
+    if await db.assets.find_one({"id": {"$in": ids}, "type": "annotation"}):
+        raise AppError(422, "ANNOTATION_MEMBERSHIP_DERIVED", "标注由图片关联关系决定，不能单独移出")
+    removed_rows = await db.dataset_memberships.find({"dataset_id": dataset_id, "asset_id": {"$in": ids}}).to_list(length=None)
     result = await db.dataset_memberships.delete_many({"dataset_id": dataset_id, "asset_id": {"$in": ids}})
+    try:
+        annotation_changes = await sync_annotation_memberships(dataset_id, user["id"])
+    except Exception:
+        if removed_rows:
+            await db.dataset_memberships.insert_many(removed_rows)
+        await sync_annotation_memberships(dataset_id, user["id"])
+        raise
     if result.deleted_count:
         await db.datasets.update_one({"id": dataset_id}, {"$set": {"updated_at": now()}})
     await record_audit(actor=user, action="dataset.members_removed", object_type="dataset", object_id=dataset_id, request_id=request.state.request_id, changes={"removed": result.deleted_count})
-    return {"removed": result.deleted_count}
+    return {"removed": result.deleted_count, "annotations": annotation_changes}
 
 
 @router.post("/{dataset_id}/versions", status_code=201)
@@ -438,23 +528,23 @@ async def add_dataset_model(
     if model is None:
         raise AppError(404, "MODEL_NOT_FOUND", "模型不存在或已删除")
 
-    memberships = await db.dataset_version_memberships.find(
-        {"version_id": body.version_id}, {"asset_id": 1}
-    ).to_list(length=100000)
-    target_ids = [body.version_id, *[item["asset_id"] for item in memberships]]
     previous_rows = await db.relations.find(
         {
             "source_id": body.model_id,
-            "target_id": {"$in": target_ids},
+            "target_id": body.version_id,
             "relation_type": "trained_on",
         }
-    ).sort("revision", DESCENDING).to_list(length=len(target_ids) * 5)
+    ).sort("revision", DESCENDING).to_list(length=5)
     previous_by_target: dict[str, dict[str, Any]] = {}
     for relation in previous_rows:
         previous_by_target.setdefault(relation["target_id"], relation)
 
     timestamp = now()
-    link_id = new_id()
+    previous_primary = previous_by_target.get(body.version_id)
+    link_id = (
+        ((previous_primary or {}).get("provenance") or {}).get("dataset_model_link_id")
+        or new_id()
+    )
     provenance = {
         "source": "dataset",
         "remark": body.remark,
@@ -464,14 +554,10 @@ async def add_dataset_model(
     }
     created: list[dict[str, Any]] = []
     existing: list[str] = []
-    for target_id in target_ids:
+    for target_id in [body.version_id]:
         previous = previous_by_target.get(target_id)
         if previous and previous.get("status") == "active":
             existing.append(target_id)
-            if target_id == body.version_id:
-                await db.relations.update_one(
-                    {"id": previous["id"]}, {"$set": {"provenance": provenance}}
-                )
             continue
         created.append(
             {
@@ -489,6 +575,18 @@ async def add_dataset_model(
         )
     if created:
         await db.relations.insert_many(created)
+    if previous_primary and previous_primary.get("status") == "active":
+        await db.relations.update_many(
+            {
+                "source_id": body.model_id,
+                "relation_type": "trained_on",
+                "status": "active",
+                "provenance.dataset_id": dataset_id,
+                "provenance.dataset_version_id": body.version_id,
+            },
+            {"$set": {"provenance": provenance}},
+        )
+        previous_primary["provenance"] = provenance
     primary = next(
         (item for item in created if item["target_id"] == body.version_id),
         previous_by_target.get(body.version_id),
@@ -505,7 +603,7 @@ async def add_dataset_model(
         "relation": public_document(primary),
         "created": len(created),
         "existing": len(existing),
-        "member_relations": len(target_ids) - 1,
+        "member_relations": 0,
     }
 
 
@@ -525,14 +623,7 @@ async def remove_dataset_model(
     )
     if version is None:
         raise AppError(400, "DATASET_MODEL_LINK_INVALID", "该关系不属于当前数据集")
-    link_id = (primary.get("provenance") or {}).get("dataset_model_link_id")
     query: dict[str, Any] = {"id": relation_id, "status": "active"}
-    if link_id:
-        query = {
-            "source_id": primary["source_id"],
-            "status": "active",
-            "provenance.dataset_model_link_id": link_id,
-        }
     timestamp = now()
     changes = {
         "status": "revoked",
@@ -600,8 +691,10 @@ async def restore_version(dataset_id: str, body: DatasetRestoreRequest, request:
     timestamp = now()
     try:
         await db.dataset_memberships.delete_many({"dataset_id": dataset_id})
-        if members:
-            await db.dataset_memberships.insert_many([{"id": new_id(), "dataset_id": dataset_id, "asset_id": item["asset_id"], "created_by": user["id"], "created_at": timestamp} for item in members])
+        workset_members = [{"id": new_id(), "dataset_id": dataset_id, "asset_id": item["asset_id"], "created_by": user["id"], "created_at": timestamp} for item in members if item["snapshot"].get("type") != "annotation"]
+        if workset_members:
+            await db.dataset_memberships.insert_many(workset_members)
+        await sync_annotation_memberships(dataset_id, user["id"])
         await db.datasets.update_one({"id": dataset_id}, {"$set": {"updated_at": timestamp}})
     except Exception:
         await db.dataset_memberships.delete_many({"dataset_id": dataset_id})

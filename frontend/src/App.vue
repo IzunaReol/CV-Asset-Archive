@@ -41,6 +41,10 @@ const mediaViewerZoom = ref(1)
 const mediaViewerAnnotations = ref(true)
 const detailSheetScrolling = ref(false)
 let detailScrollTimer: number | null = null
+const relationPreviewScrolling = ref(false)
+let relationPreviewScrollTimer: number | null = null
+const transientScrollbarTimers = new Map<Element, number>()
+let pageScrollbarTimer: number | null = null
 const toast = ref('')
 const toastKind = ref<'success'|'error'>('success')
 const confirmOpen = ref(false)
@@ -58,6 +62,7 @@ const uploadFiles = ref<File[]>([])
 const uploadTypeOverrides = ref<Record<string,string>>({})
 const uploadBusy = ref(false)
 const uploadProgress = ref(0)
+const uploadCompleted = ref(0)
 const uploadError = ref('')
 const batchTagOpen = ref(false)
 const batchTagAction = ref<'add'|'remove'>('add')
@@ -68,13 +73,8 @@ const uploadTags = ref<Record<string,string[]>>({})
 const remarkDraft = ref('')
 const remarkSaving = ref(false)
 const revokeReason = ref('')
-const relationTargetId = ref('')
-const relationTargetName = ref('')
-const relationType = ref('contains')
-const relationWorkflow = ref<'auto'|'model'|'manual'>('auto')
-const relationSourceAssets = ref<any[]>([])
+const relationWorkflow = ref<'auto'|'model'>('auto')
 const relationPickerOpen = ref(false)
-const relationPickerMode = ref<'source'|'target'>('source')
 const relationPickerItems = ref<any[]>([])
 const relationPickerQuery = ref('')
 const relationPickerType = ref('')
@@ -86,12 +86,15 @@ const relationPickerNoTags = ref(false)
 const relationPickerMatch = ref<'all'|'any'>('all')
 const relationPickerRules = ref<FilterRule[]>([])
 const relationPickerSelection = ref<any[]>([])
-const relationPickerContext = ref<'source'|'target'|'auto-image'|'auto-annotation'|'model'|'model-target'>('source')
+const relationPickerContext = ref<'model'|'model-target'>('model')
 const relationPickerOriginPage = ref<Page>('relations')
-const autoImages = ref<any[]>([])
-const autoAnnotations = ref<any[]>([])
 const selectedModel = ref<any>(null)
 const modelTargets = ref<any[]>([])
+const relationDatasets = ref<any[]>([])
+const relationVersions = ref<any[]>([])
+const relationDatasetId = ref('')
+const relationVersionId = ref('')
+const relationSelectOpen = ref<'dataset'|'version'|''>('')
 const relationPreviewOpen = ref(false)
 const relationPreviewKind = ref<'auto'|'general'>('general')
 const relationPreview = ref<any>(null)
@@ -104,6 +107,9 @@ const lineagePickerTotal = ref(0)
 const lineagePickerLoading = ref(false)
 const jobRows = ref<any[]>([])
 const jobTotal = ref(0)
+const jobPage = ref(1)
+const jobPageSize = ref(20)
+const jobPages = computed(() => Math.max(1, Math.ceil(jobTotal.value / jobPageSize.value)))
 let jobPoll: number | null = null
 const tagRows = ref<any[]>([])
 const demoState = ref<'normal' | 'loading' | 'empty' | 'error' | 'forbidden'>('normal')
@@ -143,6 +149,7 @@ const userOpen = ref(false)
 const editingUserId = ref<string|null>(null)
 const newUser = ref({username:'',password:'',role:'viewer',status:'active'})
 const formatRows = ref<any[]>([])
+const formatsLoaded = ref(false)
 const formatOpen = ref(false)
 const editingFormatType = ref('')
 const newFormatType = ref('')
@@ -164,13 +171,7 @@ const assetTypeLabels: Record<string,string> = { image:'图片', video:'视频',
 const manageableFormatTypes = ['image','video','annotation','model','archive','image_annotation']
 const availableFormatTypes = computed(() => manageableFormatTypes.filter(type => !formatRows.value.some(row => row.asset_type === type)))
 const relationTypeLabels: Record<string,string> = { annotates:'对应标注', contains:'属于数据集', trained_on:'用于训练', produced_by:'由训练产生', version_of:'版本关系' }
-const manualRelationHints: Record<string,string> = {
-  contains:'将多项素材关联到一个目标资产',
-  annotates:'将一个或多个标注关联到一张图片',
-  trained_on:'将模型关联到训练所使用的素材',
-  produced_by:'记录资产由哪个训练结果产生',
-  version_of:'将一个或多个新版本关联到原始资产',
-}
+const historyRelationTypeLabels: Record<string,string> = {annotates:'对应标注',trained_on:'用于训练'}
 const jobTypeLabels: Record<string,string> = { export:'素材导出', dataset_export:'数据集导出' }
 const jobStateLabels: Record<string,string> = { queued:'等待处理', running:'处理中', succeeded:'已完成', failed:'失败' }
 const roleLabels: Record<string,string> = { admin:'管理员', data_manager:'数据管理员', annotator:'标注员', ml_engineer:'算法工程师', viewer:'只读访客' }
@@ -184,8 +185,7 @@ const lineageEdges = ref<any[]>([])
 const lineageLoading = ref(false)
 const lineageView = ref<'graph'|'list'>('graph')
 const lineageTypeFilter = ref('')
-const lineageRelationFilter = ref('')
-const lineageExpanded = ref<'images'|'annotations'|'datasets'|''>('')
+const lineageExpanded = ref('')
 const effectiveAssetPageSize = computed(() => assetPageSize.value === 0 ? 200 : assetPageSize.value)
 const assetPages = computed(() => assetPageSize.value === 0 ? 1 : Math.max(1, Math.ceil(assetFilteredTotal.value / assetPageSize.value)))
 watch(skin, (value) => localStorage.setItem('cv-archive-skin', value))
@@ -202,57 +202,63 @@ const pagedRelations = computed(() => relationHistory.value)
 const relationPages = computed(() => Math.max(1, Math.ceil(relationTotal.value / relationPageSize.value)))
 const activeRelation = computed(() => relationDetailData.value || relationHistory.value.find((item) => item.id === relationDetailId.value) || lineageEdges.value.find((item:any) => item.id === relationDetailId.value))
 const allCurrentSelected = computed(() => Boolean(filtered.value.length) && filtered.value.every(asset => selected.value.includes(asset.id)))
-const relationSourceIds = computed(() => relationSourceAssets.value.map(item => String(item.id)))
 const relationPickerSelectedIds = computed(() => relationPickerSelection.value.map(item => String(item.id)))
 const relationPickerPages = computed(() => relationPickerPageSize.value === 0 ? 1 : Math.max(1,Math.ceil(relationPickerTotal.value/relationPickerPageSize.value)))
-const filteredLineageEdges = computed(() => lineageEdges.value.filter((edge:any) => (!lineageRelationFilter.value || edge.relation_type===lineageRelationFilter.value) && (!lineageTypeFilter.value || edge.source_type===lineageTypeFilter.value || edge.target_type===lineageTypeFilter.value)))
-const lineageGroups = computed(() => Object.entries(filteredLineageEdges.value.reduce((groups:Record<string,any[]>,edge:any) => { const key=String(edge.source_id)===String(lineageRoot.value?.id) ? edge.target_type : edge.source_type; (groups[key || 'asset'] ||= []).push(edge); return groups },{})))
-const lineageFlowItems = computed(() => {
-  const rootId=String(lineageRoot.value?.id||'')
-  const items=new Map<string,any>()
-  for(const edge of filteredLineageEdges.value){
-    for(const side of ['source','target'] as const){
-      const id=String(edge[`${side}_id`]||'')
-      if(!id||id===rootId||items.has(id)) continue
-      items.set(id,{id,name:edge[side],type:edge[`${side}_type`]||'asset',typeLabel:edge[`${side}Type`]||assetTypeLabels[edge[`${side}_type`]]||'素材',relation:edge.relation,edge})
-    }
-  }
-  return [...items.values()]
-})
-const lineageDataEdges = computed(() => lineageFlowItems.value.filter((item:any)=>item.type!=='model'))
-const lineageModelEdges = computed(() => lineageFlowItems.value.filter((item:any)=>item.type==='model'))
+const filteredLineageEdges = computed(() => lineageEdges.value.filter((edge:any) => {
+  if (!lineageTypeFilter.value) return true
+  if (lineageTypeFilter.value === 'dataset_version') return edge.relation_type === 'trained_on' && edge.target_type === 'dataset_version'
+  return edge.target_type === lineageTypeFilter.value && (edge.derived || edge.relation_type === 'annotates')
+}))
+const lineageGroups = computed(() => Object.entries(filteredLineageEdges.value.reduce((groups:Record<string,any[]>,edge:any) => { const key=edge.target_type || 'asset'; (groups[key] ||= []).push(edge); return groups },{})))
 const lineageNodeMap = computed(() => new Map(lineageNodes.value.map((item:any)=>[String(item.id),item])))
 const lineageRootEdges = computed(() => {
   const rootId=String(lineageRoot.value?.id||'')
-  return filteredLineageEdges.value.filter((edge:any)=>String(edge.source_id)===rootId&&edge.relation_type==='trained_on')
+  return lineageEdges.value.filter((edge:any)=>String(edge.source_id)===rootId&&edge.relation_type==='trained_on')
 })
-const lineageRootAssetIds = computed(() => new Set(lineageRootEdges.value.filter((edge:any)=>['image','video','annotation','archive','other'].includes(edge.target_type)).map((edge:any)=>String(edge.target_id))))
-const lineageRelevantAnnotationEdges = computed(() => filteredLineageEdges.value.filter((edge:any)=>edge.relation_type==='annotates'&&(lineageRootAssetIds.value.has(String(edge.source_id))||lineageRootAssetIds.value.has(String(edge.target_id)))))
-const lineageAnnotatedImageIds = computed(() => new Set(lineageRelevantAnnotationEdges.value.filter((edge:any)=>edge.target_type==='image').map((edge:any)=>String(edge.target_id))))
-const lineageAnnotationIds = computed(() => new Set([
-  ...lineageRootEdges.value.filter((edge:any)=>edge.target_type==='annotation').map((edge:any)=>String(edge.target_id)),
-  ...lineageRelevantAnnotationEdges.value.filter((edge:any)=>edge.source_type==='annotation').map((edge:any)=>String(edge.source_id)),
-]))
-const lineageAnnotatedImages = computed(() => lineageFlowItems.value.filter((item:any)=>item.type==='image'&&lineageAnnotatedImageIds.value.has(String(item.id))))
-const lineageAnnotations = computed(() => lineageFlowItems.value.filter((item:any)=>item.type==='annotation'&&lineageAnnotationIds.value.has(String(item.id))))
-const lineageDatasets = computed(() => lineageRootEdges.value.filter((edge:any)=>['dataset','dataset_version','snapshot','manual'].includes(edge.target_type)).map((edge:any)=>({id:String(edge.target_id),name:edge.target,type:edge.target_type,typeLabel:edge.targetType||assetTypeLabels[edge.target_type]||'数据集',relation:edge.relation,edge,node:lineageNodeMap.value.get(String(edge.target_id))||{}})))
-const lineageDisplayedNodeCount = computed(() => 1 + lineageAnnotatedImages.value.length + lineageAnnotations.value.length + lineageDatasets.value.length)
+const lineageVersionIds = computed(() => new Set(lineageEdges.value.filter((edge:any)=>String(edge.source_id)===String(lineageRoot.value?.id)&&edge.relation_type==='trained_on'&&edge.target_type==='dataset_version').map((edge:any)=>String(edge.target_id))))
+const lineageMemberEdges = computed(() => filteredLineageEdges.value.filter((edge:any)=>edge.derived && lineageVersionIds.value.has(String(edge.source_id))))
+const lineageAssetGroups = computed(() => ([
+  {key:'image',label:'图片文件'},
+  {key:'annotation',label:'标注文件'},
+  {key:'video',label:'视频文件'},
+  {key:'archive',label:'压缩文件'},
+  {key:'other',label:'其他文件'},
+].filter(group => !lineageTypeFilter.value || lineageTypeFilter.value === group.key).map(group => {
+  const items = new Map<string,any>()
+  for (const edge of lineageMemberEdges.value.filter((item:any) => item.target_type === group.key)) {
+    const id = String(edge.target_id)
+    if (!items.has(id)) items.set(id,{id,name:edge.target,type:group.key,edge,sources:[]})
+    const node = lineageNodeMap.value.get(String(edge.source_id)) || {}
+    items.get(id).sources.push({id:String(edge.source_id),name:node.dataset_name || edge.source,version:node.version || '未知版本',edgeId:edge.id})
+  }
+  return {...group,items:[...items.values()]}
+})).filter(group => group.items.length > 0))
+const lineageDatasets = computed(() => lineageTypeFilter.value && lineageTypeFilter.value !== 'dataset_version' ? [] : lineageRootEdges.value.filter((edge:any)=>['dataset','dataset_version','snapshot','manual'].includes(edge.target_type)).map((edge:any)=>({id:String(edge.target_id),name:edge.target,type:edge.target_type,typeLabel:edge.targetType||assetTypeLabels[edge.target_type]||'数据集',relation:edge.relation,edge,node:lineageNodeMap.value.get(String(edge.target_id))||{}})))
+const lineageDisplayedNodeCount = computed(() => 1 + lineageAssetGroups.value.reduce((count,group)=>count+group.items.length,0) + lineageDatasets.value.length)
 const lineageDisplayedRelationCount = computed(() => new Set([
   ...lineageDatasets.value.map((item:any)=>item.edge.id),
-  ...lineageAnnotatedImages.value.map((item:any)=>item.edge.id),
-  ...lineageAnnotations.value.map((item:any)=>item.edge.id),
+  ...lineageAssetGroups.value.flatMap(group=>group.items.flatMap((item:any)=>item.sources.map((source:any)=>source.edgeId))),
 ]).size)
 
-function toggleLineageGroup(group:'images'|'annotations'|'datasets') {
+function toggleLineageGroup(group:string) {
   lineageExpanded.value=lineageExpanded.value===group?'':group
+}
+function resetLineagePage() {
+  lineageRoot.value = null
+  lineageNodes.value = []
+  lineageEdges.value = []
+  lineageTypeFilter.value = ''
+  lineageExpanded.value = ''
+  lineageView.value = 'graph'
+  selectedModel.value = null
 }
 const effectiveTrashPageSize = computed(() => trashPageSize.value === 0 ? 200 : trashPageSize.value)
 const trashPages = computed(() => trashPageSize.value === 0 ? 1 : Math.max(1, Math.ceil(trashTotal.value / trashPageSize.value)))
 const allTrashSelected = computed(() => Boolean(trashAssets.value.length) && trashAssets.value.every(asset => trashSelected.value.includes(asset.id)))
 const storageUsedPercent = computed(() => storageStats.value.total ? Math.round(storageStats.value.used / storageStats.value.total * 100) : 0)
 const storageFreePercent = computed(() => storageStats.value.total ? 100 - storageUsedPercent.value : 0)
-const confirmTitle = computed(() => confirmMessage.value.includes('还原') ? '还原确认' : '删除确认')
-const confirmActionText = computed(() => confirmMessage.value.includes('还原') ? '确认还原' : confirmMessage.value.includes('清空回收站') ? '确认清空' : '确认删除')
+const confirmTitle = computed(() => confirmMessage.value.includes('撤销关联') ? '撤销确认' : confirmMessage.value.includes('还原') ? '还原确认' : '删除确认')
+const confirmActionText = computed(() => confirmMessage.value.includes('撤销关联') ? '确认撤销' : confirmMessage.value.includes('还原') ? '确认还原' : confirmMessage.value.includes('清空回收站') ? '确认清空' : '确认删除')
 
 function toggleSelect(id: AssetId) {
   selected.value = selected.value.includes(id) ? selected.value.filter((item) => item !== id) : [...selected.value, id]
@@ -328,7 +334,7 @@ function setPage(next: Page) {
   detailId.value = null; detailAsset.value = null
   relationDetailId.value = null; relationDetailData.value = null; revokeReason.value = ''
   if (next === 'datasets') void loadTags()
-  if (next === 'relations') void loadRelations()
+  if (next === 'relations') { void loadRelations(); void loadRelationDatasets() }
   if (next === 'downloads') { void loadJobs(); startJobPolling() }
   if (next === 'trash') void loadTrash()
   if (next === 'tags') void loadTags()
@@ -403,7 +409,7 @@ function openAssociatedDataset(datasetId:string) {
 }
 
 function relationOriginText(source:string) {
-  return ({cvat_import:'导入（图片+标注）','filename-match':'自动关联',web:'手动创建','web-model':'模型关联'} as Record<string,string>)[source] || source || '未记录'
+  return ({cvat_import:'导入（图片+标注）','filename-match':'自动关联',web:'手动创建','web-model':'模型关联',dataset:'数据集版本关联'} as Record<string,string>)[source] || source || '未记录'
 }
 
 async function openRelationDetail(item:any) {
@@ -494,7 +500,7 @@ async function openLineage(asset:any) {
 
 async function loadRelationPicker() {
   relationPickerLoading.value = true
-  const lockedType = ({'auto-image':'image','auto-annotation':'annotation',model:'model'} as Record<string,string>)[relationPickerContext.value]
+  const lockedType = relationPickerContext.value === 'model' ? 'model' : ''
   const selectedType = lockedType || relationPickerType.value
   const pageSize = relationPickerPageSize.value === 0 ? 200 : relationPickerPageSize.value
   const params = new URLSearchParams({page:String(relationPickerPage.value),page_size:String(pageSize),sort:'created_at',direction:'desc',match:relationPickerMatch.value})
@@ -524,10 +530,6 @@ async function loadRelationPicker() {
 }
 
 function selectionForPickerContext(context:string) {
-  if(context==='source') return relationSourceAssets.value
-  if(context==='target') return relationTargetId.value ? [{id:relationTargetId.value,name:relationTargetName.value}] : []
-  if(context==='auto-image') return autoImages.value
-  if(context==='auto-annotation') return autoAnnotations.value
   if(context==='model') return selectedModel.value ? [selectedModel.value] : []
   return modelTargets.value
 }
@@ -536,19 +538,13 @@ function isPickerItemSelf(item:any) {
   const id = String(item?.id || '')
   if (!id) return false
   if (relationPickerContext.value === 'model-target') return id === String(selectedModel.value?.id || '')
-  if (relationPickerContext.value === 'target') return relationSourceIds.value.includes(id)
-  if (relationPickerContext.value === 'source') return id === String(relationTargetId.value || '')
   if (relationPickerContext.value === 'model') return modelTargets.value.some(target => String(target.id) === id)
   return false
 }
 
 async function storePickerSelection() {
   const selectedItems=relationPickerSelection.value.filter(item=>!isPickerItemSelf(item))
-  if(relationPickerContext.value==='source') relationSourceAssets.value=selectedItems
-  else if(relationPickerContext.value==='target') { const item=selectedItems[0]; relationTargetId.value=item ? String(item.id) : ''; relationTargetName.value=item?.name || '' }
-  else if(relationPickerContext.value==='auto-image') autoImages.value=selectedItems
-  else if(relationPickerContext.value==='auto-annotation') autoAnnotations.value=selectedItems
-  else if(relationPickerContext.value==='model') {
+  if(relationPickerContext.value==='model') {
     selectedModel.value=selectedItems[0] || null
     if (selectedModel.value) modelTargets.value=modelTargets.value.filter(item=>String(item.id)!==String(selectedModel.value.id))
     if (selectedModel.value && relationPickerOriginPage.value === 'lineage') await openLineage(selectedModel.value)
@@ -560,7 +556,6 @@ async function storePickerSelection() {
 function openAdvancedRelationPicker(context:typeof relationPickerContext.value) {
   relationPickerOriginPage.value=page.value
   relationPickerContext.value=context
-  relationPickerMode.value=context==='target'||context==='model'?'target':'source'
   relationPickerQuery.value = ''
   relationPickerType.value = ''
   relationPickerNoTags.value=false
@@ -571,31 +566,6 @@ function openAdvancedRelationPicker(context:typeof relationPickerContext.value) 
   relationPickerSelection.value=[...selectionForPickerContext(context)]
   relationPickerOpen.value = true
   void loadRelationPicker()
-}
-
-function openRelationPicker(mode:'source'|'target') { openAdvancedRelationPicker(mode) }
-
-function removeRelationSource(id:string) {
-  relationSourceAssets.value=relationSourceAssets.value.filter(item=>String(item.id)!==String(id))
-}
-
-function clearManualRelationSelection() {
-  relationSourceAssets.value=[]
-  relationTargetId.value=''
-  relationTargetName.value=''
-}
-
-function toggleRelationSource(item:any) {
-  const id = String(item.id)
-  relationSourceAssets.value = relationSourceIds.value.includes(id)
-    ? relationSourceAssets.value.filter(asset => String(asset.id) !== id)
-    : [...relationSourceAssets.value, item]
-}
-
-function chooseRelationTarget(item:any) {
-  relationTargetId.value = String(item.id)
-  relationTargetName.value = item.name
-  relationPickerOpen.value = false
 }
 
 async function loadLineagePicker() {
@@ -658,7 +628,7 @@ function selectedTagDefinition(key:string) {
 function togglePickerItem(item:any) {
   if (isPickerItemSelf(item)) { notifyError('不能选择素材自身'); return }
   const id=String(item.id)
-  if(relationPickerContext.value==='target'||relationPickerContext.value==='model') relationPickerSelection.value=[item]
+  if(relationPickerContext.value==='model') relationPickerSelection.value=[item]
   else relationPickerSelection.value=relationPickerSelectedIds.value.includes(id) ? relationPickerSelection.value.filter(asset=>String(asset.id)!==id) : [...relationPickerSelection.value,item]
 }
 
@@ -835,35 +805,50 @@ function removeUploadFile(file:File) {
 }
 function openUpload() {
   void loadFormats()
-  uploadFiles.value = []; uploadTypeOverrides.value = {}; uploadTags.value={}; uploadError.value = ''; uploadProgress.value = 0; uploadOpen.value = true
+  uploadFiles.value = []; uploadTypeOverrides.value = {}; uploadTags.value={}; uploadError.value = ''; uploadProgress.value = 0; uploadCompleted.value = 0; uploadOpen.value = true
 }
 
 async function uploadAsset() {
   if (!uploadFiles.value.length) { uploadError.value = '请选择文件'; return }
   const unresolved = uploadFiles.value.filter(file => !resolvedUploadType(file))
   if (unresolved.length) { uploadError.value = `请为 ${unresolved.map(file=>file.name).join('、')} 选择资产类型`; return }
-  uploadBusy.value = true; uploadProgress.value = 5; uploadError.value = ''
+  uploadBusy.value = true; uploadProgress.value = 0; uploadCompleted.value = 0; uploadError.value = ''
   const files = [...uploadFiles.value]
   const failed:Array<{file:File;message:string}> = []
   let succeeded = 0
   let hasDatasetPackage = false
   try {
-    for (let index=0; index<files.length; index++) {
-      const file = files[index]
-      try {
-        const session = await api.initUpload({filename:file.name,size:file.size,mime_type:file.type || 'application/octet-stream',asset_type:resolvedUploadType(file)})
-        if (session.upload_required) {
-          const response = await fetch(session.upload_url, {method:'PUT',body:file})
-          if (!response.ok) throw new Error('文件上传到对象存储失败')
+    let completed = 0
+    const uploadGroup = async (group: File[], concurrency: number) => {
+      const queue = [...group]
+      const uploadOne = async () => {
+        while (queue.length) {
+          const file = queue.shift()!
+          try {
+            const session = await api.initUpload({filename:file.name,size:file.size,mime_type:file.type || 'application/octet-stream',asset_type:resolvedUploadType(file)})
+            if (session.upload_required) {
+              const response = await fetch(session.upload_url, {method:'PUT',body:file})
+              if (!response.ok) throw new Error('文件上传到对象存储失败')
+            }
+            await api.completeUpload({upload_session_id:session.upload_session_id,tags:{...uploadTags.value}})
+            succeeded += 1
+            hasDatasetPackage ||= resolvedUploadType(file) === 'image_annotation'
+          } catch (error) {
+            failed.push({file,message:error instanceof Error ? error.message : '上传失败'})
+          }
+          completed += 1
+          uploadCompleted.value = completed
+          uploadProgress.value = Math.round((completed / files.length) * 100)
         }
-        await api.completeUpload({upload_session_id:session.upload_session_id,tags:{...uploadTags.value}})
-        succeeded += 1
-        hasDatasetPackage ||= resolvedUploadType(file) === 'image_annotation'
-      } catch (error) {
-        failed.push({file,message:error instanceof Error ? error.message : '上传失败'})
       }
-      uploadProgress.value = Math.round(((index + 1) / files.length) * 100)
+      await Promise.all(Array.from({length:Math.min(concurrency,group.length)},()=>uploadOne()))
     }
+    // Small assets spend more time on per-file requests than on transfer.
+    // Keep large uploads bounded so several 10 GB files cannot saturate the host.
+    const smallFiles = files.filter(file => file.size < 512 * 1024 * 1024)
+    const largeFiles = files.filter(file => file.size >= 512 * 1024 * 1024)
+    await uploadGroup(smallFiles, 6)
+    await uploadGroup(largeFiles, 2)
     if (failed.length) {
       uploadFiles.value = failed.map(item => item.file)
       uploadError.value = failed.map(item => `${item.file.name}：${item.message}`).join('；')
@@ -944,14 +929,6 @@ async function exportSelected() {
   } catch (error) { notifyError(error instanceof Error ? error.message : '创建导出任务失败') }
 }
 
-async function submitRelations() {
-  if (!relationSourceIds.value.length || !relationTargetId.value.trim()) { notifyError('请先选择源素材和目标素材'); return }
-  try {
-    relationPreview.value=await api.previewRelations({relations:relationSourceIds.value.map(id=>({source_id:id,target_id:relationTargetId.value.trim(),relation_type:relationType.value,provenance:{source:'web'}}))})
-    relationPreviewKind.value='general'; relationPreviewOpen.value=true
-  } catch (error) { notifyError(error instanceof Error ? error.message : '关系预览失败') }
-}
-
 async function previewAutoRelations() {
   try { relationPreview.value=await api.previewAnnotationMatches({}); relationPreviewKind.value='auto'; relationPreviewOpen.value=true }
   catch(error){ notifyError(error instanceof Error?error.message:'自动匹配预览失败') }
@@ -969,9 +946,40 @@ async function resetRelationHistoryFilters() {
 }
 
 async function previewModelRelations() {
-  if(!selectedModel.value||!modelTargets.value.length){ notifyError('请先选择模型和需要关联的素材'); return }
-  try { relationPreview.value=await api.previewRelations({relations:modelTargets.value.filter(item=>String(item.id)!==String(selectedModel.value.id)).map(item=>({source_id:String(selectedModel.value.id),target_id:String(item.id),relation_type:relationType.value,provenance:{source:'web-model'}}))}); relationPreviewKind.value='general'; relationPreviewOpen.value=true }
+  if(!selectedModel.value||!relationVersionId.value){ notifyError('请先选择模型和数据集版本'); return }
+  try { relationPreview.value=await api.previewRelations({relations:[{source_id:String(selectedModel.value.id),target_id:relationVersionId.value,relation_type:'trained_on',provenance:{source:'dataset',dataset_id:relationDatasetId.value,dataset_version_id:relationVersionId.value}}]}); relationPreviewKind.value='general'; relationPreviewOpen.value=true }
   catch(error){ notifyError(error instanceof Error?error.message:'模型关系预览失败') }
+}
+
+function openLineageItem(item:any) {
+  if (item.edge?.derived) {
+    const asset=lineageNodeMap.value.get(String(item.id))
+    if (asset) void openAsset(mapAsset(asset,0))
+    return
+  }
+  void openRelationDetail(item.edge)
+}
+
+function openLineageEdge(edge:any) {
+  if (edge.derived) {
+    const asset=lineageNodeMap.value.get(String(edge.target_id))
+    if (asset) void openAsset(mapAsset(asset,0))
+    return
+  }
+  void openRelationDetail(edge)
+}
+
+async function loadRelationDatasets() {
+  try { relationDatasets.value=(await api.datasets(new URLSearchParams({page:'1',page_size:'0'}))).items.filter((item:any)=>item.current_version_id) }
+  catch(error){ notifyError(error instanceof Error?error.message:'数据集加载失败') }
+}
+
+async function changeRelationDataset() {
+  relationVersionId.value=''
+  relationVersions.value=[]
+  if (!relationDatasetId.value) return
+  try { relationVersions.value=(await api.datasetVersions(relationDatasetId.value)).items }
+  catch(error){ notifyError(error instanceof Error?error.message:'数据集版本加载失败') }
 }
 
 async function confirmRelationPreview() {
@@ -987,16 +995,27 @@ async function confirmRelationPreview() {
     const failed=results.flatMap((result:any)=>result.failed||[])
     notify(relationPreviewKind.value==='auto' ? `本次 ${succeeded.length} 组图片与标注自动关联成功` : `已建立 ${succeeded.length} 条关系，${failed.length} 条未建立`)
     relationPreviewOpen.value=false
-    if(relationWorkflow.value==='auto'){ autoImages.value=[];autoAnnotations.value=[] }
-    else if(relationWorkflow.value==='model'){ modelTargets.value=[] }
-    else { relationSourceAssets.value=[];relationTargetId.value='';relationTargetName.value='' }
+    if(relationWorkflow.value==='model') relationVersionId.value=''
     await loadRelations()
   } catch(error){ notifyError(error instanceof Error?error.message:'建立关系失败') }
   finally{ relationSubmitting.value=false }
 }
 
 async function loadJobs() {
-  try { const result = await api.jobs(); jobRows.value = result.items; jobTotal.value = result.total }
+  const requestedPage = jobPage.value
+  const requestedPageSize = jobPageSize.value
+  try {
+    const result = await api.jobs(requestedPage, requestedPageSize, true)
+    if (requestedPage !== jobPage.value || requestedPageSize !== jobPageSize.value) return
+    const lastPage = Math.max(1, Math.ceil(result.total / requestedPageSize))
+    if (requestedPage > lastPage) {
+      jobPage.value = lastPage
+      await loadJobs()
+      return
+    }
+    jobRows.value = result.items
+    jobTotal.value = result.total
+  }
   catch (error) { notifyError(error instanceof Error ? error.message : '任务加载失败') }
 }
 
@@ -1025,9 +1044,48 @@ function showDetailScrollbar() {
   }, 700)
 }
 
+function showRelationPreviewScrollbar() {
+  relationPreviewScrolling.value = true
+  if (relationPreviewScrollTimer !== null) window.clearTimeout(relationPreviewScrollTimer)
+  relationPreviewScrollTimer = window.setTimeout(() => {
+    relationPreviewScrolling.value = false
+    relationPreviewScrollTimer = null
+  }, 700)
+}
+
+function showTransientScrollbar(event: Event) {
+  const target = event.target
+  if (!(target instanceof HTMLElement)) return
+  target.classList.add('is-scrolling')
+  const previousTimer = transientScrollbarTimers.get(target)
+  if (previousTimer !== undefined) window.clearTimeout(previousTimer)
+  const timer = window.setTimeout(() => {
+    target.classList.remove('is-scrolling')
+    transientScrollbarTimers.delete(target)
+  }, 700)
+  transientScrollbarTimers.set(target, timer)
+}
+
+function showPageScrollbar() {
+  document.documentElement.classList.add('is-scrolling')
+  if (pageScrollbarTimer !== null) window.clearTimeout(pageScrollbarTimer)
+  pageScrollbarTimer = window.setTimeout(() => {
+    document.documentElement.classList.remove('is-scrolling')
+    pageScrollbarTimer = null
+  }, 700)
+}
+
+onMounted(() => window.addEventListener('scroll', showPageScrollbar, { passive: true }))
+
 onBeforeUnmount(() => {
   if (jobPoll !== null) window.clearInterval(jobPoll)
   if (detailScrollTimer !== null) window.clearTimeout(detailScrollTimer)
+  if (relationPreviewScrollTimer !== null) window.clearTimeout(relationPreviewScrollTimer)
+  for (const timer of transientScrollbarTimers.values()) window.clearTimeout(timer)
+  transientScrollbarTimers.clear()
+  window.removeEventListener('scroll', showPageScrollbar)
+  if (pageScrollbarTimer !== null) window.clearTimeout(pageScrollbarTimer)
+  document.documentElement.classList.remove('is-scrolling')
 })
 
 async function downloadExport(id:string) {
@@ -1219,10 +1277,11 @@ async function loadFormats() {
   try {
     const order = manageableFormatTypes
     formatRows.value=(await api.formats()).items.sort((a:any,b:any)=>order.indexOf(a.asset_type)-order.indexOf(b.asset_type))
+    formatsLoaded.value = true
   }
   catch (error) { notifyError(error instanceof Error ? error.message : '格式配置加载失败') }
 }
-function openNewFormat() { if(!availableFormatTypes.value.length){notify('图片、视频、标注和模型格式均已创建');return};editingFormatType.value='';newFormatType.value=availableFormatTypes.value[0];formatRemark.value='';formatValueRows.value=[];formatOpen.value=true }
+function openNewFormat() { if(!availableFormatTypes.value.length)return;editingFormatType.value='';newFormatType.value=availableFormatTypes.value[0];formatRemark.value='';formatValueRows.value=[];formatOpen.value=true }
 function openEditFormat(row:any) { const protectedValues=new Set(row.protected_extensions||[]);editingFormatType.value=row.asset_type;formatRemark.value=row.remark||'';formatValueRows.value=(row.extensions||[]).map((value:string)=>({id:nextFormatValueId++,value,editing:false,protected:protectedValues.has(value)}));formatOpen.value=true }
 function addFormatValue() { formatValueRows.value.push({id:nextFormatValueId++,value:'',editing:true,protected:false}) }
 function removeFormatValue(id:number) { formatValueRows.value=formatValueRows.value.filter(row=>row.id!==id) }
@@ -1271,18 +1330,22 @@ async function revokeActiveRelation() {
   if (!activeRelation.value) return
   const relation = {...activeRelation.value}
   try {
-    await api.revokeRelation(String(relation.id), revokeReason.value.trim())
-    notify('关联关系已撤销')
-    await loadRelations()
-    if(page.value==='lineage'&&lineageRoot.value) await openLineage(lineageRoot.value)
-    await openRelationDetail(relation)
+    const preview=await api.previewRevokeRelation(String(relation.id))
+    const affected=(preview.dataset_effects||[]).map((effect:any)=>`${effect.dataset_name}移出 ${effect.removed.length} 项标注`).join('；')
+    askConfirmation(`确定撤销关联吗？${affected ? `当前数据集将同步调整：${affected}。` : ''}`,async()=>{
+      await api.revokeRelation(String(relation.id), revokeReason.value.trim())
+      notify('关联关系已撤销')
+      await loadRelations()
+      if(page.value==='lineage'&&lineageRoot.value) await openLineage(lineageRoot.value)
+      await openRelationDetail(relation)
+    })
   } catch (error) { notifyError(error instanceof Error ? error.message : '撤销失败') }
 }
 
 </script>
 
 <template>
-  <div class="prototype variant-a" :class="[`skin-${skin}`, `density-${density}`]">
+  <div class="prototype variant-a" :class="[`skin-${skin}`, `density-${density}`]" @scroll.capture="showTransientScrollbar">
     <header class="topbar">
       <div class="brand"><span class="brand-mark">VA</span><span>视觉资产库</span></div>
       <label class="global-search"><span>⌕</span><input v-model="query" placeholder="搜索名称、备注、标签、算法…" @keyup.enter="applyAssetFilters" /></label>
@@ -1381,42 +1444,34 @@ async function revokeActiveRelation() {
 
       <template v-else-if="page === 'relations'">
         <section class="page-head"><div><h1>关联关系</h1></div></section>
-        <div class="relation-workflow-tabs"><button :class="{active:relationWorkflow==='auto'}" @click="relationWorkflow='auto'">图片与标注自动关联</button><button :class="{active:relationWorkflow==='model'}" @click="relationWorkflow='model';relationType='trained_on'">模型与素材批量关联</button><button :class="{active:relationWorkflow==='manual'}" @click="relationWorkflow='manual'">其他关系手动建立</button></div>
+        <div class="relation-workflow-tabs"><button :class="{active:relationWorkflow==='auto'}" @click="relationWorkflow='auto'">图片与标注</button><button :class="{active:relationWorkflow==='model'}" @click="relationWorkflow='model'">数据集与模型</button></div>
         <section v-if="relationWorkflow==='auto'" class="auto-relation-guide"><div><h2>创建图片与标注关联关系</h2><p>根据名称相同自动关联的规则去匹配系统内未存在关联关系的图片与标注</p></div><button class="primary" @click="previewAutoRelations">自动关联</button></section>
         <section v-else-if="relationWorkflow==='model'" class="relation-builder">
-          <article><span>第 1 步</span><h2>固定一个模型</h2><div class="drop-zone"><b>{{selectedModel?.name||'尚未选择模型'}}</b><small>{{selectedModel?.id||'只展示模型类型素材'}}</small><button @click="openAdvancedRelationPicker('model')">{{selectedModel?'更换模型':'选择模型'}}</button></div></article>
-          <div class="relation-arrow"><select v-model="relationType"><option value="trained_on">用于训练</option><option value="produced_by">由训练产生</option><option value="version_of">版本关系</option><option value="contains">属于数据集</option></select><span>→</span></div>
-          <article><span>第 2 步</span><h2>批量选择素材</h2><div class="drop-zone target"><b>{{modelTargets.length}} 项素材</b><small>{{modelTargets.slice(0,2).map(item=>item.name).join('、')||'支持图片、视频、标注和数据集素材'}}</small><button @click="openAdvancedRelationPicker('model-target')">{{modelTargets.length?'调整选择':'选择素材'}}</button></div></article>
+          <article><span>第 1 步</span><h2>选择模型</h2><div class="drop-zone"><b>{{selectedModel?.name||'尚未选择模型'}}</b><small v-if="!selectedModel">只展示模型类型素材</small><button @click="openAdvancedRelationPicker('model')">{{selectedModel?'更换模型':'选择模型'}}</button></div></article>
+          <div class="relation-arrow"><b>数据集版本</b><span>→</span></div>
+          <article><span>第 2 步</span><h2>选择已发布版本</h2><div class="drop-zone target"><div class="relation-select"><button type="button" class="relation-select-trigger" aria-label="数据集" :aria-expanded="relationSelectOpen==='dataset'" @click="relationSelectOpen=relationSelectOpen==='dataset'?'':'dataset'">{{relationDatasets.find((item:any)=>item.id===relationDatasetId)?.name||'选择数据集'}}<span>⌄</span></button><div v-if="relationSelectOpen==='dataset'" class="relation-select-options"><button v-for="dataset in relationDatasets" :key="dataset.id" type="button" :class="{active:relationDatasetId===dataset.id}" @click="relationDatasetId=dataset.id;relationSelectOpen='';changeRelationDataset()">{{dataset.name}}</button></div></div><div class="relation-select"><button type="button" class="relation-select-trigger" aria-label="数据集版本" :aria-expanded="relationSelectOpen==='version'" :disabled="!relationDatasetId" @click="relationSelectOpen=relationSelectOpen==='version'?'':'version'">{{relationVersions.find((item:any)=>item.id===relationVersionId)?.version||'选择版本'}}<span>⌄</span></button><div v-if="relationSelectOpen==='version'" class="relation-select-options"><button v-for="version in relationVersions" :key="version.id" type="button" :class="{active:relationVersionId===version.id}" @click="relationVersionId=version.id;relationSelectOpen=''">{{version.version}} · {{version.member_count}} 项素材</button></div></div></div></article>
         </section>
-        <section v-else class="manual-relation-builder">
-          <header class="manual-relation-type"><label><span>关系类型</span><select v-model="relationType"><option value="contains">属于数据集</option><option value="annotates">对应标注</option><option value="trained_on">用于训练</option><option value="produced_by">由训练产生</option><option value="version_of">版本关系</option></select></label><small>{{manualRelationHints[relationType]}}</small><button v-if="relationSourceAssets.length||relationTargetId" @click="clearManualRelationSelection">清空选择</button></header>
-          <div class="manual-relation-flow">
-            <article class="manual-relation-side"><div class="manual-side-head"><div><b>源资产</b><small>可选择多项</small></div><button @click="openRelationPicker('source')">{{relationSourceAssets.length?'调整选择':'选择素材'}}</button></div><div v-if="relationSourceAssets.length" class="manual-selected-list"><div v-for="item in relationSourceAssets" :key="item.id" :title="item.name"><i>{{assetTypeLabels[item.asset_type]||item.type||'资产'}}</i><span>{{item.name}}</span><button title="移除" :aria-label="`移除 ${item.name}`" @click="removeRelationSource(item.id)">×</button></div></div><div v-else class="manual-selection-empty">尚未选择源资产</div></article>
-            <div class="manual-relation-direction"><b>{{relationTypeLabels[relationType]}}</b><span>→</span></div>
-            <article class="manual-relation-side target"><div class="manual-side-head"><div><b>目标资产</b><small>只能选择一项</small></div><button @click="openRelationPicker('target')">{{relationTargetId?'重新选择':'选择素材'}}</button></div><div v-if="relationTargetId" class="manual-selected-list single"><div :title="relationTargetName"><span>{{relationTargetName}}</span><button title="移除" :aria-label="`移除 ${relationTargetName}`" @click="relationTargetId='';relationTargetName=''">×</button></div></div><div v-else class="manual-selection-empty">尚未选择目标资产</div></article>
-          </div>
-          <footer class="manual-relation-submit"><span><b>{{relationSourceAssets.length}}</b> 项源资产 {{relationTypeLabels[relationType]}} <b>{{relationTargetId?1:0}}</b> 项目标资产</span><button class="primary" :disabled="!relationSourceAssets.length||!relationTargetId" @click="submitRelations">预览并确认</button></footer>
-        </section>
-        <section v-if="relationWorkflow==='model'" class="validation"><b>关系预览</b><div><span>{{selectedModel?1:0}} 个模型 → {{modelTargets.length}} 项素材</span></div><p>提交前将检查重复关系、无效素材和关系方向。</p><button class="primary" @click="previewModelRelations">预览关系</button></section>
+        <section v-if="relationWorkflow==='model'" class="validation"><span>第 3 步</span><b>关系预览</b><div><span>{{selectedModel?.name||'未选择模型'}} → {{relationVersions.find((item:any)=>item.id===relationVersionId)?.version||'未选择版本'}}</span></div><button class="primary" @click="previewModelRelations">确认关系</button></section>
         <section class="relation-history">
           <div class="section-title"><div><h2>历史关联关系</h2></div><label>每页 <select v-model="relationPageSize" @change="relationPage=1;loadRelations()"><option :value="10">10 条</option><option :value="20">20 条</option><option :value="50">50 条</option></select></label></div>
-          <div class="relation-history-filters"><input v-model="relationHistoryQuery" placeholder="搜索素材名称或备注" @keyup.enter="relationPage=1;loadRelations()" /><select v-model="relationHistoryType"><option value="">全部关系</option><option v-for="(label,key) in relationTypeLabels" :key="key" :value="key">{{label}}</option></select><select v-model="relationHistoryStatus"><option value="">全部状态</option><option value="active">生效中</option><option value="revoked">已撤销</option></select><input v-model="relationHistoryCreator" placeholder="创建人" /><label>开始时间<input v-model="relationHistoryFrom" type="datetime-local" step="1" /></label><label>结束时间<input v-model="relationHistoryTo" type="datetime-local" step="1" :min="relationHistoryFrom" /></label><button @click="resetRelationHistoryFilters">重置</button><button @click="relationPage=1;loadRelations()">筛选</button></div>
+          <div class="relation-history-filters"><input v-model="relationHistoryQuery" placeholder="搜索素材名称或备注" @keyup.enter="relationPage=1;loadRelations()" /><select v-model="relationHistoryType"><option value="">全部关系</option><option v-for="(label,key) in historyRelationTypeLabels" :key="key" :value="key">{{label}}</option></select><select v-model="relationHistoryStatus"><option value="">全部状态</option><option value="active">生效中</option><option value="revoked">已撤销</option></select><input v-model="relationHistoryCreator" placeholder="创建人" /><label>开始时间<input v-model="relationHistoryFrom" type="datetime-local" step="1" /></label><label>结束时间<input v-model="relationHistoryTo" type="datetime-local" step="1" :min="relationHistoryFrom" /></label><button @click="resetRelationHistoryFilters">重置</button><button @click="relationPage=1;loadRelations()">筛选</button></div>
           <div class="relation-table"><div class="relation-row head"><span>源资产</span><span>关系</span><span>目标资产</span><span>创建人</span><span>创建时间</span><span>状态</span><span></span></div><button v-for="item in pagedRelations" :key="item.id" class="relation-row" @click="openRelationDetail(item)"><span><i>{{item.sourceType}}</i><b>{{item.source}}</b></span><strong>{{item.relation}}</strong><span><i>{{item.targetType}}</i><b>{{item.target}}</b></span><span>{{item.operator}}</span><span>{{item.createdAt}}</span><em :class="item.status==='生效中'?'active':'revoked'">{{item.status}}</em><u>详情 ›</u></button></div>
           <div class="pagination"><span>共 {{relationTotal}} 条</span><button :disabled="relationPage===1" @click="relationPage--;loadRelations()">‹</button><button v-for="num in relationPages" :key="num" :class="{active:relationPage===num}" @click="relationPage=num;loadRelations()">{{num}}</button><button :disabled="relationPage===relationPages" @click="relationPage++;loadRelations()">›</button></div>
         </section>
       </template>
 
       <template v-else-if="page === 'lineage'">
-        <section class="page-head"><div><h1>模型溯源</h1></div><div class="primary-actions"><button v-if="lineageRoot" class="secondary" @click="selectedModel=lineageRoot;relationWorkflow='model';relationType='trained_on';setPage('relations')">补充关联</button><button class="primary" @click="openLineagePicker">选择模型</button></div></section>
+        <section class="page-head"><div><h1>模型溯源</h1></div><div class="primary-actions"><button v-if="lineageRoot" class="secondary" @click="resetLineagePage">重置页面</button><button v-if="lineageRoot" class="secondary" @click="selectedModel=lineageRoot;relationWorkflow='model';setPage('relations')">补充关联</button><button class="primary" @click="openLineagePicker">选择模型</button></div></section>
         <section v-if="lineageLoading" class="state-panel"><div class="spinner"></div><b>正在加载关系图谱</b></section>
-        <section v-else-if="lineageRoot" class="lineage-results"><article class="lineage-root"><small>当前模型</small><b>{{lineageRoot.name}}</b><dl><div><dt>备注</dt><dd :title="lineageRoot.remark||''">{{lineageRoot.remark||'暂无备注'}}</dd></div><div><dt>对象大小</dt><dd>{{formatStorageSize(Number(lineageRoot.size||0))}}</dd></div><div><dt>创建时间</dt><dd>{{lineageRoot.created_at?new Date(lineageRoot.created_at).toLocaleString('zh-CN'):'时间未知'}}</dd></div><div><dt>修改时间</dt><dd>{{lineageRoot.updated_at?new Date(lineageRoot.updated_at).toLocaleString('zh-CN'):lineageRoot.created_at?new Date(lineageRoot.created_at).toLocaleString('zh-CN'):'时间未知'}}</dd></div></dl></article><div class="lineage-toolbar"><div><button :class="{active:lineageView==='graph'}" @click="lineageView='graph'">关系图</button><button :class="{active:lineageView==='list'}" @click="lineageView='list'">分组列表</button></div><select v-model="lineageTypeFilter"><option value="">全部类型</option><option value="image">图片</option><option value="video">视频</option><option value="annotation">标注</option><option value="model">模型</option><option value="dataset">数据集</option><option value="dataset_version">数据集版本</option><option value="snapshot">历史数据集</option></select><select v-model="lineageRelationFilter"><option value="">全部关系</option><option v-for="(label,key) in relationTypeLabels" :key="key" :value="key">{{label}}</option></select></div><div v-if="lineageFlowItems.length&&lineageView==='graph'" class="lineage-flow lineage-flow-compact"><section class="lineage-flow-groups"><button class="lineage-group-head" @click="toggleLineageGroup('images')"><span><i>图片</i><b>标注图片</b></span><strong>{{lineageAnnotatedImages.length}} 项 {{lineageExpanded==='images'?'⌃':'⌄'}}</strong></button><div v-if="lineageExpanded==='images'" class="lineage-group-items"><button v-for="item in lineageAnnotatedImages" :key="item.id" :title="item.name" @click="openRelationDetail(item.edge)"><b>{{item.name}}</b><small>{{item.relation}}</small></button><p v-if="!lineageAnnotatedImages.length">暂无标注图片</p></div><button class="lineage-group-head" @click="toggleLineageGroup('annotations')"><span><i>标注</i><b>标注文件</b></span><strong>{{lineageAnnotations.length}} 项 {{lineageExpanded==='annotations'?'⌃':'⌄'}}</strong></button><div v-if="lineageExpanded==='annotations'" class="lineage-group-items"><button v-for="item in lineageAnnotations" :key="item.id" :title="item.name" @click="openRelationDetail(item.edge)"><b>{{item.name}}</b><small>{{item.relation}}</small></button><p v-if="!lineageAnnotations.length">暂无标注文件</p></div><button class="lineage-group-head" @click="toggleLineageGroup('datasets')"><span><i>数据集</i><b>数据集</b></span><strong>{{lineageDatasets.length}} 个 {{lineageExpanded==='datasets'?'⌃':'⌄'}}</strong></button><div v-if="lineageExpanded==='datasets'" class="lineage-group-items dataset-items"><button v-for="item in lineageDatasets" :key="item.id" :title="item.name" @click="openRelationDetail(item.edge)"><span><b>{{item.node.dataset_name||item.name}}</b><em>{{item.node.version||'当前数据集'}}</em></span><small>素材构成：图片 {{item.node.counts?.image||0}}、视频 {{item.node.counts?.video||0}}、标注 {{item.node.counts?.annotation||0}}、压缩文件 {{item.node.counts?.archive||0}}、其他 {{item.node.counts?.other||0}}</small></button><p v-if="!lineageDatasets.length">暂无关联数据集</p></div></section><div class="lineage-flow-arrow"><span>→</span></div><article><i>模型</i><b>{{lineageRoot.name}}</b><small>当前模型</small></article></div><div v-else-if="filteredLineageEdges.length&&lineageView==='list'" class="lineage-groups"><section v-for="group in lineageGroups" :key="String(group[0])"><h3>{{assetTypeLabels[String(group[0])]||String(group[0])}} · {{group[1].length}}</h3><button v-for="edge in group[1]" :key="edge.id" @click="openRelationDetail(edge)"><b>{{edge.relation}}</b><span>{{edge.source}} → {{edge.target}}</span></button></section></div><div v-else class="empty"><b>暂无关联关系</b><p>可以在当前页面补充模型与素材之间的关联。</p></div><small v-if="lineageView==='graph'">当前展示节点 {{lineageDisplayedNodeCount}} 个，关系 {{lineageDisplayedRelationCount}} 条</small><small v-else>当前显示关系 {{filteredLineageEdges.length}} 条</small></section>
+        <section v-else-if="lineageRoot" class="lineage-results"><article class="lineage-root"><small>当前模型</small><b>{{lineageRoot.name}}</b><dl><div><dt>备注</dt><dd :title="lineageRoot.remark||''">{{lineageRoot.remark||'暂无备注'}}</dd></div><div><dt>对象大小</dt><dd>{{formatStorageSize(Number(lineageRoot.size||0))}}</dd></div><div><dt>创建时间</dt><dd>{{lineageRoot.created_at?new Date(lineageRoot.created_at).toLocaleString('zh-CN'):'时间未知'}}</dd></div><div><dt>修改时间</dt><dd>{{lineageRoot.updated_at?new Date(lineageRoot.updated_at).toLocaleString('zh-CN'):lineageRoot.created_at?new Date(lineageRoot.created_at).toLocaleString('zh-CN'):'时间未知'}}</dd></div></dl></article><div class="lineage-toolbar"><div><button :class="{active:lineageView==='graph'}" @click="lineageView='graph'">关系图</button><button :class="{active:lineageView==='list'}" @click="lineageView='list'">分组列表</button></div><select v-model="lineageTypeFilter"><option value="">全部类型</option><option value="image">图片文件</option><option value="annotation">标注文件</option><option value="video">视频文件</option><option value="archive">压缩文件</option><option value="other">其他文件</option><option value="dataset_version">数据集</option></select></div><div v-if="lineageView==='graph' && (lineageDatasets.length || lineageAssetGroups.some(group => group.items.length))" class="lineage-flow lineage-flow-compact"><section class="lineage-flow-groups"><template v-for="group in lineageAssetGroups" :key="group.key"><button class="lineage-group-head" @click="toggleLineageGroup(group.key)"><span><i>{{assetTypeLabels[group.key]||group.label}}</i><b>{{group.label}}</b></span><strong>{{group.items.length}} 项 {{lineageExpanded===group.key?'⌃':'⌄'}}</strong></button><div v-if="lineageExpanded===group.key" class="lineage-group-items"><button v-for="item in group.items" :key="item.id" :title="item.name" @click="openLineageItem(item)"><b>{{item.name}}</b><span class="lineage-item-sources"><small v-for="source in item.sources" :key="source.id" :title="`数据集：${source.name} 版本号：${source.version}`">数据集：{{source.name}}　版本号：{{source.version}}</small></span></button></div></template><button v-if="!lineageTypeFilter || lineageTypeFilter==='dataset_version'" class="lineage-group-head" @click="toggleLineageGroup('datasets')"><span><i>数据集</i><b>数据集</b></span><strong>{{lineageDatasets.length}} 个 {{lineageExpanded==='datasets'?'⌃':'⌄'}}</strong></button><div v-if="(!lineageTypeFilter || lineageTypeFilter==='dataset_version') && lineageExpanded==='datasets'" class="lineage-group-items dataset-items"><button v-for="item in lineageDatasets" :key="item.id" :title="item.name" @click="openLineageItem(item)"><span><b>{{item.node.dataset_name||item.name}}</b><em>{{item.node.version||'当前数据集'}}</em></span><small>素材构成：图片 {{item.node.counts?.image||0}}、视频 {{item.node.counts?.video||0}}、标注 {{item.node.counts?.annotation||0}}、压缩文件 {{item.node.counts?.archive||0}}、其他 {{item.node.counts?.other||0}}</small></button><p v-if="!lineageDatasets.length">暂无关联数据集</p></div></section><div class="lineage-flow-arrow"><span>→</span></div><article><i>模型</i><b>{{lineageRoot.name}}</b><small>当前模型</small></article></div><div v-else-if="filteredLineageEdges.length&&lineageView==='list'" class="lineage-groups"><section v-for="group in lineageGroups" :key="String(group[0])"><h3>{{assetTypeLabels[String(group[0])]||String(group[0])}} · {{group[1].length}}</h3><button v-for="edge in group[1]" :key="edge.id" @click="openLineageEdge(edge)"><b>{{edge.relation}}</b><span>{{edge.source}} → {{edge.target}}</span></button></section></div><div v-else class="empty"><b>暂无关联关系</b><p>可以在关联关系中将模型关联到已发布的数据集版本。</p></div><small v-if="lineageView==='graph'">当前展示节点 {{lineageDisplayedNodeCount}} 个，关系 {{lineageDisplayedRelationCount}} 条</small><small v-else>当前显示关系 {{filteredLineageEdges.length}} 条</small></section>
         <section v-else class="empty"><b>尚未选择模型</b><p>选择一个模型资产后查看完整溯源关系。</p><button @click="openLineagePicker">选择模型</button></section>
       </template>
 
       <template v-else-if="page === 'downloads'">
         <section class="page-head"><div><h1>下载中心</h1></div><span>共 {{jobTotal}} 个任务</span></section>
         <section v-if="jobRows.length" class="data-table download-table"><div class="table-row head"><span>任务</span><span>任务创建时间</span><span>内容</span><span>进度</span><span>类型</span><span>状态</span><span>操作</span></div><div v-for="job in jobRows" :key="job.id" class="table-row"><b>{{job.name || jobTypeText(job.type)}}</b><span>{{job.created_at ? new Date(job.created_at).toLocaleString('zh-CN') : '时间未知'}}</span><span>{{job.input?.asset_count ?? job.input?.asset_ids?.length ?? 0}} 项</span><span class="progress"><i :style="{width:`${job.progress}%`}"></i><small>{{job.progress}}%</small></span><span>{{jobTypeText(job.type)}}</span><span :class="job.state==='failed'?'failed':job.state==='succeeded'?'done':''">{{jobStateText(job.state)}}</span><button v-if="job.state==='succeeded'&&(job.type==='export'||job.type==='dataset_export')" class="primary" @click="downloadExport(job.id)">下载</button><button v-else-if="job.state==='failed'" @click="retryJob(job.id)">重试</button><button v-else disabled>{{job.state==='running'?'处理中':'等待'}}</button></div></section>
-        <section v-else class="empty"><b>暂无下载任务</b><p>在素材库选择素材后，点击“导出”创建打包任务。</p><button @click="setPage('library')">返回素材库</button></section>
+        <div v-if="jobTotal" class="pagination"><span>第 {{jobPage}} / {{jobPages}} 页</span><label>每页 <select v-model="jobPageSize" @change="jobPage=1;loadJobs()"><option :value="20">20</option><option :value="50">50</option><option :value="100">100</option></select> 项</label><button :disabled="jobPage===1" @click="jobPage--;loadJobs()">‹</button><button :disabled="jobPage===jobPages" @click="jobPage++;loadJobs()">›</button></div>
+        <section v-if="!jobTotal" class="empty"><b>暂无下载任务</b><p>在素材库选择素材后，点击“导出”创建打包任务。</p><button @click="setPage('library')">返回素材库</button></section>
       </template>
 
       <template v-else-if="page === 'trash'">
@@ -1439,7 +1494,7 @@ async function revokeActiveRelation() {
       </template>
 
       <template v-else-if="page === 'formats'">
-        <section class="page-head"><div><h1>格式管理</h1></div><button class="primary" @click="openNewFormat">＋ 新增格式</button></section>
+        <section class="page-head"><div><h1>格式管理</h1></div><button v-if="formatsLoaded && availableFormatTypes.length" class="primary" @click="openNewFormat">＋ 新增格式</button></section>
         <section class="tag-admin"><article v-for="row in formatRows" :key="row.asset_type"><div><b>{{assetTypeLabels[row.asset_type] || row.asset_type}}</b><code>{{row.remark || '暂无备注'}}</code></div><p>{{(row.extensions || []).join(' / ') || '暂无文件格式'}}</p><div v-if="!row.built_in" class="tag-actions"><button @click="openEditFormat(row)">修改</button><button @click="removeFormat(row)">删除</button></div></article></section>
       </template>
 
@@ -1490,12 +1545,12 @@ async function revokeActiveRelation() {
 
     <div v-if="uploadOpen" class="modal-stage">
       <section class="upload-dialog">
-        <button class="close" @click="uploadOpen=false">×</button><h2>上传素材</h2><p>单文件默认上限 10 GB；压缩包默认作为压缩文件保存，手动选择“图片+标注”后才会按 CVAT 数据集包解析。</p>
+        <button class="close" :disabled="uploadBusy" @click="uploadOpen=false">×</button><h2>上传素材</h2><p>单文件默认上限 10 GB；压缩包默认作为压缩文件保存，手动选择“图片+标注”后才会按 CVAT 数据集包解析。</p>
         <label class="file-select-button"><input type="file" multiple @change="chooseFile" /><span>点击选择文件</span></label>
         <div v-if="uploadFiles.length" class="selected-files"><article v-for="file in uploadFiles" :key="uploadFileKey(file)" class="selected-file"><div><b>{{file.name}}</b><small>{{(file.size/1024/1024).toFixed(1)}} MB · {{uploadTypeStatus(file)}}</small></div><select v-model="uploadTypeOverrides[uploadFileKey(file)]" aria-label="选择资产类型"><option value="" disabled>选择类型</option><option value="image">图片</option><option value="video">视频</option><option value="annotation">标注</option><option value="model">模型</option><option value="archive">压缩文件</option><option value="image_annotation">图片+标注</option><option value="other">其他</option></select><button type="button" aria-label="移除文件" title="移除" :disabled="uploadBusy" @click="removeUploadFile(file)">×</button></article></div>
         <div v-if="uploadFiles.length" class="upload-tag-tools"><button class="secondary" type="button" @click="openBatchTag('upload')">＋ 添加标签</button><div v-if="uploadTagEntries.length" class="upload-tag-list"><span v-for="tag in uploadTagEntries" :key="`${tag.key}-${tag.value}`"><b>{{tag.label}}</b>：{{tag.value}}<button type="button" :aria-label="`删除${tag.label}标签${tag.value}`" @click="removeUploadTag(tag.key,tag.value)">×</button></span></div></div>
-        <div v-if="uploadBusy" class="upload-meter"><i :style="{width:`${uploadProgress}%`}"></i></div><p v-if="uploadError" class="form-error">{{uploadError}}</p>
-        <div class="dialog-actions"><button class="secondary" @click="uploadOpen=false">取消</button><button class="primary" :disabled="uploadBusy" @click="uploadAsset">{{uploadBusy?'正在上传…':'开始上传'}}</button></div>
+        <div v-if="uploadBusy" class="upload-meter"><i :style="{width:`${uploadProgress}%`}"></i></div><p v-if="uploadBusy" class="upload-count">已处理 {{uploadCompleted}} / {{uploadFiles.length}} 项</p><p v-if="uploadError" class="form-error">{{uploadError}}</p>
+        <div class="dialog-actions"><button class="secondary" :disabled="uploadBusy" @click="uploadOpen=false">取消</button><button class="primary" :disabled="uploadBusy" @click="uploadAsset">{{uploadBusy?'正在上传…':'开始上传'}}</button></div>
       </section>
     </div>
     <div v-if="batchTagOpen" class="modal-stage">
@@ -1508,9 +1563,9 @@ async function revokeActiveRelation() {
     <div v-if="userOpen" class="modal-stage"><section class="upload-dialog compact-dialog"><button class="close" @click="userOpen=false">×</button><h2>{{editingUserId?'编辑用户':'新增用户'}}</h2><div class="form-stack"><label>用户名<input v-model="newUser.username" autocomplete="off" placeholder="至少 3 个字符" /></label><label>{{editingUserId?'新密码（留空则不修改）':'初始密码'}}<input v-model="newUser.password" type="password" autocomplete="new-password" placeholder="至少 8 个字符" /></label><label>角色<select v-model="newUser.role"><option value="admin">管理员</option><option value="data_manager">数据管理员</option><option value="annotator">标注员</option><option value="ml_engineer">算法工程师</option><option value="viewer">只读访客</option></select></label><label v-if="editingUserId">账号状态<select v-model="newUser.status"><option value="active">正常</option><option value="disabled">已停用</option></select></label></div><div class="dialog-actions"><button class="secondary" @click="userOpen=false">取消</button><button class="primary" @click="createUser">{{editingUserId?'保存修改':'创建用户'}}</button></div></section></div>
     <div v-if="mediaViewerOpen && viewerAsset" class="media-viewer" @click.self="closeMediaViewer"><div class="media-viewer-tools"><button aria-label="缩小" title="缩小" :disabled="mediaViewerZoom<=.25" @click="changeMediaViewerZoom(-.25)">−</button><b>{{Math.round(mediaViewerZoom*100)}}%</b><button aria-label="放大" title="放大" :disabled="mediaViewerZoom>=4" @click="changeMediaViewerZoom(.25)">＋</button><button v-if="viewerAsset.type==='图片' && !pickerPreviewAsset" class="annotation-toggle" :class="{active:mediaViewerAnnotations}" @click="mediaViewerAnnotations=!mediaViewerAnnotations">{{mediaViewerAnnotations?'隐藏标注':'显示标注'}}</button></div><button class="media-viewer-close" aria-label="关闭大图" @click="closeMediaViewer">×</button><div class="media-viewer-scroll"><div v-if="viewerAsset.type==='图片'" class="original-media" :style="originalMediaStyle"><img :src="viewerAsset.download_url||viewerAsset.preview_url" :alt="viewerAsset.name" /><svg v-if="!pickerPreviewAsset && mediaViewerAnnotations && activeAnnotationSource?.items?.length" class="annotation-layer" viewBox="0 0 100 100" preserveAspectRatio="none"><g v-for="item in activeAnnotationSource.items" :key="item.id"><polygon v-for="(polygon,index) in item.polygons || []" :key="`${item.id}-${index}`" :points="polygonPoints(polygon)" :fill="annotationColor(item.label)" fill-opacity=".18" :stroke="annotationColor(item.label)" vector-effect="non-scaling-stroke" /><rect :x="item.bbox.x*100" :y="item.bbox.y*100" :width="item.bbox.width*100" :height="item.bbox.height*100" fill="none" :stroke="annotationColor(item.label)" vector-effect="non-scaling-stroke" /><text :x="item.bbox.x*100" :y="Math.max(3,item.bbox.y*100)" :fill="annotationColor(item.label)" vector-effect="non-scaling-stroke">{{item.label}}</text></g></svg></div><video v-else :src="viewerAsset.download_url" :poster="viewerAsset.preview_url" :style="originalMediaStyle" controls autoplay>当前浏览器不支持播放此视频</video></div></div>
     <div v-if="formatOpen" class="modal-stage"><section class="upload-dialog compact-dialog tag-dialog"><button class="close" @click="formatOpen=false">×</button><h2>{{editingFormatType?'修改格式':'新增格式'}}</h2><div class="form-stack"><label>素材类型<select v-if="!editingFormatType" v-model="newFormatType"><option v-for="type in availableFormatTypes" :key="type" :value="type">{{assetTypeLabels[type]}}</option></select><input v-else :value="assetTypeLabels[editingFormatType]" disabled /></label><label>备注<input v-model="formatRemark" placeholder="请输入备注" /></label><div class="tag-values-editor"><div class="field-label"><span>文件格式</span><button class="add-value" type="button" @click="addFormatValue">＋ 新增</button></div><p v-if="!formatValueRows.length" class="value-empty">暂无文件格式，点击“新增”添加</p><div v-for="row in formatValueRows" :key="row.id" class="tag-value-row"><input v-model="row.value" :disabled="row.protected || !row.editing" placeholder="例如 .jpg" @keyup.enter="row.editing=false" /><template v-if="!row.protected"><button type="button" @click="toggleFormatValueEdit(row)">{{row.editing?'完成':'修改'}}</button><button class="remove-value" type="button" @click="removeFormatValue(row.id)">删除</button></template></div></div></div><div class="dialog-actions"><button class="secondary" @click="formatOpen=false">取消</button><button class="primary" @click="saveFormat">保存格式</button></div></section></div>
-    <div v-if="relationPickerOpen" class="modal-stage"><section class="upload-dialog relation-picker-dialog"><button class="close" @click="relationPickerOpen=false">×</button><h2>{{relationPickerContext==='auto-image'?'选择图片':relationPickerContext==='auto-annotation'?'选择标注':relationPickerContext==='model'?'选择模型':relationPickerContext==='model-target'?'选择关联素材':relationPickerContext==='source'?'选择源资产':'选择目标资产'}}</h2>
-      <div class="relation-picker-layout"><aside class="picker-filters"><label>搜索<input v-model="relationPickerQuery" placeholder="名称或备注" /></label><label v-if="!['auto-image','auto-annotation','model'].includes(relationPickerContext)">资产类型<select v-model="relationPickerType"><option value="">全部类型</option><option value="image">图片</option><option value="video">视频</option><option value="annotation">标注</option><option value="model">模型</option><option value="archive">压缩文件</option><option v-if="['model-target','target'].includes(relationPickerContext)" value="collection">数据集</option></select></label><button v-if="relationPickerType!=='collection'" class="untagged-filter picker-untagged-filter" :class="{active:relationPickerNoTags}" @click="relationPickerNoTags=!relationPickerNoTags">无标签</button><div v-if="relationPickerType!=='collection'" class="advanced-head"><div><b>高级筛选条件</b><small>多个条件可组合</small></div><button @click="addPickerRule">＋ 条件</button></div><div v-if="relationPickerType!=='collection'" class="match-mode"><span>符合</span><button :class="{active:relationPickerMatch==='all'}" @click="relationPickerMatch='all'">全部</button><button :class="{active:relationPickerMatch==='any'}" @click="relationPickerMatch='any'">任一</button></div><div v-if="relationPickerType!=='collection'" class="picker-filter-rules"><div v-for="rule in relationPickerRules" :key="rule.id" class="picker-filter-rule"><select v-model="rule.tag" @change="changeRuleTag(rule)"><option v-for="field in filterDefinitions" :key="field.key" :value="field.key">{{field.label}}</option></select><select v-model="rule.operator" @change="changeRuleOperator(rule)"><template v-if="isTimeFilter(rule.tag)"><option value="equals">等于</option><option value="lt">小于</option><option value="gt">大于</option><option value="between">位于</option></template><template v-else><option value="equals">等于</option><option v-if="rule.tag!=='remark'" value="notEquals">不等于</option><option value="contains">包含</option><option value="notContains">不包含</option></template></select><div v-if="isTimeFilter(rule.tag)" class="filter-time-values" :class="{range:rule.operator==='between'}"><input v-model="rule.value" type="datetime-local" step="1" /><span v-if="rule.operator==='between'">至</span><input v-if="rule.operator==='between'" v-model="rule.valueEnd" type="datetime-local" step="1" :min="nextDateTimeValue(rule.value)" /></div><select v-else-if="selectedFilterDefinition(rule.tag)?.values?.length&&!selectedFilterDefinition(rule.tag)?.free_input" v-model="rule.value"><option value="" disabled>请选择</option><option v-for="value in selectedFilterDefinition(rule.tag)?.values" :key="value" :value="value">{{value}}</option></select><input v-else v-model="rule.value" placeholder="请输入值" /><button class="remove-rule" @click="relationPickerRules=relationPickerRules.filter(item=>item.id!==rule.id)">×</button></div></div><button class="apply-filter" @click="applyPickerFilters">应用筛选</button></aside>
-      <div class="picker-results"><div v-if="relationPickerContext!=='model'" class="picker-selection-tools"><b>已选 {{relationPickerSelection.length}} 项</b><button v-if="relationPickerSelection.length" @click="relationPickerSelection=[]">取消选择</button><button v-if="relationPickerContext!=='target'" @click="selectPickerPage">全选</button><button v-if="relationPickerContext!=='target'" @click="invertPickerPage">反选</button></div><div v-if="relationPickerContext!=='model'&&relationPickerSelection.length" class="picker-selected-list"><button v-for="item in relationPickerSelection" :key="item.id" @click="togglePickerItem(item)">{{item.name}} ×</button></div><div v-if="relationPickerLoading" class="picker-empty">正在加载…</div><div v-else-if="relationPickerItems.length" class="picker-list relation-picker-table"><div class="picker-list-head"><span>格式</span><span>名称</span><span>备注</span><span>标签</span><span></span></div><button v-for="item in relationPickerItems" :key="item.id" :class="{selected:relationPickerSelectedIds.includes(String(item.id)),self:isPickerItemSelf(item)}" :disabled="isPickerItemSelf(item)" :title="isPickerItemSelf(item)?'不能选择素材自身':''" @click="togglePickerItem(item)"><span class="picker-format" :title="pickerFormat(item)"><img v-if="['image','video'].includes(item.type)&&item.preview_url" :src="item.preview_url" :alt="item.name" title="点击查看原分辨率文件" @click.stop="openPickerMedia(item)" /><em>{{pickerFormat(item)}}</em></span><b :title="item.name">{{item.name}}</b><small :title="item.remark||'—'">{{item.remark||'—'}}</small><small :title="pickerTagsText(item)">{{pickerTagsText(item)}}</small><i>{{isPickerItemSelf(item)?'不可选':relationPickerSelectedIds.includes(String(item.id))?'✓':'○'}}</i></button></div><div v-else class="picker-empty">没有匹配的素材</div><div class="picker-pagination"><span>共 {{relationPickerTotal}} 项</span><label>每页 <select v-model="relationPickerPageSize" @change="relationPickerPage=1;loadRelationPicker()"><option :value="20">20</option><option :value="50">50</option><option :value="100">100</option><option :value="200">200</option><option :value="0">全部</option></select></label><button :disabled="relationPickerPage===1" @click="relationPickerPage--;loadRelationPicker()">‹</button><b>第 {{relationPickerPage}} / {{relationPickerPages}} 页</b><button :disabled="relationPickerPage===relationPickerPages" @click="relationPickerPage++;loadRelationPicker()">›</button></div></div></div><div class="dialog-actions"><button class="secondary" @click="relationPickerOpen=false">取消</button><button class="primary" @click="storePickerSelection">完成选择</button></div></section></div>
-    <div v-if="relationPreviewOpen" class="modal-stage"><section class="upload-dialog relation-preview-dialog"><button class="close" @click="relationPreviewOpen=false">×</button><h2>{{relationPreviewKind==='auto'?'自动关联结果':'关系预览'}}</h2><p v-if="relationPreviewKind==='auto'" class="auto-match-result">本次共匹配成功 <b>{{relationPreview?.counts?.ready||0}}</b> 组图片与标注，请确认是否建立关联关系。</p><div class="preview-summary"><article class="ready"><b>{{relationPreview?.counts?.ready||0}}</b><span>{{relationPreviewKind==='auto'?'匹配成功':'可以建立'}}</span></article><article><b>{{relationPreview?.counts?.existing||0}}</b><span>已存在</span></article><article v-if="relationPreviewKind==='auto'" class="warn"><b>{{(relationPreview?.counts?.image_conflicts||0)+(relationPreview?.counts?.annotation_conflicts||0)}}</b><span>重名冲突</span></article><article class="warn"><b>{{relationPreviewKind==='auto'?(relationPreview?.counts?.unmatched_images||0)+(relationPreview?.counts?.unmatched_annotations||0):relationPreview?.counts?.invalid||0}}</b><span>{{relationPreviewKind==='auto'?'未匹配':'无效关系'}}</span></article></div><div class="preview-groups"><section v-if="relationPreview?.ready?.length"><h3>{{relationPreviewKind==='auto'?'匹配成功':'可以建立'}}</h3><p v-for="item in relationPreview.ready.slice(0,100)" :key="item.relation?.source_id||item.source.id">{{item.source.name}} → {{item.target.name}}</p></section><section v-if="relationPreview?.existing?.length"><h3>已存在</h3><p v-for="item in relationPreview.existing.slice(0,100)" :key="item.existing_relation_id||item.source.id">{{item.source.name}} → {{item.target.name}}</p></section><section v-if="relationPreviewKind==='auto'&&relationPreview?.image_conflicts?.length"><h3>图片重名</h3><p v-for="item in relationPreview.image_conflicts" :key="item.stem">{{item.stem}}（{{item.items.length}} 项）</p></section><section v-if="relationPreviewKind==='auto'&&relationPreview?.annotation_conflicts?.length"><h3>标注重名</h3><p v-for="item in relationPreview.annotation_conflicts" :key="item.stem">{{item.stem}}（{{item.items.length}} 项）</p></section><section v-if="relationPreviewKind==='auto'&&relationPreview?.unmatched_images?.length"><h3>未匹配图片</h3><p v-for="item in relationPreview.unmatched_images" :key="item.id">{{item.name}}</p></section><section v-if="relationPreviewKind==='auto'&&relationPreview?.unmatched_annotations?.length"><h3>未匹配标注</h3><p v-for="item in relationPreview.unmatched_annotations" :key="item.id">{{item.name}}</p></section><section v-if="relationPreview?.invalid?.length"><h3>无效或已删除</h3><p v-for="(item,index) in relationPreview.invalid" :key="item.id||index">{{item.source?.name||item.id||item.relation?.source_id}}：{{item.message}}</p></section></div><div class="dialog-actions"><button class="secondary" @click="relationPreviewOpen=false">{{relationPreviewKind==='auto'?'取消':'返回调整'}}</button><button class="primary" :disabled="!relationPreview?.ready?.length||relationSubmitting" @click="confirmRelationPreview">{{relationSubmitting?'正在提交…':relationPreviewKind==='auto'?`确认关联 ${relationPreview?.ready?.length||0} 组`:`确认建立 ${relationPreview?.ready?.length||0} 条关系`}}</button></div></section></div>
+    <div v-if="relationPickerOpen" class="modal-stage"><section class="upload-dialog relation-picker-dialog"><button class="close" @click="relationPickerOpen=false">×</button><h2>{{relationPickerContext==='model'?'选择模型':'选择关联素材'}}</h2>
+      <div class="relation-picker-layout"><aside class="picker-filters"><label>搜索<input v-model="relationPickerQuery" placeholder="名称或备注" /></label><label v-if="relationPickerContext==='model-target'">资产类型<select v-model="relationPickerType"><option value="">全部类型</option><option value="image">图片</option><option value="video">视频</option><option value="annotation">标注</option><option value="archive">压缩文件</option><option value="collection">数据集</option></select></label><button v-if="relationPickerType!=='collection'" class="untagged-filter picker-untagged-filter" :class="{active:relationPickerNoTags}" @click="relationPickerNoTags=!relationPickerNoTags">无标签</button><div v-if="relationPickerType!=='collection'" class="advanced-head"><div><b>高级筛选条件</b><small>多个条件可组合</small></div><button @click="addPickerRule">＋ 条件</button></div><div v-if="relationPickerType!=='collection'" class="match-mode"><span>符合</span><button :class="{active:relationPickerMatch==='all'}" @click="relationPickerMatch='all'">全部</button><button :class="{active:relationPickerMatch==='any'}" @click="relationPickerMatch='any'">任一</button></div><div v-if="relationPickerType!=='collection'" class="picker-filter-rules"><div v-for="rule in relationPickerRules" :key="rule.id" class="picker-filter-rule"><select v-model="rule.tag" @change="changeRuleTag(rule)"><option v-for="field in filterDefinitions" :key="field.key" :value="field.key">{{field.label}}</option></select><select v-model="rule.operator" @change="changeRuleOperator(rule)"><template v-if="isTimeFilter(rule.tag)"><option value="equals">等于</option><option value="lt">小于</option><option value="gt">大于</option><option value="between">位于</option></template><template v-else><option value="equals">等于</option><option v-if="rule.tag!=='remark'" value="notEquals">不等于</option><option value="contains">包含</option><option value="notContains">不包含</option></template></select><div v-if="isTimeFilter(rule.tag)" class="filter-time-values" :class="{range:rule.operator==='between'}"><input v-model="rule.value" type="datetime-local" step="1" /><span v-if="rule.operator==='between'">至</span><input v-if="rule.operator==='between'" v-model="rule.valueEnd" type="datetime-local" step="1" :min="nextDateTimeValue(rule.value)" /></div><select v-else-if="selectedFilterDefinition(rule.tag)?.values?.length&&!selectedFilterDefinition(rule.tag)?.free_input" v-model="rule.value"><option value="" disabled>请选择</option><option v-for="value in selectedFilterDefinition(rule.tag)?.values" :key="value" :value="value">{{value}}</option></select><input v-else v-model="rule.value" placeholder="请输入值" /><button class="remove-rule" @click="relationPickerRules=relationPickerRules.filter(item=>item.id!==rule.id)">×</button></div></div><button class="apply-filter" @click="applyPickerFilters">应用筛选</button></aside>
+      <div class="picker-results"><div v-if="relationPickerContext==='model-target'" class="picker-selection-tools"><b>已选 {{relationPickerSelection.length}} 项</b><button v-if="relationPickerSelection.length" @click="relationPickerSelection=[]">取消选择</button><button @click="selectPickerPage">全选</button><button @click="invertPickerPage">反选</button></div><div v-if="relationPickerContext==='model-target'&&relationPickerSelection.length" class="picker-selected-list"><button v-for="item in relationPickerSelection" :key="item.id" @click="togglePickerItem(item)">{{item.name}} ×</button></div><div v-if="relationPickerLoading" class="picker-empty">正在加载…</div><div v-else-if="relationPickerItems.length" class="picker-list relation-picker-table"><div class="picker-list-head"><span>格式</span><span>名称</span><span>备注</span><span>标签</span><span></span></div><button v-for="item in relationPickerItems" :key="item.id" :class="{selected:relationPickerSelectedIds.includes(String(item.id)),self:isPickerItemSelf(item)}" :disabled="isPickerItemSelf(item)" :title="isPickerItemSelf(item)?'不能选择素材自身':''" @click="togglePickerItem(item)"><span class="picker-format" :title="pickerFormat(item)"><img v-if="['image','video'].includes(item.type)&&item.preview_url" :src="item.preview_url" :alt="item.name" title="点击查看原分辨率文件" @click.stop="openPickerMedia(item)" /><em>{{pickerFormat(item)}}</em></span><b :title="item.name">{{item.name}}</b><small :title="item.remark||'—'">{{item.remark||'—'}}</small><small :title="pickerTagsText(item)">{{pickerTagsText(item)}}</small><i>{{isPickerItemSelf(item)?'不可选':relationPickerSelectedIds.includes(String(item.id))?'✓':'○'}}</i></button></div><div v-else class="picker-empty">没有匹配的素材</div><div class="picker-pagination"><span>共 {{relationPickerTotal}} 项</span><label>每页 <select v-model="relationPickerPageSize" @change="relationPickerPage=1;loadRelationPicker()"><option :value="20">20</option><option :value="50">50</option><option :value="100">100</option><option :value="200">200</option><option :value="0">全部</option></select></label><button :disabled="relationPickerPage===1" @click="relationPickerPage--;loadRelationPicker()">‹</button><b>第 {{relationPickerPage}} / {{relationPickerPages}} 页</b><button :disabled="relationPickerPage===relationPickerPages" @click="relationPickerPage++;loadRelationPicker()">›</button></div></div></div><div class="dialog-actions"><button class="secondary" @click="relationPickerOpen=false">取消</button><button class="primary" @click="storePickerSelection">完成选择</button></div></section></div>
+    <div v-if="relationPreviewOpen" class="modal-stage"><section class="upload-dialog relation-preview-dialog" :class="{'is-scrolling':relationPreviewScrolling}" @scroll.passive="showRelationPreviewScrollbar"><button class="close" @click="relationPreviewOpen=false">×</button><h2>{{relationPreviewKind==='auto'?'自动关联结果':'关系预览'}}</h2><p v-if="relationPreviewKind==='auto'" class="auto-match-result">本次共匹配成功 <b>{{relationPreview?.counts?.ready||0}}</b> 组图片与标注，请确认是否建立关联关系。</p><div v-if="relationPreview?.ready?.some((item:any)=>item.dataset_effects?.length)" class="relation-dataset-effects"><b>当前数据集标注变更</b><p v-for="effect in relationPreview.ready.flatMap((item:any)=>item.dataset_effects||[])" :key="effect.dataset_id">{{effect.dataset_name}}：加入 {{effect.added.length}} 项，移出 {{effect.removed.length}} 项</p></div><div v-if="relationVersionId&&relationPreview?.ready?.length" class="relation-dataset-effects">所选版本包含 {{relationPreview.ready[0].version_members||0}} 项素材；模型仅关联该版本。</div><div class="preview-summary"><article class="ready"><b>{{relationPreview?.counts?.ready||0}}</b><span>{{relationPreviewKind==='auto'?'匹配成功':'可以建立'}}</span></article><article><b>{{relationPreview?.counts?.existing||0}}</b><span>已存在</span></article><article v-if="relationPreviewKind==='auto'" class="warn"><b>{{(relationPreview?.counts?.image_conflicts||0)+(relationPreview?.counts?.annotation_conflicts||0)}}</b><span>重名冲突</span></article><article class="warn"><b>{{relationPreviewKind==='auto'?(relationPreview?.counts?.unmatched_images||0)+(relationPreview?.counts?.unmatched_annotations||0):relationPreview?.counts?.invalid||0}}</b><span>{{relationPreviewKind==='auto'?'未匹配':'无效关系'}}</span></article></div><div class="preview-groups" :class="{'is-scrolling':relationPreviewScrolling}" @scroll.passive="showRelationPreviewScrollbar"><section v-if="relationPreview?.ready?.length"><h3>{{relationPreviewKind==='auto'?'匹配成功':'可以建立'}}</h3><p v-for="item in relationPreview.ready.slice(0,100)" :key="item.relation?.source_id||item.source.id">{{item.source.name}} → {{item.target.name}}</p></section><section v-if="relationPreview?.existing?.length"><h3>已存在</h3><p v-for="item in relationPreview.existing.slice(0,100)" :key="item.existing_relation_id||item.source.id">{{item.source.name}} → {{item.target.name}}</p></section><section v-if="relationPreviewKind==='auto'&&relationPreview?.image_conflicts?.length"><h3>图片重名</h3><p v-for="item in relationPreview.image_conflicts" :key="item.stem">{{item.stem}}（{{item.items.length}} 项）</p></section><section v-if="relationPreviewKind==='auto'&&relationPreview?.annotation_conflicts?.length"><h3>标注重名</h3><p v-for="item in relationPreview.annotation_conflicts" :key="item.stem">{{item.stem}}（{{item.items.length}} 项）</p></section><section v-if="relationPreviewKind==='auto'&&relationPreview?.unmatched_images?.length"><h3>未匹配图片</h3><p v-for="item in relationPreview.unmatched_images" :key="item.id">{{item.name}}</p></section><section v-if="relationPreviewKind==='auto'&&relationPreview?.unmatched_annotations?.length"><h3>未匹配标注</h3><p v-for="item in relationPreview.unmatched_annotations" :key="item.id">{{item.name}}</p></section><section v-if="relationPreview?.invalid?.length"><h3>无效或已删除</h3><p v-for="(item,index) in relationPreview.invalid" :key="item.id||index">{{item.source?.name||item.id||item.relation?.source_id}}：{{item.message}}</p></section></div><div class="dialog-actions"><button class="secondary" @click="relationPreviewOpen=false">{{relationPreviewKind==='auto'?'取消':'返回调整'}}</button><button class="primary" :disabled="!relationPreview?.ready?.length||relationSubmitting" @click="confirmRelationPreview">{{relationSubmitting?'正在提交…':relationPreviewKind==='auto'?`确认关联 ${relationPreview?.ready?.length||0} 组`:`确认建立 ${relationPreview?.ready?.length||0} 条关系`}}</button></div></section></div>
   </div>
 </template>

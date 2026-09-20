@@ -74,6 +74,11 @@ def test_parse_extracted_yolo_txt_uses_saved_class_names():
     assert result["items"][0]["bbox"] == {"x": 0.3, "y": 0.4, "width": 0.4, "height": 0.2}
 
 
+def test_yolo_without_class_names_does_not_show_a_bare_numeric_label():
+    result = parse_annotation_overlay(b"0 0.5 0.5 0.4 0.2\n", "camera-01.txt", "camera-01.jpg")
+    assert result["items"][0]["label"] == "未命名类别"
+
+
 def test_parse_pascal_voc_box_and_metadata():
     content = b"""<annotation><filename>frame.jpg</filename><size><width>200</width><height>100</height></size><object><name>smoking</name><bndbox><xmin>20</xmin><ymin>10</ymin><xmax>80</xmax><ymax>60</ymax></bndbox></object></annotation>"""
     result = parse_annotation_overlay(content, "frame.xml", "frame.jpg")

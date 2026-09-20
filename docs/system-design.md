@@ -30,7 +30,9 @@ API 保存业务元数据并签发 MinIO 地址。浏览器直接传输大文件
 | `assets` | type, name, remark, object_key, sha256, size, mime_type, media, tags, status, archived_at | 文件元数据与处理状态 |
 | `asset_versions` | asset_id, version, object_key, sha256, source, note | 资产版本 |
 | `relations` | source_id, target_id, relation_type, status, provenance, revoke_reason | 有方向的资产关系 |
-| `collections` | name, kind, asset_ids, revision, frozen_at | 人工集合或冻结快照 |
+| `datasets`、`dataset_memberships` | name, status, asset_id, updated_at | 当前数据集及成员 |
+| `dataset_versions`、`dataset_version_memberships` | version, member_count, content_digest, snapshot | 不可变版本与成员摘要 |
+| `collections` | name, kind, asset_ids, revision, frozen_at | 旧集合兼容与迁移来源 |
 | `saved_views` | owner_id, name, query, sort, fields, shared | 保存筛选规则 |
 | `jobs` | type, state, progress, input, result, error, expires_at | 后台任务 |
 | `tag_definitions` | key, name, values, color, free_input | 标签字段配置 |
@@ -67,7 +69,7 @@ API 保存业务元数据并签发 MinIO 地址。浏览器直接传输大文件
 
 自动关联优先读取标注内容中的图片引用，没有引用时使用不区分大小写的文件基础名称。同名图片或同一图片被多个标注声明时列为冲突。提交前先预览，确认后批量创建。
 
-模型关联固定一个模型，再批量选择图片、视频、标注或数据集。关系软撤销后从有效图谱移除，但保留历史和审计。
+图片与标注使用 `annotates` 关系。图片进入当前数据集时带入有效标注；撤销图片与标注关系后，只调整未发布的当前数据集，历史版本保持不变。模型只通过 `trained_on` 关系关联已发布的数据集版本，不再直接关联图片、视频、标注或压缩文件。图谱中的版本成员路径为只读推导结果，不额外写入模型直连关系。关系软撤销后从有效图谱移除，但保留历史和审计。
 
 ## 删除与导出
 

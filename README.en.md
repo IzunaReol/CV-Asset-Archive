@@ -12,7 +12,7 @@ CV Asset Archive is an asset and relationship management system for computer vis
 - Fuzzy search over names and notes, advanced filters, saved views, and multi-value tags
 - Import for YOLO Detection, Pascal VOC, CVAT for images, and COCO annotation packages
 - Bounding-box and polygon overlays
-- Automatic image-to-annotation matching, bulk model relationships, history, and model lineage
+- Automatic image-to-annotation matching, model-to-dataset-version relationships, history, and model lineage
 - Soft deletion, recycle-bin recovery, and background physical cleanup
 - Background ZIP exports with progress tracking and expiring downloads
 - User, role, tag, format, and audit management
@@ -104,13 +104,13 @@ npm ci
 npm run build
 ```
 
-The isolated API workflow test is available at `scripts/runtime-e2e.py`. See the [testing guide](docs/testing.md) and [v1.0.0 release checklist](docs/release-checklist.md) for the full scope.
+The isolated API workflow test is available at `scripts/runtime-e2e.py`. See the [testing guide](docs/testing.md) and [v1.2.0 release checklist](docs/release-checklist.md) for the full scope.
 
-## Upgrading to v1.1.0
+## Preparing to upgrade to v1.2.0
 
-Back up MongoDB and MinIO before upgrading. Stop the API and workers, update the source and dependencies, then rebuild the frontend. Startup applies an idempotent collection-to-dataset migration; stored objects are unchanged. Restore the pre-upgrade database backup before rolling back to v1.0.0.
+Back up MongoDB and MinIO before upgrading from v1.1.0. The model relationship now points only to a published dataset version; report and back up legacy direct model-to-asset relationships before removing them as described in the [release notes](docs/releases/v1.2.0.md). Update the source and dependencies, rebuild the frontend, and verify dataset membership, versions, and model lineage. A rollback requires the pre-upgrade database backup, not just older code.
 
-See the [dataset guide](docs/datasets.md) and [release notes](docs/releases/v1.1.0.md) for behavior and known limitations.
+See the [dataset guide](docs/datasets.md) and [v1.2.0 preparation notes](docs/releases/v1.2.0.md) for behavior, validation status, and known limitations.
 
 ## Documentation
 

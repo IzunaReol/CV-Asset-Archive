@@ -32,6 +32,7 @@
 - 关系：`GET|POST /relations`、`POST /relations/batch`、`POST /relations/preview`
 - 自动关联：`POST /relations/annotation-match-preview`
 - 关系详情：`GET /relations/{id}`、`POST /relations/{id}/revoke`、`GET /relations/graph/{asset_id}`
+- 数据集：`GET|POST /datasets`、`GET|POST|DELETE /datasets/{id}/members`、`POST /datasets/{id}/members/preview`、`POST /datasets/{id}/versions`、`GET /datasets/{id}/compare`、`POST /datasets/{id}/restore`、`GET|POST /datasets/{id}/models`、`POST /datasets/{id}/export`
 - 集合与视图：`GET|POST /collections`、`POST /collections/{id}/freeze`、`GET|POST /saved-views`
 - 下载：`POST /exports`、`GET /jobs`、`GET /jobs/{id}`、`POST /jobs/{id}/retry`、`GET /exports/{id}/download-url`
 - 管理：`/tag-definitions`、`/format-definitions`、`/users`、`/roles`、`/audit-logs`
@@ -49,6 +50,8 @@ CVAT 在线任务和 MLflow 接口尚未实现。
 - 单文件默认上限为 10 GB，通过 `MAX_UPLOAD_SIZE_BYTES` 修改。
 - 关系源和目标不能相同；前端不允许选择自身，后端仍执行最终校验。
 - 重复有效关系保持幂等，不创建第二条相同有效记录。
+- 数据集不接受模型或手动添加的标注成员；图片的有效标注由当前数据集自动维护，已发布版本不随之改变。
+- 新建模型关系仅允许“模型 → 已发布数据集版本”。图谱按版本成员推导素材路径，拒绝模型直连素材的写入。
 - 撤销原因可不填且不限制业务字数；已撤销记录仍可在历史中查询。
 - 清空回收站返回 `202` 和任务记录，实际文件清理由 Worker 执行。
 

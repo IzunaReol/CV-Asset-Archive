@@ -355,6 +355,12 @@ async def list_assets(
         if item.get("preview_key"):
             result["preview_url"] = await asyncio.to_thread(presigned_get, item["preview_key"])
         items.append(result)
+    image_ids = [item["id"] for item in items if item.get("type") == "image"]
+    annotated_ids = set(await db.relations.distinct("target_id", {
+        "target_id": {"$in": image_ids}, "relation_type": "annotates", "status": "active",
+    })) if image_ids else set()
+    for item in items:
+        item["has_annotation"] = item["id"] in annotated_ids
     return {"items": items, "page": page, "page_size": page_size, "total": total}
 
 
@@ -378,7 +384,7 @@ async def get_asset(asset_id: str, user: ReadUser) -> dict[str, Any]:
         public_document(item)
         async for item in db.relations.find(
             {"$or": [{"source_id": asset_id}, {"target_id": asset_id}], "status": "active"}
-        ).limit(100)
+        )
     ]
     current_dataset_ids = await db.dataset_memberships.distinct("dataset_id", {"asset_id": asset_id})
     version_rows = await db.dataset_version_memberships.find(
@@ -394,6 +400,10 @@ async def get_asset(asset_id: str, user: ReadUser) -> dict[str, Any]:
         if version_ids
         else []
     )
+    valid_version_ids = {item["id"] for item in versions}
+    result["relations"] = [item for item in result["relations"] if item.get("relation_type") != "trained_on" or item.get("target_id") in valid_version_ids]
+    if asset.get("type") == "model":
+        result["relations"] = [item for item in result["relations"] if item.get("relation_type") == "trained_on" and item.get("target_id") in valid_version_ids]
     dataset_ids = list(set(current_dataset_ids) | {item["dataset_id"] for item in versions})
     datasets = {
         item["id"]: item

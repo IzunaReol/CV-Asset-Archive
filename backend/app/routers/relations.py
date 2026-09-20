@@ -21,6 +21,34 @@ from ..utils import new_id, now, public_document
 router = APIRouter(prefix="/relations", tags=["relations"])
 
 
+async def annotation_dataset_effect(annotation_id: str, image_id: str, *, exclude_relation_id: str | None = None) -> list[dict[str, Any]]:
+    dataset_ids = await db.dataset_memberships.distinct("dataset_id", {"asset_id": image_id})
+    effects = []
+    for dataset_id in dataset_ids:
+        dataset = await db.datasets.find_one({"id": dataset_id, "deleted_at": None})
+        if dataset is None:
+            continue
+        changes = {"added": [], "removed": []}
+        current_ids = await db.dataset_memberships.distinct("asset_id", {"dataset_id": dataset_id})
+        if exclude_relation_id:
+            remaining = await db.relations.find({"relation_type": "annotates", "status": "active", "source_id": annotation_id, "id": {"$ne": exclude_relation_id}}, {"target_id": 1}).to_list(length=None)
+            if annotation_id in current_ids and not any(item["target_id"] in current_ids for item in remaining):
+                changes["removed"] = [annotation_id]
+        elif annotation_id not in current_ids:
+            changes["added"] = [annotation_id]
+        if changes["added"] or changes["removed"]:
+            effects.append({"dataset_id": dataset_id, "dataset_name": dataset.get("name", dataset_id), **changes})
+    return effects
+
+
+async def sync_annotation_datasets(image_id: str, actor_id: str) -> None:
+    from .datasets import sync_annotation_memberships
+    dataset_ids = await db.dataset_memberships.distinct("dataset_id", {"asset_id": image_id})
+    for dataset_id in dataset_ids:
+        if await db.datasets.find_one({"id": dataset_id, "deleted_at": None}):
+            await sync_annotation_memberships(dataset_id, actor_id)
+
+
 def relation_asset_summary(asset: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": asset["id"],
@@ -37,16 +65,16 @@ def filename_stem(name: str) -> str:
 def relation_type_error(
     source: dict[str, Any], target: dict[str, Any], relation_type: str
 ) -> tuple[str, str] | None:
+    if relation_type not in {"annotates", "trained_on"}:
+        return "RELATION_TYPE_UNSUPPORTED", "当前只能建立图片与标注或模型与数据集版本关系"
     source_type = source.get("type", source.get("kind", "asset"))
     target_type = target.get("type", target.get("kind", "asset"))
     if relation_type == "annotates" and not (
         source_type == "annotation" and target_type == "image"
     ):
         return "RELATION_TYPE_MISMATCH", "对应标注关系必须由标注指向图片"
-    if relation_type == "trained_on" and source_type != "model":
-        return "RELATION_TYPE_MISMATCH", "训练关系的源对象必须是模型"
-    if relation_type == "version_of" and source_type != target_type:
-        return "RELATION_TYPE_MISMATCH", "版本关系的源对象和目标对象类型必须一致"
+    if relation_type == "trained_on" and (source_type != "model" or target_type != "dataset_version"):
+        return "RELATION_TYPE_MISMATCH", "模型只能关联已发布的数据集版本"
     return None
 
 
@@ -71,6 +99,8 @@ async def preview_relation_item(item: RelationCreate) -> dict[str, Any]:
             "code": "OBJECT_NOT_FOUND",
             "message": "源对象或目标对象不存在或已删除",
         }
+    if item.relation_type.value == "trained_on" and target.get("kind") == "dataset_version" and not await db.datasets.find_one({"id": target.get("dataset_id"), "deleted_at": None}):
+        return {"relation": item.model_dump(mode="json"), "code": "DATASET_NOT_FOUND", "message": "数据集不存在或已删除"}
     existing = await db.relations.find_one(
         {
             "source_id": item.source_id,
@@ -95,6 +125,11 @@ async def preview_relation_item(item: RelationCreate) -> dict[str, Any]:
             "message": "关联关系已经存在",
             "existing_relation_id": existing["id"],
         }
+    if item.relation_type.value == "annotates":
+        result["dataset_effects"] = await annotation_dataset_effect(item.source_id, item.target_id)
+    elif item.relation_type.value == "trained_on" and target.get("kind") == "dataset_version":
+        result["version_members"] = target.get("member_count", 0)
+        result["dataset_id"] = target.get("dataset_id")
     return {**result, "code": "READY", "message": "可以建立"}
 
 
@@ -108,6 +143,8 @@ async def validate_relation(body: RelationCreate) -> None:
     )
     if source is None or (target_asset is None and target_collection is None):
         raise AppError(404, "RELATION_TARGET_NOT_FOUND", "源资产或目标对象不存在")
+    if body.relation_type.value == "trained_on" and target_collection and target_collection.get("kind") == "dataset_version" and not await db.datasets.find_one({"id": target_collection.get("dataset_id"), "deleted_at": None}):
+        raise AppError(404, "DATASET_NOT_FOUND", "数据集不存在或已删除")
     type_error = relation_type_error(
         source, target_asset or target_collection or {}, body.relation_type.value
     )
@@ -144,6 +181,13 @@ async def create_relation(
         "created_at": now(),
     }
     await db.relations.insert_one(relation)
+    if body.relation_type.value == "annotates":
+        try:
+            await sync_annotation_datasets(body.target_id, user["id"])
+        except Exception:
+            await db.relations.delete_one({"id": relation["id"]})
+            await sync_annotation_datasets(body.target_id, user["id"])
+            raise
     await record_audit(
         actor=user,
         action="relation.created",
@@ -323,6 +367,7 @@ async def preview_annotation_matches(
         if previous or image["id"] in images_with_relation:
             existing.append({**pair, "existing_relation_id": (previous or {}).get("id")})
         else:
+            pair["dataset_effects"] = await annotation_dataset_effect(annotation["id"], image["id"])
             ready.append(pair)
 
     unmatched_annotations = [
@@ -362,7 +407,11 @@ async def list_relations(
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=100),
 ) -> dict[str, Any]:
-    clauses: list[dict[str, Any]] = []
+    version_ids = await db.dataset_versions.distinct("id")
+    clauses: list[dict[str, Any]] = [{"$or": [
+        {"relation_type": "annotates"},
+        {"relation_type": "trained_on", "target_id": {"$in": version_ids}},
+    ]}]
     if status:
         clauses.append({"status": status})
     if relation_type:
@@ -395,11 +444,14 @@ async def list_relations(
         matching_collection_ids = await db.collections.distinct(
             "id", {"name": {"$regex": keyword, "$options": "i"}}
         )
+        matching_version_ids = await db.dataset_versions.distinct(
+            "id", {"name": {"$regex": keyword, "$options": "i"}}
+        )
         clauses.append(
             {
                 "$or": [
                     {"source_id": {"$in": matching_asset_ids}},
-                    {"target_id": {"$in": [*matching_asset_ids, *matching_collection_ids]}},
+                    {"target_id": {"$in": [*matching_asset_ids, *matching_collection_ids, *matching_version_ids]}},
                 ]
             }
         )
@@ -418,6 +470,8 @@ async def list_relations(
         )
         target = await db.assets.find_one(
             {"id": relation["target_id"]}, {"id": 1, "name": 1, "type": 1, "tags": 1}
+        ) or await db.dataset_versions.find_one(
+            {"id": relation["target_id"]}, {"id": 1, "name": 1, "kind": 1, "version": 1}
         ) or await db.collections.find_one(
             {"id": relation["target_id"]}, {"id": 1, "name": 1, "kind": 1}
         )
@@ -474,6 +528,10 @@ async def revoke_relation(
     )
     if collection and relation["relation_type"] == "contains":
         raise AppError(409, "RELATION_IMMUTABLE", "冻结数据集成员关系不可撤销，请创建新版本")
+    if relation["relation_type"] == "annotates":
+        dataset_effects = await annotation_dataset_effect(relation["source_id"], relation["target_id"], exclude_relation_id=relation_id)
+    else:
+        dataset_effects = []
     changes = {
         "status": "revoked",
         "revoked_at": now(),
@@ -482,15 +540,31 @@ async def revoke_relation(
         "replacement_relation_id": body.replacement_relation_id,
     }
     await db.relations.update_one({"id": relation_id, "status": "active"}, {"$set": changes})
+    if relation["relation_type"] == "annotates":
+        try:
+            await sync_annotation_datasets(relation["target_id"], user["id"])
+        except Exception:
+            await db.relations.update_one({"id": relation_id}, {"$set": {"status": "active"}, "$unset": {"revoked_at": "", "revoked_by": "", "revoke_reason": "", "replacement_relation_id": ""}})
+            await sync_annotation_datasets(relation["target_id"], user["id"])
+            raise
     await record_audit(
         actor=user,
         action="relation.revoked",
         object_type="relation",
         object_id=relation_id,
         request_id=request.state.request_id,
-        changes={"reason": body.reason},
+        changes={"reason": body.reason, "dataset_effects": dataset_effects},
     )
     return public_document(await db.relations.find_one({"id": relation_id})) or {}
+
+
+@router.get("/{relation_id}/revoke-preview")
+async def preview_revoke_relation(relation_id: str, user: ReadUser) -> dict[str, Any]:
+    relation = await db.relations.find_one({"id": relation_id, "status": "active"})
+    if relation is None:
+        raise AppError(404, "RELATION_NOT_FOUND", "关联关系不存在或已撤销")
+    effects = await annotation_dataset_effect(relation["source_id"], relation["target_id"], exclude_relation_id=relation_id) if relation["relation_type"] == "annotates" else []
+    return {"relation_id": relation_id, "dataset_effects": effects}
 
 
 @router.get("/graph/{asset_id}")
@@ -528,6 +602,8 @@ async def relation_graph(
                 or await db.datasets.find_one({"id": relation["target_id"]})
                 or await db.collections.find_one({"id": relation["target_id"]})
             )
+            if relation.get("relation_type") == "trained_on" and (target or {}).get("kind") != "dataset_version":
+                continue
             edge.update(
                 {
                     "source_name": (source or {}).get("name", relation["source_id"]),
@@ -568,4 +644,19 @@ async def relation_graph(
         node["dataset_name"] = dataset_names.get(version.get("dataset_id"), version.get("name", "数据集"))
         node["counts"] = version_counts.get(version["id"], {})
         nodes[version["id"]] = node
+    if version_ids:
+        memberships = await db.dataset_version_memberships.find({"version_id": {"$in": version_ids}}).to_list(length=None)
+        member_ids = list({item["asset_id"] for item in memberships})
+        member_assets = {item["id"]: item for item in await db.assets.find({"id": {"$in": member_ids}}).to_list(length=None)}
+        for membership in memberships:
+            asset = member_assets.get(membership["asset_id"])
+            if asset is None:
+                continue
+            nodes[asset["id"]] = public_document(asset) or {}
+            key = f"member:{membership['version_id']}:{asset['id']}"
+            edges[key] = {"id": key, "source_id": membership["version_id"], "target_id": asset["id"], "source_name": nodes[membership["version_id"]].get("name", membership["version_id"]), "target_name": asset.get("name", asset["id"]), "source_type": "dataset_version", "target_type": asset.get("type", "asset"), "relation_type": "contains", "status": "active", "derived": True, "read_only": True}
+        async for relation in db.relations.find({"status": "active", "relation_type": "annotates", "source_id": {"$in": member_ids}, "target_id": {"$in": member_ids}}):
+            source, target = member_assets.get(relation["source_id"]), member_assets.get(relation["target_id"])
+            if source and target:
+                edges[relation["id"]] = {**(public_document(relation) or {}), "source_name": source.get("name", source["id"]), "target_name": target.get("name", target["id"]), "source_type": source.get("type"), "target_type": target.get("type")}
     return {"nodes": list(nodes.values()), "edges": list(edges.values())}
