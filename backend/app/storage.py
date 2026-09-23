@@ -2,6 +2,7 @@ from datetime import timedelta
 from urllib.parse import quote
 
 from minio import Minio
+from minio.commonconfig import ComposeSource
 from minio.error import S3Error
 
 from .config import get_settings
@@ -17,7 +18,7 @@ public_storage = Minio(
     settings.minio_public_endpoint,
     access_key=settings.minio_access_key,
     secret_key=settings.minio_secret_key,
-    secure=settings.minio_secure,
+    secure=settings.minio_public_secure if settings.minio_public_secure is not None else settings.minio_secure,
 )
 
 
@@ -30,6 +31,28 @@ def presigned_put(object_key: str) -> str:
     return public_storage.presigned_put_object(
         settings.minio_bucket, object_key, expires=timedelta(hours=24)
     )
+
+
+def uploaded_chunks(prefix: str) -> dict[int, int]:
+    chunks: dict[int, int] = {}
+    for item in storage.list_objects(settings.minio_bucket, prefix=prefix, recursive=True):
+        suffix = item.object_name.removeprefix(prefix)
+        if suffix.isdigit():
+            chunks[int(suffix)] = item.size
+    return chunks
+
+
+def compose_chunks(object_key: str, chunk_keys: list[str]) -> None:
+    storage.compose_object(
+        settings.minio_bucket,
+        object_key,
+        [ComposeSource(settings.minio_bucket, key) for key in chunk_keys],
+    )
+
+
+def delete_chunks(prefix: str) -> None:
+    for item in storage.list_objects(settings.minio_bucket, prefix=prefix, recursive=True):
+        storage.remove_object(settings.minio_bucket, item.object_name)
 
 
 def presigned_get(object_key: str, hours: int = 1, download_name: str | None = None) -> str:

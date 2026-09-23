@@ -20,6 +20,10 @@ Windows 本机模式将组件、数据库、对象、日志和临时文件放在
 
 建议每日备份 MongoDB 和 MinIO，并保留至少 30 天。生产环境应为 MinIO 配置独立备份目标或复制策略。
 
+Docker Compose 部署可使用 `python scripts/compose-backup.py backup <仓库外备份目录>` 备份 MongoDB 和 MinIO。脚本会暂时停止 API 和 Worker，生成文件校验清单，然后恢复原先运行的服务。备份目录可能包含真实素材和敏感数据，应单独加密、限制访问，不能提交到 Git。
+
+恢复演练使用全新的 Compose 项目名，例如 `python scripts/compose-backup.py restore <备份目录> --project cv-archive-restore-test --confirm-new-project`。脚本先校验所有备份文件，再确认目标项目的 MongoDB、MinIO、Redis 卷均不存在；已有卷一律拒绝覆盖。恢复完成后检查服务健康状态并抽查素材、关系、版本、回收站和导出。此脚本尚未在全新 Linux 主机完成实机演练。
+
 恢复顺序：
 
 1. 停止 API 和 Worker；
@@ -38,6 +42,8 @@ API 日志记录请求 ID、路径、状态和耗时；不得记录密码、令�
 ## 任务状态
 
 任务状态为 `queued → running → succeeded | failed`。任务失败时保存错误码和可展示原因；权限不足和临时目录不可写必须及时结束任务。失败任务可以重新提交，原任务记录保留。
+
+数据集写操作使用带到期时间的租约，并在操作期间续租。进程异常退出后，租约过期可再次写入；若退出发生在版本恢复过程中，下一次写入会先完成上次恢复。恢复前仍应保存 MongoDB 与 MinIO 备份。
 
 ## Linux 权限
 

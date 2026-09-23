@@ -1,26 +1,27 @@
 [project]
 name = "cv-archive-api"
-version = "1.2.0"
+version = "1.2.1"
 description = "API for the computer vision asset archive"
 requires-python = ">=3.12"
 dependencies = [
-  "fastapi==0.116.1",
+  "fastapi==0.141.1",
+  "starlette==1.6.0",
   "uvicorn[standard]==0.35.0",
   "pymongo==4.14.1",
   "pydantic-settings==2.10.1",
   "minio==7.2.16",
   "celery==5.5.3",
   "redis==6.4.0",
-  "PyJWT==2.10.1",
+  "PyJWT==2.13.0",
   "argon2-cffi==25.1.0",
-  "python-multipart==0.0.20",
+  "python-multipart==0.0.32",
 ]
 
 [project.optional-dependencies]
 dev = [
   "httpx==0.28.1",
-  "pytest==8.4.1",
-  "pytest-asyncio==1.1.0",
+  "pytest==9.0.3",
+  "pytest-asyncio==1.4.0",
   "ruff==0.12.11",
 ]
 

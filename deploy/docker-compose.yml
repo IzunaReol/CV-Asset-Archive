@@ -23,7 +23,8 @@ services:
     environment:
       MONGODB_URI: mongodb://mongodb:27017
       MINIO_ENDPOINT: minio:9000
-      MINIO_PUBLIC_ENDPOINT: localhost:9000
+      MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-localhost:9000}
+      MINIO_PUBLIC_SECURE: ${MINIO_PUBLIC_SECURE:-false}
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
       STORAGE_DATA_PATH: /storage-data
@@ -49,8 +50,8 @@ services:
     environment:
       MONGODB_URI: mongodb://mongodb:27017
       MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: minioadmin
-      MINIO_SECRET_KEY: minioadmin
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
       REDIS_URL: redis://redis:6379/0
       WORKER_TEMP_DIR: /var/tmp/cv-archive
     depends_on:

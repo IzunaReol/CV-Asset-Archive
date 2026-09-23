@@ -2,7 +2,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class Role(StrEnum):
@@ -62,8 +62,26 @@ class UploadCompleteRequest(BaseModel):
     tags: dict[str, str | list[str]] = Field(default_factory=dict)
 
 
+class UploadBatchInitRequest(BaseModel):
+    files: list[UploadInitRequest] = Field(min_length=1, max_length=100)
+
+
+class UploadBatchCompleteRequest(BaseModel):
+    upload_session_ids: list[str] = Field(min_length=1, max_length=100)
+    tags: dict[str, str | list[str]] = Field(default_factory=dict)
+
+    @field_validator("upload_session_ids")
+    @classmethod
+    def unique_session_ids(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("上传会话不能重复")
+        return value
+
+
 class BatchTagRequest(BaseModel):
-    asset_ids: list[str] = Field(min_length=1, max_length=1000)
+    asset_ids: list[str] = Field(default_factory=list, max_length=1000)
+    selection_id: str | None = None
+    excluded_ids: list[str] = Field(default_factory=list, max_length=5000)
     set_tags: dict[str, str | list[str]] = Field(default_factory=dict)
     remove_tags: list[str] = Field(default_factory=list)
     remove_tag_values: dict[str, list[str]] = Field(default_factory=dict)
@@ -74,7 +92,17 @@ class AssetRemarkUpdate(BaseModel):
 
 
 class BatchAssetDeleteRequest(BaseModel):
-    asset_ids: list[str] = Field(min_length=1, max_length=5000)
+    asset_ids: list[str] = Field(default_factory=list, max_length=5000)
+    selection_id: str | None = None
+    excluded_ids: list[str] = Field(default_factory=list, max_length=5000)
+
+
+class AssetSelectionCreate(BaseModel):
+    q: str = Field(default="", max_length=200)
+    no_tags: bool = False
+    asset_type: list[AssetType] = Field(default_factory=list)
+    match: Literal["all", "any"] = "all"
+    tag: list[str] = Field(default_factory=list, max_length=30)
 
 
 class RelationCreate(BaseModel):
@@ -108,7 +136,9 @@ class RevokeRelationRequest(BaseModel):
 class CollectionCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=1000)
-    asset_ids: list[str] = Field(min_length=1, max_length=100000)
+    asset_ids: list[str] = Field(default_factory=list, max_length=100000)
+    selection_id: str | None = None
+    excluded_ids: list[str] = Field(default_factory=list, max_length=5000)
     freeze: bool = False
 
 
@@ -160,8 +190,10 @@ class SavedViewUpdate(BaseModel):
 
 
 class ExportCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     asset_ids: list[str] = Field(default_factory=list, max_length=100000)
-    query: dict[str, Any] | None = None
+    selection_id: str | None = None
+    excluded_ids: list[str] = Field(default_factory=list, max_length=5000)
     name: str = Field(min_length=1, max_length=120)
 
 

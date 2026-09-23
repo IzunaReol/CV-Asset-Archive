@@ -70,7 +70,8 @@ export const api = {
     if (tokens?.refresh_token) await request('/auth/logout', {method:'POST', body:JSON.stringify({refresh_token:tokens.refresh_token})}).catch(() => undefined)
     saveTokens(null)
   },
-  assets: (params:URLSearchParams) => request<{items:any[];total:number}>(`/assets?${params}`),
+  assets: (params:URLSearchParams) => request<{items:any[];total:number;next_cursor?:string|null}>(`/assets?${params}`),
+  createAssetSelection: (body:Record<string,unknown>) => request<{selection_id:string;total:number}>('/assets/selection-sets', {method:'POST',body:JSON.stringify(body)}),
   assetStats: () => request<{total:number;untagged:number;by_type:Record<string,number>;storage:{total:number;used:number;free:number}}>('/assets/stats'),
   asset: (id:string) => request<any>(`/assets/${id}`),
   updateAssetRemark: (id:string, remark:string) => request<any>(`/assets/${id}/remark`, {method:'PATCH',body:JSON.stringify({remark})}),
@@ -78,8 +79,12 @@ export const api = {
   archiveAsset: (id:string) => request<any>(`/assets/${id}/archive`, {method:'POST'}),
   initUpload: (body:Record<string, unknown>) => request<any>('/assets/upload-sessions', {method:'POST',body:JSON.stringify(body)}),
   completeUpload: (body:Record<string, unknown>) => request<any>('/assets/upload-sessions/complete', {method:'POST',body:JSON.stringify(body)}),
+  initUploadBatch: (files:Record<string, unknown>[]) => request<any>('/assets/upload-sessions/batch', {method:'POST',body:JSON.stringify({files})}),
+  completeUploadBatch: (uploadSessionIds:string[], tags:Record<string,string[]>) => request<any>('/assets/upload-sessions/complete-batch', {method:'POST',body:JSON.stringify({upload_session_ids:uploadSessionIds,tags})}),
+  uploadSession: (id:string) => request<any>(`/assets/upload-sessions/${encodeURIComponent(id)}`),
+  cancelUploadSession: (id:string) => request<void>(`/assets/upload-sessions/${encodeURIComponent(id)}`, {method:'DELETE'}),
   batchTags: (body:Record<string, unknown>) => request<any>('/assets/batch-tags', {method:'POST',body:JSON.stringify(body)}),
-  batchDelete: (assetIds:string[]) => request<any>('/assets/batch-delete', {method:'POST',body:JSON.stringify({asset_ids:assetIds})}),
+  batchDelete: (body:Record<string,unknown>) => request<any>('/assets/batch-delete', {method:'POST',body:JSON.stringify(body)}),
   trash: (page=1,pageSize=50) => request<any>(`/assets/trash/items?page=${page}&page_size=${pageSize}`),
   restoreTrash: (assetIds:string[]) => request<any>('/assets/trash/restore', {method:'POST',body:JSON.stringify({asset_ids:assetIds})}),
   emptyTrash: () => request<any>('/assets/trash/empty', {method:'POST'}),

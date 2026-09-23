@@ -104,13 +104,13 @@ npm ci
 npm run build
 ```
 
-隔离数据库的 API 流程测试使用 `scripts/runtime-e2e.py`。完整范围见[测试说明](docs/testing.md)和 [v1.2.0 发布检查单](docs/release-checklist.md)。
+隔离数据库的 API 流程测试使用 `scripts/runtime-e2e.py`。完整范围见[测试说明](docs/testing.md)和 [v1.2.1 发布检查单](docs/release-checklist.md)。
 
-## v1.2.0 升级准备
+## v1.2.1 升级准备
 
-从 v1.1.0 升级前备份 MongoDB 和 MinIO。v1.2.0 将模型关系收敛为“模型 → 已发布数据集版本”；旧的模型直连素材关系须先生成报告、核对备份，再按[迁移说明](docs/releases/v1.2.0.md)清理。更新代码与依赖并重新构建前端后，验证数据集成员、版本和模型溯源。回退前恢复升级前数据库备份，不应只回退代码。
+从 v1.2.0 升级前备份 MongoDB 和 MinIO。更新代码与依赖并重新构建前端后，验证分片上传、批量选择、数据集写入、导出及备份脚本。模型关系的数据结构没有变化；从更早版本升级时仍需按 [v1.2.0 迁移说明](docs/releases/v1.2.0.md)核对旧的模型直连素材关系。回退前恢复升级前数据库备份，不应只回退代码。
 
-变更范围、验证状态及已知限制见[v1.2.0 发布准备说明](docs/releases/v1.2.0.md)。
+变更范围、验证状态及已知限制见[v1.2.1 发布说明](docs/releases/v1.2.1.md)。
 
 ## 项目文档
 

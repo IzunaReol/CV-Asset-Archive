@@ -8,6 +8,7 @@ from ..dependencies import ReadUser, WriteUser
 from ..errors import AppError
 from ..schemas import CollectionCreate, SavedViewCreate, SavedViewUpdate
 from ..utils import new_id, now, public_document
+from .assets import resolve_selection_ids
 
 router = APIRouter(tags=["collections"])
 
@@ -16,8 +17,11 @@ router = APIRouter(tags=["collections"])
 async def create_collection(
     body: CollectionCreate, request: Request, user: WriteUser
 ) -> dict[str, Any]:
-    found = await db.assets.count_documents({"id": {"$in": body.asset_ids}, "archived_at": None})
-    if found != len(set(body.asset_ids)):
+    asset_ids = await resolve_selection_ids(user, body.asset_ids, body.selection_id, body.excluded_ids)
+    if not asset_ids:
+        raise AppError(400, "SELECTION_EMPTY", "请选择素材")
+    found = await db.assets.count_documents({"id": {"$in": asset_ids}, "archived_at": None})
+    if found != len(asset_ids):
         raise AppError(400, "INVALID_ASSET_SET", "集合中包含不存在或已归档的素材")
     previous = await db.collections.find_one({"name": body.name}, sort=[("revision", -1)])
     collection = {
@@ -25,7 +29,7 @@ async def create_collection(
         "name": body.name,
         "description": body.description,
         "kind": "snapshot" if body.freeze else "manual",
-        "asset_ids": list(dict.fromkeys(body.asset_ids)),
+        "asset_ids": asset_ids,
         "revision": (previous or {}).get("revision", 0) + 1,
         "frozen_at": now() if body.freeze else None,
         "created_by": user["id"],

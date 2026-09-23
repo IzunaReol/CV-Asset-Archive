@@ -4,7 +4,7 @@
 
 接口统一使用 `/api/v1` 前缀和 JSON。时间字段使用带时区的 ISO 8601，列表接口使用 `page`、`page_size`、`sort`、`direction`、`q` 及领域筛选参数。
 
-列表响应包含 `items`、`page`、`page_size` 和 `total`。批量操作返回 `succeeded` 与 `failed`，失败项包含 ID、错误码和原因；单项失败不回滚已成功项。
+列表响应包含 `items`、`page`、`page_size` 和 `total`。素材列表还返回 `next_cursor`；按相同筛选和排序传入 `after=<next_cursor>` 可连续读取下一页，原有页码参数仍可使用。批量操作返回成功和失败项；单项失败不回滚已成功项。
 
 错误响应：
 
@@ -25,7 +25,8 @@
 
 - 认证：`POST /auth/login`、`/auth/refresh`、`/auth/logout`
 - 素材：`GET /assets`、`/assets/stats`、`/assets/{id}`
-- 上传：`POST /assets/upload-sessions`、`/assets/upload-sessions/complete`
+- 上传：`POST /assets/upload-sessions`、`GET|DELETE /assets/upload-sessions/{id}`、`POST /assets/upload-sessions/complete`；64 MB 及以上文件使用 64 MB 分片，重新选择同一文件时查询会话并跳过已完成分片。多文件可使用 `/assets/upload-sessions/batch` 和 `/assets/upload-sessions/complete-batch`，单次最多 100 项。
+- 选择集：`POST /assets/selection-sets` 固化当前筛选结果，有效期 2 小时，最多 10 万项。批量标签、删除、集合及导出可以提交 `selection_id` 和 `excluded_ids`。
 - 素材编辑：`PATCH /assets/{id}/remark`、`POST /assets/batch-tags`
 - 标注：`GET /assets/{id}/annotation-overlays`
 - 回收站：`POST /assets/batch-delete`、`GET /assets/trash/items`、`POST /assets/trash/restore`、`POST /assets/trash/empty`
@@ -41,13 +42,14 @@ CVAT 在线任务和 MLflow 接口尚未实现。
 
 ## 筛选
 
-素材列表支持名称与备注模糊搜索、素材类型、无标签和高级条件。高级条件覆盖标签、备注、创建时间和修改时间，可选择全部条件或任一条件。分页默认 50，可选 20、50、100、200；前端“全部”会分批读取。
+素材列表支持名称与备注模糊搜索、素材类型、无标签和高级条件。高级条件覆盖标签、备注、创建时间和修改时间，可选择全部条件或任一条件。分页默认 50，可选 20、50、100、200；“全部”先加载 200 项，用户可以继续加载，批量操作使用服务端选择集。
 
 关系历史支持名称或备注、关系类型、状态、创建人和创建时间范围。
 
 ## 写入约束
 
 - 单文件默认上限为 10 GB，通过 `MAX_UPLOAD_SIZE_BYTES` 修改。
+- `POST /exports` 只接受 `asset_ids` 或 `selection_id`，不接受数据库查询对象。
 - 关系源和目标不能相同；前端不允许选择自身，后端仍执行最终校验。
 - 重复有效关系保持幂等，不创建第二条相同有效记录。
 - 数据集不接受模型或手动添加的标注成员；图片的有效标注由当前数据集自动维护，已发布版本不随之改变。

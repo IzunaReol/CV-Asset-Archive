@@ -15,6 +15,11 @@ const page = ref<Page>('library')
 const datasetOpenRequest = ref<{id:string;nonce:number}|null>(null)
 const skin = ref<Skin>((localStorage.getItem('cv-archive-skin') as Skin) || 'light')
 const selected = ref<AssetId[]>([])
+const selectedSetId = ref('')
+const selectedSetTotal = ref(0)
+const selectedSetExcluded = ref<string[]>([])
+const assetAllCursor = ref<string|null>(null)
+const assetAllLoading = ref(false)
 const query = ref('')
 const status = ref('全部状态')
 const scene = ref('全部场景')
@@ -201,7 +206,8 @@ const hasNextMedia = computed(() => activeMediaIndex.value >= 0 && activeMediaIn
 const pagedRelations = computed(() => relationHistory.value)
 const relationPages = computed(() => Math.max(1, Math.ceil(relationTotal.value / relationPageSize.value)))
 const activeRelation = computed(() => relationDetailData.value || relationHistory.value.find((item) => item.id === relationDetailId.value) || lineageEdges.value.find((item:any) => item.id === relationDetailId.value))
-const allCurrentSelected = computed(() => Boolean(filtered.value.length) && filtered.value.every(asset => selected.value.includes(asset.id)))
+const selectedCount = computed(() => selectedSetId.value ? selectedSetTotal.value - selectedSetExcluded.value.length : selected.value.length)
+const allCurrentSelected = computed(() => Boolean(filtered.value.length) && filtered.value.every(asset => isAssetSelected(asset.id)))
 const relationPickerSelectedIds = computed(() => relationPickerSelection.value.map(item => String(item.id)))
 const relationPickerPages = computed(() => relationPickerPageSize.value === 0 ? 1 : Math.max(1,Math.ceil(relationPickerTotal.value/relationPickerPageSize.value)))
 const filteredLineageEdges = computed(() => lineageEdges.value.filter((edge:any) => {
@@ -260,11 +266,39 @@ const storageFreePercent = computed(() => storageStats.value.total ? 100 - stora
 const confirmTitle = computed(() => confirmMessage.value.includes('撤销关联') ? '撤销确认' : confirmMessage.value.includes('还原') ? '还原确认' : '删除确认')
 const confirmActionText = computed(() => confirmMessage.value.includes('撤销关联') ? '确认撤销' : confirmMessage.value.includes('还原') ? '确认还原' : confirmMessage.value.includes('清空回收站') ? '确认清空' : '确认删除')
 
+function isAssetSelected(id:AssetId) {
+  return selectedSetId.value ? !selectedSetExcluded.value.includes(String(id)) : selected.value.includes(id)
+}
+function clearSelection() {
+  selected.value=[]; selectedSetId.value=''; selectedSetTotal.value=0; selectedSetExcluded.value=[]
+}
+function selectedPayload() {
+  return selectedSetId.value
+    ? {selection_id:selectedSetId.value,excluded_ids:[...selectedSetExcluded.value]}
+    : {asset_ids:selected.value.map(String)}
+}
 function toggleSelect(id: AssetId) {
+  if (selectedSetId.value) {
+    selectedSetExcluded.value = selectedSetExcluded.value.includes(String(id))
+      ? selectedSetExcluded.value.filter(item=>item!==String(id))
+      : [...selectedSetExcluded.value,String(id)]
+    return
+  }
   selected.value = selected.value.includes(id) ? selected.value.filter((item) => item !== id) : [...selected.value, id]
 }
 
-function selectCurrentPage() {
+async function selectCurrentPage() {
+  if (assetPageSize.value === 0) {
+    try {
+      const result = await api.createAssetSelection({
+        q:query.value.trim(),no_tags:noTags.value,asset_type:[...selectedAssetTypes.value],
+        match:appliedMatchMode.value,
+        tag:appliedFilterRules.value.map(rule=>`${rule.tag}:${rule.operator}:${serializedFilterValue(rule)}`),
+      })
+      selected.value=[]; selectedSetId.value=result.selection_id; selectedSetTotal.value=result.total; selectedSetExcluded.value=[]
+    } catch (error) { notifyError(error instanceof Error?error.message:'选择素材失败') }
+    return
+  }
   selected.value = Array.from(new Set([...selected.value, ...filtered.value.map(asset => asset.id)]))
 }
 
@@ -277,18 +311,26 @@ function assetListParams(page:number, pageSize:number) {
   return params
 }
 
-async function loadAllAssetPages() {
-  const first = await api.assets(assetListParams(1, 200))
-  const items = [...first.items]
-  const pageCount = Math.ceil(first.total / 200)
-  for (let pageNumber = 2; pageNumber <= pageCount; pageNumber += 1) {
-    const result = await api.assets(assetListParams(pageNumber, 200))
-    items.push(...result.items)
-  }
-  return {items,total:first.total}
+async function loadMoreAssets() {
+  if (!assetAllCursor.value || assetAllLoading.value) return
+  assetAllLoading.value=true
+  try {
+    const params=assetListParams(1,200)
+    params.set('after',assetAllCursor.value)
+    const result=await api.assets(params)
+    assets.value.push(...result.items.map(mapAsset))
+    assetAllCursor.value=result.next_cursor||null
+  } catch (error) { notifyError(error instanceof Error?error.message:'加载素材失败') }
+  finally { assetAllLoading.value=false }
 }
 
 function invertCurrentPageSelection() {
+  if (selectedSetId.value) {
+    const excluded=new Set(selectedSetExcluded.value)
+    filtered.value.forEach(asset=>excluded.has(String(asset.id))?excluded.delete(String(asset.id)):excluded.add(String(asset.id)))
+    selectedSetExcluded.value=[...excluded]
+    return
+  }
   const currentIds = filtered.value.map(asset => asset.id)
   const currentSet = new Set(currentIds)
   selected.value = [...selected.value.filter(id => !currentSet.has(id)), ...currentIds.filter(id => !selected.value.includes(id))]
@@ -600,6 +642,7 @@ function removeFilterRule(id: number) {
 }
 
 function resetFilters() {
+  clearSelection()
   noTags.value = false
   matchMode.value = 'all'
   filterRules.value = [{ id: nextRuleId++, tag:'status', operator:'equals', value:'' }]
@@ -612,7 +655,7 @@ function resetFilters() {
 
 function resetLibraryPage() {
   query.value = ''
-  selected.value = []
+  clearSelection()
   detailId.value = null
   detailAsset.value = null
   assetSort.value = 'created_at'
@@ -684,6 +727,7 @@ function changeRuleOperator(rule:FilterRule) {
 }
 
 function toggleAssetType(type:string) {
+  clearSelection()
   selectedAssetTypes.value = selectedAssetTypes.value.includes(type)
     ? selectedAssetTypes.value.filter(item => item !== type)
     : [...selectedAssetTypes.value, type]
@@ -691,13 +735,13 @@ function toggleAssetType(type:string) {
   void loadAssets()
 }
 
-function applyAssetFilters() { assetPage.value = 1; void loadAssets() }
+function applyAssetFilters() { clearSelection(); assetPage.value = 1; void loadAssets() }
 function applyAdvancedFilters() {
   const invalidRange = filterRules.value.find(rule => rule.operator === 'between' && (!rule.valueEnd || new Date(rule.valueEnd).getTime() <= new Date(rule.value).getTime()))
   if (invalidRange) { notifyError('结束时间必须晚于开始时间'); return }
   appliedMatchMode.value=matchMode.value
   appliedFilterRules.value=filterRules.value.filter(rule=>rule.value.trim()).map(rule=>({...rule}))
-  selected.value=[]
+  clearSelection()
   applyAssetFilters()
 }
 function changeAssetPage(page:number) { assetPage.value = page; void loadAssets() }
@@ -725,9 +769,7 @@ async function loadAssets() {
   if (!api.session()) return
   demoState.value = 'loading'
   try {
-    const assetsRequest = assetPageSize.value === 0
-      ? loadAllAssetPages()
-      : api.assets(assetListParams(assetPage.value, effectiveAssetPageSize.value))
+    const assetsRequest = api.assets(assetListParams(assetPageSize.value===0?1:assetPage.value, effectiveAssetPageSize.value))
     const [result, views, stats, tags] = await Promise.all([assetsRequest, api.savedViews(), api.assetStats(), api.tags()])
     assetFilteredTotal.value = result.total
     assetTotal.value = stats.total
@@ -736,6 +778,7 @@ async function loadAssets() {
     storageStats.value = stats.storage
     tagRows.value = tags.items
     assets.value = result.items.map(mapAsset)
+    assetAllCursor.value = assetPageSize.value===0 ? result.next_cursor||null : null
     demoState.value = result.items.length ? 'normal' : 'empty'
     savedViewRows.value = views.items
   } catch (error) {
@@ -749,6 +792,7 @@ function canDisplayMediaPreview(asset: Pick<Asset, 'type' | 'preview_url'> | nul
 }
 
 function applySavedView(view:any) {
+  clearSelection()
   const value = view.query || {}
   query.value = value.q || ''; noTags.value = Boolean(value.no_tags); matchMode.value = value.match || 'all'
   selectedAssetTypes.value = Array.isArray(value.asset_types) ? value.asset_types : []
@@ -765,9 +809,9 @@ function applySavedView(view:any) {
 }
 
 async function createCollection() {
-  if (!selected.value.length || !collectionName.value.trim()) { notifyError('请填写名称并选择素材'); return }
+  if (!selectedCount.value || !collectionName.value.trim()) { notifyError('请填写名称并选择素材'); return }
   try {
-    await api.createCollection({name:collectionName.value.trim(),description:collectionDescription.value,asset_ids:selected.value.map(String),freeze:collectionFreeze.value})
+    await api.createCollection({name:collectionName.value.trim(),description:collectionDescription.value,...selectedPayload(),freeze:collectionFreeze.value})
     collectionOpen.value=false; collectionName.value=''; collectionDescription.value=''
     notify(collectionFreeze.value ? '已创建不可变数据集快照' : '已创建素材集合')
   } catch (error) { notifyError(error instanceof Error ? error.message : '创建集合失败') }
@@ -799,7 +843,13 @@ function uploadTypeStatus(file:File) {
   if (selected === 'image_annotation') return '上传后会解压并创建关联关系'
   return detected === selected ? `自动识别为${uploadTypeLabels[selected]}` : `已调整为${uploadTypeLabels[selected]}`
 }
-function removeUploadFile(file:File) {
+async function removeUploadFile(file:File) {
+  const storageKey = `cv-archive-upload:${uploadFileKey(file)}`
+  const sessionId = localStorage.getItem(storageKey)
+  if (sessionId) {
+    await api.cancelUploadSession(sessionId).catch(()=>undefined)
+    localStorage.removeItem(storageKey)
+  }
   uploadFiles.value = uploadFiles.value.filter(item => uploadFileKey(item) !== uploadFileKey(file))
   delete uploadTypeOverrides.value[uploadFileKey(file)]
 }
@@ -819,36 +869,105 @@ async function uploadAsset() {
   let hasDatasetPackage = false
   try {
     let completed = 0
+    const markCompleted = () => {
+      completed += 1
+      uploadCompleted.value = completed
+      uploadProgress.value = Math.round((completed / files.length) * 100)
+    }
     const uploadGroup = async (group: File[], concurrency: number) => {
-      const queue = [...group]
-      const uploadOne = async () => {
-        while (queue.length) {
-          const file = queue.shift()!
-          try {
-            const session = await api.initUpload({filename:file.name,size:file.size,mime_type:file.type || 'application/octet-stream',asset_type:resolvedUploadType(file)})
-            if (session.upload_required) {
-              const response = await fetch(session.upload_url, {method:'PUT',body:file})
-              if (!response.ok) throw new Error('文件上传到对象存储失败')
+      for (let offset = 0; offset < group.length; offset += 50) {
+        const chunk = group.slice(offset, offset + 50)
+        let initialized:any[]
+        try {
+          initialized = (await api.initUploadBatch(chunk.map(file => ({
+            filename:file.name,size:file.size,mime_type:file.type || 'application/octet-stream',asset_type:resolvedUploadType(file),
+          })))).items
+        } catch (error) {
+          chunk.forEach(file => { failed.push({file,message:error instanceof Error?error.message:'创建上传任务失败'}); markCompleted() })
+          continue
+        }
+        const ready:Array<{file:File;sessionId:string}> = []
+        const queue = [...initialized]
+        const uploadOne = async () => {
+          while (queue.length) {
+            const item = queue.shift()!
+            const file = chunk[item.index]
+            if (item.error) { failed.push({file,message:item.error.message}); markCompleted(); continue }
+            try {
+              if (item.session.upload_required) {
+                const response = await fetch(item.session.upload_url, {method:'PUT',body:file})
+                if (!response.ok) throw new Error('文件上传到对象存储失败')
+              }
+              ready.push({file,sessionId:item.session.upload_session_id})
+            } catch (error) {
+              failed.push({file,message:error instanceof Error?error.message:'上传失败'})
+              markCompleted()
             }
-            await api.completeUpload({upload_session_id:session.upload_session_id,tags:{...uploadTags.value}})
-            succeeded += 1
-            hasDatasetPackage ||= resolvedUploadType(file) === 'image_annotation'
-          } catch (error) {
-            failed.push({file,message:error instanceof Error ? error.message : '上传失败'})
           }
-          completed += 1
-          uploadCompleted.value = completed
-          uploadProgress.value = Math.round((completed / files.length) * 100)
+        }
+        await Promise.all(Array.from({length:Math.min(concurrency,queue.length)},()=>uploadOne()))
+        if (!ready.length) continue
+        try {
+          const result = await api.completeUploadBatch(ready.map(item=>item.sessionId), {...uploadTags.value})
+          result.items.forEach((item:any) => {
+            const file = ready[item.index].file
+            if (item.error) failed.push({file,message:item.error.message})
+            else { succeeded += 1; hasDatasetPackage ||= resolvedUploadType(file) === 'image_annotation' }
+            markCompleted()
+          })
+        } catch (error) {
+          ready.forEach(({file}) => { failed.push({file,message:error instanceof Error?error.message:'完成上传失败'}); markCompleted() })
         }
       }
-      await Promise.all(Array.from({length:Math.min(concurrency,group.length)},()=>uploadOne()))
     }
     // Small assets spend more time on per-file requests than on transfer.
     // Keep large uploads bounded so several 10 GB files cannot saturate the host.
-    const smallFiles = files.filter(file => file.size < 512 * 1024 * 1024)
-    const largeFiles = files.filter(file => file.size >= 512 * 1024 * 1024)
-    await uploadGroup(smallFiles, 6)
-    await uploadGroup(largeFiles, 2)
+    const smallFiles = files.filter(file => file.size < 64 * 1024 * 1024)
+    const largeFiles = files.filter(file => file.size >= 64 * 1024 * 1024)
+    await uploadGroup(smallFiles, 12)
+    const largeQueue = [...largeFiles]
+    const uploadLarge = async () => {
+      while (largeQueue.length) {
+        const file = largeQueue.shift()!
+        const storageKey = `cv-archive-upload:${uploadFileKey(file)}`
+        try {
+          let sessionId = localStorage.getItem(storageKey)
+          let status:any = null
+          if (sessionId) {
+            status = await api.uploadSession(sessionId).catch(() => null)
+            if (status && (status.size !== file.size || status.asset_type !== resolvedUploadType(file))) status = null
+          }
+          if (!status) {
+            localStorage.removeItem(storageKey)
+            const initial = await api.initUpload({filename:file.name,size:file.size,mime_type:file.type || 'application/octet-stream',asset_type:resolvedUploadType(file)})
+            sessionId = initial.upload_session_id
+            localStorage.setItem(storageKey, sessionId!)
+            status = await api.uploadSession(sessionId!)
+          }
+          if (status.transfer_mode === 'chunks') {
+            const pending = Array.from({length:status.chunk_count},(_,index)=>index).filter(index=>!status.uploaded_parts.includes(index))
+            const uploadChunk = async () => {
+              while (pending.length) {
+                const index = pending.shift()!
+                const offset = index * status.chunk_size
+                const response = await fetch(status.upload_urls[String(index)], {method:'PUT',body:file.slice(offset,Math.min(offset+status.chunk_size,file.size))})
+                if (!response.ok) throw new Error(`第 ${index+1} 个分片上传失败`)
+              }
+            }
+            await Promise.all(Array.from({length:Math.min(3,pending.length)},()=>uploadChunk()))
+          } else if (status.upload_required) {
+            throw new Error('上传会话模式不正确，请重新选择文件')
+          }
+          await api.completeUpload({upload_session_id:sessionId,tags:{...uploadTags.value}})
+          localStorage.removeItem(storageKey)
+          succeeded += 1
+          hasDatasetPackage ||= resolvedUploadType(file) === 'image_annotation'
+        } catch (error) {
+          failed.push({file,message:error instanceof Error?error.message:'上传失败'})
+        } finally { markCompleted() }
+      }
+    }
+    await Promise.all(Array.from({length:Math.min(2,largeFiles.length)},()=>uploadLarge()))
     if (failed.length) {
       uploadFiles.value = failed.map(item => item.file)
       uploadError.value = failed.map(item => `${item.file.name}：${item.message}`).join('；')
@@ -919,12 +1038,12 @@ function removeSavedView(id:string, name:string) {
 }
 
 async function exportSelected() {
-  if (!selected.value.length) return
+  if (!selectedCount.value) return
   try {
     const current = new Date()
     const part = (value:number) => String(value).padStart(2, '0')
     const timestamp = `${current.getFullYear()}${part(current.getMonth()+1)}${part(current.getDate())}_${part(current.getHours())}${part(current.getMinutes())}${part(current.getSeconds())}`
-    await api.createExport({name:`素材导出_${timestamp}`,asset_ids:selected.value.map(String)})
+    await api.createExport({name:`素材导出_${timestamp}`,...selectedPayload()})
     notify('导出任务已加入下载中心')
   } catch (error) { notifyError(error instanceof Error ? error.message : '创建导出任务失败') }
 }
@@ -1127,14 +1246,15 @@ function removeTag(key:string, name:string) {
 }
 
 function deleteSelectedAssets() {
-  const ids = selected.value.map(String)
-  if (!ids.length) return
-  askConfirmation(`确定要删除${ids.length}项吗？`, async () => {
-    const result = await api.batchDelete(ids)
-    selected.value = result.failed.map((item:any) => item.id)
+  if (!selectedCount.value) return
+  askConfirmation(`确定要删除${selectedCount.value}项吗？`, async () => {
+    const result = await api.batchDelete(selectedPayload())
+    clearSelection()
     detailId.value = null; detailAsset.value = null
     const failedMessage = [...new Set(result.failed.map((item:any) => item.message || item.code))].join('；')
-    notify(result.failed.length ? `已移入回收站 ${result.succeeded.length} 项，${result.failed.length} 项失败：${failedMessage}` : `已将 ${result.succeeded.length} 项素材移入回收站`, result.failed.length ? 'error' : 'success')
+    const successCount=result.succeeded_count ?? result.succeeded.length
+    const failedCount=result.failed_count ?? result.failed.length
+    notify(failedCount ? `已移入回收站 ${successCount} 项，${failedCount} 项失败：${failedMessage}` : `已将 ${successCount} 项素材移入回收站`, failedCount ? 'error' : 'success')
     await loadAssets()
   })
 }
@@ -1301,10 +1421,10 @@ async function applyBatchTag() {
   try {
     const value = batchTagValue.value.trim()
     const body = batchTagAction.value === 'add'
-      ? {asset_ids:selected.value.map(String),set_tags:{[batchTagKey.value]:value},remove_tags:[],remove_tag_values:{}}
-      : {asset_ids:selected.value.map(String),set_tags:{},remove_tags:[],remove_tag_values:{[batchTagKey.value]:[value]}}
+      ? {...selectedPayload(),set_tags:{[batchTagKey.value]:value},remove_tags:[],remove_tag_values:{}}
+      : {...selectedPayload(),set_tags:{},remove_tags:[],remove_tag_values:{[batchTagKey.value]:[value]}}
     const result = await api.batchTags(body)
-    notify(`已${batchTagAction.value === 'add' ? '添加' : '删除'} ${result.succeeded.length} 项素材的标签`)
+    notify(`已${batchTagAction.value === 'add' ? '添加' : '删除'} ${result.succeeded_count ?? result.succeeded.length} 项素材的标签`)
     batchTagOpen.value = false
     await loadAssets()
   } catch (error) { notifyError(error instanceof Error ? error.message : '批量标签失败') }
@@ -1382,7 +1502,7 @@ async function revokeActiveRelation() {
       <template v-if="page === 'library'">
         <section class="page-head">
           <div><h1>素材库</h1></div>
-          <div class="primary-actions"><button v-if="selected.length" class="secondary" @click="selected=[]">× 取消选择</button><button class="secondary" :disabled="!filtered.length || allCurrentSelected" @click="selectCurrentPage">✓ 全选</button><button class="secondary" :disabled="!filtered.length" @click="invertCurrentPageSelection">⇄ 反选</button><button class="secondary" @click="resetLibraryPage">↻ 重置页面</button><button class="secondary" @click="openSaveView">☆ 保存视图</button><button class="primary" @click="openUpload">＋ 上传素材</button></div>
+          <div class="primary-actions"><button v-if="selectedCount" class="secondary" @click="clearSelection">× 取消选择</button><button class="secondary" :disabled="!filtered.length || allCurrentSelected" @click="selectCurrentPage">✓ 全选</button><button class="secondary" :disabled="!filtered.length" @click="invertCurrentPageSelection">⇄ 反选</button><button class="secondary" @click="resetLibraryPage">↻ 重置页面</button><button class="secondary" @click="openSaveView">☆ 保存视图</button><button class="primary" @click="openUpload">＋ 上传素材</button></div>
         </section>
 
         <div class="library-shell">
@@ -1415,25 +1535,25 @@ async function revokeActiveRelation() {
               <div><button :class="{ active: density === 'compact' }" @click="density='compact'">紧凑</button><button :class="{ active: density === 'comfortable' }" @click="density='comfortable'">舒适</button><select v-model="assetSort" @change="applyAssetFilters"><option value="created_at">最近更新</option><option value="name">名称</option><option value="size">文件大小</option></select><button @click="assetDirection=assetDirection==='desc'?'asc':'desc';applyAssetFilters()">{{assetDirection==='desc'?'降序':'升序'}}</button></div>
             </div>
 
-            <div v-if="selected.length" class="batch-bar"><b>已选 {{ selected.length }} 项</b><button class="batch-delete" @click="deleteSelectedAssets">删除</button><button @click="openBatchTag('library','remove')">删除标签</button><button @click="openBatchTag('library','add')">添加标签</button><button @click="collectionOpen=true">创建数据集</button><button @click="setPage('relations')">建立关系</button><button @click="exportSelected">导出</button></div>
+            <div v-if="selectedCount" class="batch-bar"><b>已选 {{ selectedCount }} 项</b><button class="batch-delete" @click="deleteSelectedAssets">删除</button><button @click="openBatchTag('library','remove')">删除标签</button><button @click="openBatchTag('library','add')">添加标签</button><button @click="collectionOpen=true">创建数据集</button><button v-if="!selectedSetId" @click="setPage('relations')">建立关系</button><button @click="exportSelected">导出</button></div>
 
             <div v-if="demoState === 'loading'" class="state-panel"><div class="spinner"></div><b>正在加载素材</b><p>正在获取筛选结果和预览信息…</p></div>
             <div v-else-if="demoState === 'error'" class="state-panel error-state"><span>!</span><b>素材加载失败</b><p>服务暂时不可用，请检查连接后重试。</p><button @click="demoState='normal'">重新加载</button></div>
             <div v-else-if="demoState === 'forbidden'" class="state-panel"><span>⌾</span><b>没有查看权限</b><p>当前角色不能访问该项目，请联系管理员授权。</p><button @click="setPage('admin')">查看我的角色</button></div>
             <div v-else-if="filtered.length && demoState !== 'empty'" class="asset-grid">
-              <article v-for="asset in filtered" :key="asset.id" class="asset-card" :class="{ selected: selected.includes(asset.id) }">
+              <article v-for="asset in filtered" :key="asset.id" class="asset-card" :class="{ selected: isAssetSelected(asset.id) }">
                 <button class="asset-preview" :style="{ background: asset.tone }" @click="openAsset(asset)">
                   <img v-if="canDisplayMediaPreview(asset)" :src="asset.preview_url!" :alt="asset.name" />
                   <span v-if="asset.type==='视频' && canDisplayMediaPreview(asset)" class="play-badge">▶</span>
                   <span v-if="!canDisplayMediaPreview(asset)" class="visual-code">{{ asset.type === '图片' ? 'IMG' : asset.type === '视频' ? 'VIDEO' : asset.type === '模型' ? 'MODEL' : 'DATA' }}</span>
                   <small>{{ asset.mark }}</small>
                 </button>
-                <button class="selector" :aria-label="`选择 ${asset.name}`" @click="toggleSelect(asset.id)">{{ selected.includes(asset.id) ? '✓' : '' }}</button>
+                <button class="selector" :aria-label="`选择 ${asset.name}`" @click="toggleSelect(asset.id)">{{ isAssetSelected(asset.id) ? '✓' : '' }}</button>
                 <div class="asset-info"><b :title="asset.name">{{ asset.name }}</b><span v-if="assetTagValues(asset).length"><i v-for="tag in assetTagValues(asset)" :key="String(tag)">{{tag}}</i></span><small>{{ asset.type }} · {{asset.createdAt}} <em v-if="asset.status==='processing'||asset.status==='queued'" class="processing-state">处理中</em><em v-else-if="asset.status==='failed'" class="failed-state">处理失败</em></small></div>
               </article>
             </div>
             <div v-else class="empty"><b>没有匹配的素材</b><p>调整筛选条件或清空搜索词后重试。</p><button @click="query='';resetFilters()">清空筛选</button></div>
-            <div v-if="assetFilteredTotal" class="pagination"><span>第 {{assetPage}} / {{assetPages}} 页</span><label>每页 <select v-model="assetPageSize" @change="assetPage=1;loadAssets()"><option :value="20">20</option><option :value="50">50</option><option :value="100">100</option><option :value="200">200</option><option :value="0">全部</option></select> 项</label><button :disabled="assetPage===1" @click="changeAssetPage(assetPage-1)">‹</button><button :disabled="assetPage===assetPages" @click="changeAssetPage(assetPage+1)">›</button></div>
+            <div v-if="assetFilteredTotal" class="pagination"><span>{{assetPageSize===0?`已加载 ${assets.length} / ${assetFilteredTotal} 项`:`第 ${assetPage} / ${assetPages} 页`}}</span><button v-if="assetPageSize===0&&assetAllCursor" :disabled="assetAllLoading" @click="loadMoreAssets">{{assetAllLoading?'加载中…':'继续加载'}}</button><label>每页 <select v-model="assetPageSize" @change="clearSelection();assetPage=1;loadAssets()"><option :value="20">20</option><option :value="50">50</option><option :value="100">100</option><option :value="200">200</option><option :value="0">全部</option></select> 项</label><button v-if="assetPageSize!==0" :disabled="assetPage===1" @click="changeAssetPage(assetPage-1)">‹</button><button v-if="assetPageSize!==0" :disabled="assetPage===assetPages" @click="changeAssetPage(assetPage+1)">›</button></div>
           </section>
         </div>
       </template>
@@ -1554,9 +1674,9 @@ async function revokeActiveRelation() {
       </section>
     </div>
     <div v-if="batchTagOpen" class="modal-stage">
-      <section class="upload-dialog compact-dialog"><button class="close" @click="batchTagOpen=false">×</button><h2>为 {{batchTagTarget==='upload'?uploadFiles.length:selected.length}} 项素材{{batchTagAction==='add'?'添加':'删除'}}标签</h2><div class="upload-fields"><label>标签<select v-model="batchTagKey" @change="batchTagValue='' "><option v-for="tag in tagDefinitions" :key="tag.key" :value="tag.key">{{tag.label}}</option></select></label><label>标签值<select v-if="selectedTagDefinition(batchTagKey)?.values?.length && !selectedTagDefinition(batchTagKey)?.free_input" v-model="batchTagValue"><option value="" disabled>请选择</option><option v-for="value in selectedTagDefinition(batchTagKey)?.values" :key="value" :value="value">{{value}}</option></select><input v-else v-model="batchTagValue" placeholder="请输入标签值" /></label></div><div class="dialog-actions"><button class="secondary" @click="batchTagOpen=false">取消</button><button class="primary" @click="applyBatchTag">{{batchTagAction==='add'?'添加标签':'删除标签'}}</button></div></section>
+      <section class="upload-dialog compact-dialog"><button class="close" @click="batchTagOpen=false">×</button><h2>为 {{batchTagTarget==='upload'?uploadFiles.length:selectedCount}} 项素材{{batchTagAction==='add'?'添加':'删除'}}标签</h2><div class="upload-fields"><label>标签<select v-model="batchTagKey" @change="batchTagValue='' "><option v-for="tag in tagDefinitions" :key="tag.key" :value="tag.key">{{tag.label}}</option></select></label><label>标签值<select v-if="selectedTagDefinition(batchTagKey)?.values?.length && !selectedTagDefinition(batchTagKey)?.free_input" v-model="batchTagValue"><option value="" disabled>请选择</option><option v-for="value in selectedTagDefinition(batchTagKey)?.values" :key="value" :value="value">{{value}}</option></select><input v-else v-model="batchTagValue" placeholder="请输入标签值" /></label></div><div class="dialog-actions"><button class="secondary" @click="batchTagOpen=false">取消</button><button class="primary" @click="applyBatchTag">{{batchTagAction==='add'?'添加标签':'删除标签'}}</button></div></section>
     </div>
-    <div v-if="collectionOpen" class="modal-stage"><section class="upload-dialog compact-dialog"><button class="close" @click="collectionOpen=false">×</button><h2>用 {{selected.length}} 项素材创建数据集</h2><div class="form-stack"><label>名称<input v-model="collectionName" placeholder="例如 helmet_train_v1" /></label><label>说明<textarea v-model="collectionDescription" rows="3" /></label><label class="inline-check"><input v-model="collectionFreeze" type="checkbox" /> 创建后冻结，作为不可变训练集快照</label></div><div class="dialog-actions"><button class="secondary" @click="collectionOpen=false">取消</button><button class="primary" @click="createCollection">创建数据集</button></div></section></div>
+    <div v-if="collectionOpen" class="modal-stage"><section class="upload-dialog compact-dialog"><button class="close" @click="collectionOpen=false">×</button><h2>用 {{selectedCount}} 项素材创建数据集</h2><div class="form-stack"><label>名称<input v-model="collectionName" placeholder="例如 helmet_train_v1" /></label><label>说明<textarea v-model="collectionDescription" rows="3" /></label><label class="inline-check"><input v-model="collectionFreeze" type="checkbox" /> 创建后冻结，作为不可变训练集快照</label></div><div class="dialog-actions"><button class="secondary" @click="collectionOpen=false">取消</button><button class="primary" @click="createCollection">创建数据集</button></div></section></div>
     <div v-if="savedViewOpen" class="modal-stage"><section class="upload-dialog compact-dialog"><button class="close" @click="savedViewOpen=false">×</button><h2>{{editingViewId?'修改视图名称':'保存视图'}}</h2><div class="form-stack"><label>请输入视图名称<input v-model="savedViewName" autofocus @keyup.enter="saveCurrentView" /></label></div><div class="dialog-actions"><button class="secondary" @click="savedViewOpen=false">取消</button><button class="primary" @click="saveCurrentView">{{editingViewId?'保存修改':'保存视图'}}</button></div></section></div>
     <div v-if="tagOpen" class="modal-stage"><section class="upload-dialog compact-dialog tag-dialog"><button class="close" @click="tagOpen=false">×</button><h2>{{editingTagKey?'修改标签字段':'新建标签字段'}}</h2><div class="form-stack"><label>标签名称<input v-model="newTag.name" placeholder="例如 天气" /></label><label>备注<input v-model="newTag.key" :disabled="Boolean(editingTagKey)" placeholder="例如 weather" /></label><div class="tag-values-editor"><div class="field-label"><span>标签值</span><button class="add-value" type="button" @click="addTagValue">＋ 新增</button></div><p v-if="!tagValueRows.length" class="value-empty">暂无标签值，点击“新增”添加</p><div v-for="row in tagValueRows" :key="row.id" class="tag-value-row"><input v-model="row.value" :disabled="!row.editing" placeholder="请输入标签值" @keyup.enter="row.editing=false" /><button type="button" @click="toggleTagValueEdit(row)">{{row.editing?'完成':'修改'}}</button><button class="remove-value" type="button" @click="removeTagValue(row.id)">删除</button></div></div><label class="color-field">颜色<div class="color-control"><label class="color-picker-button" title="点击选择颜色"><span class="color-swatch large" :style="{background:newTag.color}"></span><span>选择颜色</span><input v-model="tagPickerColor" type="color" aria-label="选择颜色" @change="applyPickerColor" /></label><input v-model="newTag.color" class="color-code" aria-label="颜色值" maxlength="7" placeholder="#64748B" /></div></label><label class="inline-check"><input v-model="newTag.free_input" type="checkbox" /> 允许输入枚举以外的值</label></div><div class="dialog-actions"><button class="secondary" @click="tagOpen=false">取消</button><button class="primary" @click="createTag">保存标签</button></div></section></div>
     <div v-if="confirmOpen" class="modal-stage confirm-stage"><section class="upload-dialog compact-dialog confirm-dialog"><h2>{{confirmTitle}}</h2><p>{{confirmMessage}}</p><div class="dialog-actions"><button class="secondary" :disabled="confirmBusy" @click="cancelConfirmation">取消</button><button class="confirm-delete" :disabled="confirmBusy" @click="runConfirmedAction">{{confirmBusy?'正在处理…':confirmActionText}}</button></div></section></div>

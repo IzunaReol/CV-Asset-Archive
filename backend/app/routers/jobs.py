@@ -13,6 +13,7 @@ from ..errors import AppError
 from ..schemas import ExportCreate
 from ..storage import presigned_get
 from ..utils import new_id, now, public_document
+from .assets import resolve_selection_ids
 
 router = APIRouter(tags=["jobs"])
 settings = get_settings()
@@ -21,15 +22,21 @@ celery_client = Celery(broker=settings.redis_url)
 
 @router.post("/exports", status_code=202)
 async def create_export(body: ExportCreate, request: Request, user: WriteUser) -> dict[str, Any]:
-    if not body.asset_ids and not body.query:
-        raise AppError(400, "EXPORT_SELECTION_REQUIRED", "请选择素材或提供筛选条件")
-    if body.asset_ids:
-        asset_ids = list(dict.fromkeys(body.asset_ids))
-    else:
-        query = {**(body.query or {}), "archived_at": None}
-        asset_ids = [item["id"] async for item in db.assets.find(query, {"id": 1}).limit(100000)]
+    asset_ids = await resolve_selection_ids(user, body.asset_ids, body.selection_id, body.excluded_ids)
     if not asset_ids:
         raise AppError(400, "EXPORT_EMPTY", "筛选结果中没有可导出的素材")
+    if body.selection_id:
+        await db.asset_selection_sets.update_one(
+            {"id": body.selection_id, "owner_id": user["id"]},
+            {"$set": {"expires_at": now() + timedelta(hours=settings.export_expiry_hours)}},
+        )
+        job_input = {
+            "selection_id": body.selection_id,
+            "excluded_ids": body.excluded_ids,
+            "asset_count": len(asset_ids),
+        }
+    else:
+        job_input = {"asset_ids": asset_ids, "asset_count": len(asset_ids)}
     job = {
         "id": new_id(),
         "type": "export",
@@ -37,7 +44,7 @@ async def create_export(body: ExportCreate, request: Request, user: WriteUser) -
         "state": "queued",
         "progress": 0,
         "owner_id": user["id"],
-        "input": {"asset_ids": asset_ids},
+        "input": job_input,
         "result": None,
         "error": None,
         "created_at": now(),

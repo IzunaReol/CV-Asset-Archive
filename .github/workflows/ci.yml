@@ -19,8 +19,10 @@ jobs:
           cache: pip
       - run: pip install -e "backend[dev]"
       - run: pip install -e worker
-      - run: ruff check backend/app backend/tests worker
+      - run: ruff check backend/app backend/tests worker scripts/compose-backup.py scripts/benchmark-assets.py
       - run: pytest -q backend/tests
+      - run: python -m pip install --upgrade pip pip-audit
+      - run: pip-audit --progress-spinner off
 
   frontend:
     runs-on: ubuntu-latest
@@ -36,6 +38,36 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npm run build
+      - run: npm audit --omit=dev --audit-level=high
+
+  container-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -f deploy/api.Dockerfile -t cv-archive-api:ci .
+      - run: docker build -f deploy/worker.Dockerfile -t cv-archive-worker:ci .
+      - run: docker build -f deploy/frontend.Dockerfile -t cv-archive-frontend:ci .
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: cv-archive-api:ci
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: cv-archive-worker:ci
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: cv-archive-frontend:ci
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
 
   secret-scan:
     runs-on: ubuntu-latest

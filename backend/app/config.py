@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     mongodb_database: str = "cv_archive"
     minio_endpoint: str = "localhost:9000"
     minio_public_endpoint: str = "localhost:9000"
+    minio_public_secure: bool | None = None
     minio_access_key: str = "minioadmin"
     minio_secret_key: str = "minioadmin"
     minio_bucket: str = "cv-assets"

@@ -1,14 +1,16 @@
 import asyncio
 import hashlib
 import json
+import re
 from functools import wraps
 from datetime import timedelta
+from contextlib import suppress
 from typing import Any
 
 from pydantic import BaseModel, Field
 from celery import Celery
 from fastapi import APIRouter, Query, Request
-from pymongo import ASCENDING, DESCENDING
+from pymongo import ASCENDING, DESCENDING, UpdateOne
 
 from ..audit import record_audit
 from ..config import get_settings
@@ -38,17 +40,69 @@ def serialize_dataset_write(function):
     async def guarded(dataset_id, *args, **kwargs):
         token = new_id()
         acquired = await db.datasets.update_one(
-            {"id": dataset_id, "deleted_at": None, "write_token": None},
-            {"$set": {"write_token": token}},
+            {"id": dataset_id, "deleted_at": None, "$or": [
+                {"write_token": None}, {"write_token_expires_at": {"$lte": now()}},
+            ]},
+            {"$set": {"write_token": token, "write_token_expires_at": now() + timedelta(minutes=5)}},
         )
         if not acquired.modified_count:
             await _get_dataset(dataset_id)
             raise AppError(409, "DATASET_BUSY", "数据集正在处理，请稍后重试")
+        async def renew_lease():
+            while True:
+                await asyncio.sleep(30)
+                result = await db.datasets.update_one(
+                    {"id": dataset_id, "write_token": token},
+                    {"$set": {"write_token_expires_at": now() + timedelta(minutes=5)}},
+                )
+                if not result.matched_count:
+                    return
+
+        heartbeat = asyncio.create_task(renew_lease())
         try:
+            await _resume_pending_restore(dataset_id)
             return await function(dataset_id, *args, **kwargs)
         finally:
-            await db.datasets.update_one({"id": dataset_id, "write_token": token}, {"$unset": {"write_token": ""}})
+            heartbeat.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat
+            await db.datasets.update_one(
+                {"id": dataset_id, "write_token": token},
+                {"$unset": {"write_token": "", "write_token_expires_at": ""}},
+            )
     return guarded
+
+
+async def _restore_memberships_from_version(dataset_id: str, version_id: str, actor_id: str) -> int:
+    members = await db.dataset_version_memberships.find({"version_id": version_id}).to_list(length=None)
+    workset_members = [
+        {"id": new_id(), "dataset_id": dataset_id, "asset_id": item["asset_id"],
+         "created_by": actor_id, "created_at": now()}
+        for item in members if item["snapshot"].get("type") != "annotation"
+    ]
+    await db.dataset_memberships.delete_many({"dataset_id": dataset_id})
+    if workset_members:
+        await db.dataset_memberships.insert_many(workset_members)
+    await sync_annotation_memberships(dataset_id, actor_id)
+    await db.datasets.update_one({"id": dataset_id}, {"$set": {"updated_at": now()}})
+    return len(members)
+
+
+async def _resume_pending_restore(dataset_id: str) -> None:
+    dataset = await db.datasets.find_one(
+        {"id": dataset_id}, {"restore_target_version_id": 1, "restore_actor_id": 1}
+    )
+    if not dataset or not dataset.get("restore_target_version_id"):
+        return
+    version_id = dataset["restore_target_version_id"]
+    version = await db.dataset_versions.find_one({"id": version_id, "dataset_id": dataset_id})
+    if version is None:
+        raise AppError(409, "DATASET_RESTORE_INVALID", "未完成的版本恢复指向无效版本")
+    await _restore_memberships_from_version(dataset_id, version_id, dataset.get("restore_actor_id") or "system")
+    await db.datasets.update_one(
+        {"id": dataset_id},
+        {"$unset": {"restore_target_version_id": "", "restore_actor_id": ""}},
+    )
 
 
 async def _validate_status(value: str) -> None:
@@ -101,12 +155,18 @@ async def annotation_membership_changes(dataset_id: str, image_ids: list[str] | 
 
 async def sync_annotation_memberships(dataset_id: str, actor_id: str) -> dict[str, list[str]]:
     changes = await annotation_membership_changes(dataset_id)
-    for annotation_id in changes["added"]:
-        await db.dataset_memberships.update_one(
-            {"dataset_id": dataset_id, "asset_id": annotation_id},
-            {"$setOnInsert": {"id": new_id(), "dataset_id": dataset_id, "asset_id": annotation_id, "created_by": actor_id, "created_at": now()}},
-            upsert=True,
-        )
+    for offset in range(0, len(changes["added"]), 1000):
+        operations = [
+            UpdateOne(
+                {"dataset_id": dataset_id, "asset_id": annotation_id},
+                {"$setOnInsert": {"id": new_id(), "dataset_id": dataset_id,
+                                  "asset_id": annotation_id, "created_by": actor_id,
+                                  "created_at": now()}},
+                upsert=True,
+            )
+            for annotation_id in changes["added"][offset:offset + 1000]
+        ]
+        await db.dataset_memberships.bulk_write(operations, ordered=False)
     if changes["removed"]:
         await db.dataset_memberships.delete_many({"dataset_id": dataset_id, "asset_id": {"$in": changes["removed"]}})
     if changes["added"] or changes["removed"]:
@@ -130,6 +190,32 @@ async def _dataset_summary(dataset: dict[str, Any]) -> dict[str, Any]:
         total_size += row["size"]
     result = public_document(dataset) or {}
     result.update({"member_count": sum(counts.values()), "counts": counts, "total_size": total_size})
+    return result
+
+
+async def _dataset_summaries(datasets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not datasets:
+        return []
+    counts: dict[str, dict[str, int]] = {item["id"]: {} for item in datasets}
+    sizes: dict[str, int] = {item["id"]: 0 for item in datasets}
+    pipeline = [
+        {"$match": {"dataset_id": {"$in": list(counts)}}},
+        {"$lookup": {"from": "assets", "localField": "asset_id", "foreignField": "id", "as": "asset"}},
+        {"$unwind": "$asset"},
+        {"$match": {"asset.archived_at": None}},
+        {"$group": {"_id": {"dataset_id": "$dataset_id", "type": "$asset.type"},
+                     "count": {"$sum": 1}, "size": {"$sum": {"$ifNull": ["$asset.size", 0]}}}},
+    ]
+    async for row in await db.dataset_memberships.aggregate(pipeline):
+        dataset_id = row["_id"]["dataset_id"]
+        counts[dataset_id][row["_id"]["type"]] = row["count"]
+        sizes[dataset_id] += row["size"]
+    result = []
+    for item in datasets:
+        summary = public_document(item) or {}
+        summary.update({"member_count": sum(counts[item["id"]].values()),
+                        "counts": counts[item["id"]], "total_size": sizes[item["id"]]})
+        result.append(summary)
     return result
 
 
@@ -161,7 +247,8 @@ async def list_datasets(
 ) -> dict[str, Any]:
     clauses: list[dict[str, Any]] = [{"deleted_at": None}]
     if q:
-        clauses.append({"$or": [{"name": {"$regex": q, "$options": "i"}}, {"remark": {"$regex": q, "$options": "i"}}]})
+        keyword = re.escape(q.strip())
+        clauses.append({"$or": [{"name": {"$regex": keyword, "$options": "i"}}, {"remark": {"$regex": keyword, "$options": "i"}}]})
     if status:
         clauses.append({"status": status})
     if creator:
@@ -175,7 +262,8 @@ async def list_datasets(
     query = {"$and": clauses}
     total = await db.datasets.count_documents(query)
     cursor = db.datasets.find(query).sort([("updated_at", DESCENDING), ("id", ASCENDING)]).skip((page - 1) * page_size if page_size else 0).limit(page_size)
-    return {"items": [await _dataset_summary(item) async for item in cursor], "page": page, "page_size": page_size, "total": total}
+    return {"items": await _dataset_summaries(await cursor.to_list(length=None)),
+            "page": page, "page_size": page_size, "total": total}
 
 
 @router.get("/creators")
@@ -682,26 +770,32 @@ async def restore_version(dataset_id: str, body: DatasetRestoreRequest, request:
     version = await db.dataset_versions.find_one({"id": body.version_id, "dataset_id": dataset_id})
     if version is None:
         raise AppError(404, "DATASET_VERSION_NOT_FOUND", "数据集版本不存在")
-    members = await db.dataset_version_memberships.find({"version_id": body.version_id}).to_list(length=100000)
+    members = await db.dataset_version_memberships.find({"version_id": body.version_id}).to_list(length=None)
     backup = await db.dataset_memberships.find({"dataset_id": dataset_id}).to_list(length=None)
     valid_ids = await db.assets.distinct("id", {"id": {"$in": [item["asset_id"] for item in members]}, "archived_at": None, "type": {"$ne": "model"}})
     invalid = sorted({item["asset_id"] for item in members} - set(valid_ids))
     if invalid:
         raise AppError(409, "DATASET_HAS_INVALID_ASSETS", "版本中包含已删除或失效素材", {"asset_ids": invalid})
-    timestamp = now()
+    await db.datasets.update_one(
+        {"id": dataset_id},
+        {"$set": {"restore_target_version_id": body.version_id, "restore_actor_id": user["id"]}},
+    )
     try:
-        await db.dataset_memberships.delete_many({"dataset_id": dataset_id})
-        workset_members = [{"id": new_id(), "dataset_id": dataset_id, "asset_id": item["asset_id"], "created_by": user["id"], "created_at": timestamp} for item in members if item["snapshot"].get("type") != "annotation"]
-        if workset_members:
-            await db.dataset_memberships.insert_many(workset_members)
-        await sync_annotation_memberships(dataset_id, user["id"])
-        await db.datasets.update_one({"id": dataset_id}, {"$set": {"updated_at": timestamp}})
+        await _restore_memberships_from_version(dataset_id, body.version_id, user["id"])
     except Exception:
         await db.dataset_memberships.delete_many({"dataset_id": dataset_id})
         if backup:
             await db.dataset_memberships.insert_many(backup)
+        await db.datasets.update_one(
+            {"id": dataset_id},
+            {"$unset": {"restore_target_version_id": "", "restore_actor_id": ""}},
+        )
         raise
     await record_audit(actor=user, action="dataset.version_restored", object_type="dataset", object_id=dataset_id, request_id=request.state.request_id, changes={"version_id": body.version_id})
+    await db.datasets.update_one(
+        {"id": dataset_id},
+        {"$unset": {"restore_target_version_id": "", "restore_actor_id": ""}},
+    )
     return {"restored": len(members)}
 
 

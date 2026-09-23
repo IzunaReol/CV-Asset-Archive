@@ -8,7 +8,7 @@ from typing import Any
 
 from celery import Celery
 from fastapi import APIRouter, Query, Request
-from pymongo import DESCENDING
+from pymongo import ASCENDING, DESCENDING, UpdateOne
 
 from ..annotation_overlay import parse_annotation_overlay
 from ..audit import record_audit
@@ -17,13 +17,24 @@ from ..database import db
 from ..dependencies import ReadUser, WriteUser
 from ..errors import AppError
 from ..schemas import (
+    AssetSelectionCreate,
     AssetRemarkUpdate,
     BatchAssetDeleteRequest,
     BatchTagRequest,
+    UploadBatchCompleteRequest,
+    UploadBatchInitRequest,
     UploadCompleteRequest,
     UploadInitRequest,
 )
-from ..storage import presigned_get, presigned_put, read_object, stat_object
+from ..storage import (
+    compose_chunks,
+    delete_chunks,
+    presigned_get,
+    presigned_put,
+    read_object,
+    stat_object,
+    uploaded_chunks,
+)
 from ..utils import new_id, now, public_document
 
 router = APIRouter(prefix="/assets", tags=["assets"])
@@ -32,6 +43,8 @@ celery_client = Celery(broker=settings.redis_url)
 ALLOWED_SORTS = {"created_at", "updated_at", "name", "size"}
 TAG_KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]{1,49}$")
 SYSTEM_FILTER_FIELDS = {"remark", "created_at", "updated_at"}
+CHUNK_SIZE = 64 * 1024 * 1024
+CHUNK_THRESHOLD = 64 * 1024 * 1024
 
 
 def parse_filter_datetime(value: str) -> datetime:
@@ -165,6 +178,7 @@ async def initialize_upload(body: UploadInitRequest, user: WriteUser) -> dict[st
         if duplicate
         else f"projects/{project_segment}/{body.asset_type.value}/{asset_id}/original"
     )
+    chunked = duplicate is None and body.size >= CHUNK_THRESHOLD
     document = {
         "id": session_id,
         "asset_id": asset_id,
@@ -178,6 +192,9 @@ async def initialize_upload(body: UploadInitRequest, user: WriteUser) -> dict[st
         "duplicate_asset_id": duplicate["id"] if duplicate else None,
         "owner_id": user["id"],
         "state": "reused" if duplicate else "pending",
+        "transfer_mode": "chunks" if chunked else "single",
+        "chunk_size": CHUNK_SIZE if chunked else None,
+        "chunk_count": (body.size + CHUNK_SIZE - 1) // CHUNK_SIZE if chunked else None,
         "created_at": now(),
         "expires_at": now() + timedelta(hours=24),
     }
@@ -186,10 +203,73 @@ async def initialize_upload(body: UploadInitRequest, user: WriteUser) -> dict[st
         "upload_session_id": session_id,
         "asset_id": asset_id,
         "upload_required": duplicate is None,
-        "upload_url": None if duplicate else await asyncio.to_thread(presigned_put, object_key),
+        "upload_url": None if duplicate or chunked else await asyncio.to_thread(presigned_put, object_key),
+        "transfer_mode": document["transfer_mode"],
+        "chunk_size": document["chunk_size"],
+        "chunk_count": document["chunk_count"],
         "duplicate_asset_id": document["duplicate_asset_id"],
         "expires_at": document["expires_at"],
     }
+
+
+def chunk_prefix(session_id: str) -> str:
+    return f"uploads/{session_id}/"
+
+
+@router.get("/upload-sessions/{session_id}")
+async def upload_session_status(session_id: str, user: WriteUser) -> dict[str, Any]:
+    session = await db.upload_sessions.find_one({"id": session_id, "owner_id": user["id"]})
+    if session is None or session["expires_at"] <= now() or session["state"] not in {"pending", "reused"}:
+        raise AppError(404, "UPLOAD_SESSION_NOT_FOUND", "上传会话不存在或已过期")
+    result = {
+        "upload_session_id": session_id,
+        "filename": session["filename"],
+        "size": session["declared_size"],
+        "asset_type": session["asset_type"],
+        "transfer_mode": session.get("transfer_mode", "single"),
+        "upload_required": session["state"] != "reused",
+        "chunk_size": session.get("chunk_size"),
+        "chunk_count": session.get("chunk_count"),
+    }
+    if result["transfer_mode"] == "chunks":
+        prefix = chunk_prefix(session_id)
+        existing = await asyncio.to_thread(uploaded_chunks, prefix)
+        count = session["chunk_count"]
+        size = session["chunk_size"]
+        result["uploaded_parts"] = [number for number in range(count) if existing.get(number) == min(size, session["declared_size"] - number * size)]
+        result["upload_urls"] = {
+            str(number): await asyncio.to_thread(presigned_put, f"{prefix}{number:05d}")
+            for number in range(count) if number not in result["uploaded_parts"]
+        }
+    return result
+
+
+@router.delete("/upload-sessions/{session_id}", status_code=204)
+async def cancel_upload_session(session_id: str, user: WriteUser) -> None:
+    session = await db.upload_sessions.find_one({"id": session_id, "owner_id": user["id"]})
+    if session is None or session["state"] == "completed":
+        raise AppError(404, "UPLOAD_SESSION_NOT_FOUND", "上传会话不存在或已完成")
+    if session.get("transfer_mode") == "chunks":
+        await asyncio.to_thread(delete_chunks, chunk_prefix(session_id))
+    await db.upload_sessions.delete_one({"id": session_id, "owner_id": user["id"]})
+
+
+@router.post("/upload-sessions/batch", status_code=201)
+async def initialize_upload_batch(body: UploadBatchInitRequest, user: WriteUser) -> dict[str, Any]:
+    semaphore = asyncio.Semaphore(12)
+
+    async def initialize_one(index: int, item: UploadInitRequest) -> dict[str, Any]:
+        async with semaphore:
+            try:
+                return {"index": index, "session": await initialize_upload(item, user)}
+            except AppError as exc:
+                return {"index": index, "error": {"code": exc.code, "message": exc.message}}
+            except Exception:
+                return {"index": index, "error": {"code": "UPLOAD_INIT_FAILED", "message": "创建上传任务失败"}}
+
+    return {"items": await asyncio.gather(*(
+        initialize_one(index, item) for index, item in enumerate(body.files)
+    ))}
 
 
 @router.post("/upload-sessions/complete", status_code=201)
@@ -205,6 +285,20 @@ async def complete_upload(
         asset = await db.assets.find_one({"id": session["asset_id"]})
         return public_document(asset) or {}
     if session["state"] != "reused":
+        if session.get("transfer_mode") == "chunks":
+            obj = await asyncio.to_thread(stat_object, session["object_key"])
+            if obj is None or obj.size != session["declared_size"]:
+                prefix = chunk_prefix(session["id"])
+                parts = await asyncio.to_thread(uploaded_chunks, prefix)
+                count = session["chunk_count"]
+                size = session["chunk_size"]
+                if any(parts.get(number) != min(size, session["declared_size"] - number * size) for number in range(count)):
+                    raise AppError(409, "UPLOAD_INCOMPLETE", "文件分片尚未上传完成")
+                await asyncio.to_thread(
+                    compose_chunks,
+                    session["object_key"],
+                    [f"{prefix}{number:05d}" for number in range(count)],
+                )
         obj = await asyncio.to_thread(stat_object, session["object_key"])
         if obj is None:
             raise AppError(409, "UPLOAD_INCOMPLETE", "对象尚未上传完成")
@@ -233,6 +327,8 @@ async def complete_upload(
     }
     await db.assets.insert_one(asset)
     await db.upload_sessions.update_one({"id": session["id"]}, {"$set": {"state": "completed"}})
+    if session.get("transfer_mode") == "chunks":
+        await asyncio.to_thread(delete_chunks, chunk_prefix(session["id"]))
     job = {
         "id": new_id(),
         "type": "process_asset",
@@ -271,19 +367,32 @@ async def complete_upload(
     return public_document(asset) or {}
 
 
-@router.get("")
-async def list_assets(
-    user: ReadUser,
-    q: str = "",
-    no_tags: bool = False,
-    asset_type: list[str] = Query(default=[]),
-    match: str = Query("all", pattern="^(all|any)$"),
-    tag: list[str] = Query(default=[]),
-    page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=200),
-    sort: str = "created_at",
-    direction: str = Query("desc", pattern="^(asc|desc)$"),
+@router.post("/upload-sessions/complete-batch", status_code=201)
+async def complete_upload_batch(
+    body: UploadBatchCompleteRequest, request: Request, user: WriteUser
 ) -> dict[str, Any]:
+    semaphore = asyncio.Semaphore(12)
+
+    async def complete_one(index: int, session_id: str) -> dict[str, Any]:
+        async with semaphore:
+            try:
+                asset = await complete_upload(
+                    UploadCompleteRequest(upload_session_id=session_id, tags=body.tags),
+                    request,
+                    user,
+                )
+                return {"index": index, "asset": asset}
+            except AppError as exc:
+                return {"index": index, "error": {"code": exc.code, "message": exc.message}}
+            except Exception:
+                return {"index": index, "error": {"code": "UPLOAD_COMPLETE_FAILED", "message": "完成上传失败，请稍后重试"}}
+
+    return {"items": await asyncio.gather(*(
+        complete_one(index, session_id) for index, session_id in enumerate(body.upload_session_ids)
+    ))}
+
+
+async def asset_query(q: str, no_tags: bool, asset_type: list[str], match: str, tag: list[str]) -> dict[str, Any]:
     clauses: list[dict[str, Any]] = [{"archived_at": None}]
     invalid_types = set(asset_type) - {
         "image",
@@ -339,14 +448,72 @@ async def list_assets(
         tag_clauses.append(asset_filter_clause(key, operator, value))
     if tag_clauses:
         clauses.append({"$and" if match == "all" else "$or": tag_clauses})
-    mongo_filter = {"$and": clauses}
+    return {"$and": clauses}
+
+
+@router.post("/selection-sets", status_code=201)
+async def create_asset_selection(body: AssetSelectionCreate, user: ReadUser) -> dict[str, Any]:
+    query = await asset_query(body.q, body.no_tags, [item.value for item in body.asset_type], body.match, body.tag)
+    ids = [item["id"] async for item in db.assets.find(query, {"id": 1}).limit(100001)]
+    if len(ids) > 100000:
+        raise AppError(413, "SELECTION_TOO_LARGE", "当前筛选结果超过 10 万项，请缩小范围")
+    selection_id = new_id()
+    await db.asset_selection_sets.insert_one({
+        "id": selection_id, "owner_id": user["id"], "asset_ids": ids,
+        "created_at": now(), "expires_at": now() + timedelta(hours=2),
+    })
+    return {"selection_id": selection_id, "total": len(ids), "expires_in_seconds": 7200}
+
+
+async def resolve_selection_ids(
+    user: dict[str, Any], asset_ids: list[str], selection_id: str | None, excluded_ids: list[str]
+) -> list[str]:
+    if selection_id:
+        if asset_ids:
+            raise AppError(400, "SELECTION_CONFLICT", "不能同时提交素材和选择集")
+        selection = await db.asset_selection_sets.find_one({
+            "id": selection_id, "owner_id": user["id"], "expires_at": {"$gt": now()},
+        })
+        if selection is None:
+            raise AppError(404, "SELECTION_EXPIRED", "选择已过期，请重新选择素材")
+        excluded = set(excluded_ids)
+        return [item for item in selection["asset_ids"] if item not in excluded]
+    if excluded_ids:
+        raise AppError(400, "SELECTION_CONFLICT", "排除项需要选择集")
+    return list(dict.fromkeys(asset_ids))
+
+
+@router.get("")
+async def list_assets(
+    user: ReadUser,
+    q: str = "",
+    no_tags: bool = False,
+    asset_type: list[str] = Query(default=[]),
+    match: str = Query("all", pattern="^(all|any)$"),
+    tag: list[str] = Query(default=[]),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    sort: str = "created_at",
+    direction: str = Query("desc", pattern="^(asc|desc)$"),
+    after: str | None = None,
+) -> dict[str, Any]:
+    mongo_filter = await asset_query(q, no_tags, asset_type, match, tag)
     sort_field = sort if sort in ALLOWED_SORTS else "created_at"
     order = DESCENDING if direction == "desc" else 1
     total = await db.assets.count_documents(mongo_filter)
+    if after:
+        previous = await db.assets.find_one({"id": after}, {"id": 1, sort_field: 1})
+        if previous is None or sort_field not in previous:
+            raise AppError(400, "CURSOR_INVALID", "分页位置已失效，请重新加载")
+        comparison = "$lt" if direction == "desc" else "$gt"
+        mongo_filter = {"$and": [mongo_filter, {"$or": [
+            {sort_field: {comparison: previous[sort_field]}},
+            {sort_field: previous[sort_field], "id": {"$gt": previous["id"]}},
+        ]}]}
     cursor = (
         db.assets.find(mongo_filter)
-        .sort(sort_field, order)
-        .skip((page - 1) * page_size)
+        .sort([(sort_field, order), ("id", ASCENDING)])
+        .skip(0 if after else (page - 1) * page_size)
         .limit(page_size)
     )
     items = []
@@ -361,7 +528,8 @@ async def list_assets(
     })) if image_ids else set()
     for item in items:
         item["has_annotation"] = item["id"] in annotated_ids
-    return {"items": items, "page": page, "page_size": page_size, "total": total}
+    return {"items": items, "page": page, "page_size": page_size, "total": total,
+            "next_cursor": items[-1]["id"] if len(items) == page_size else None}
 
 
 @router.get("/{asset_id}")
@@ -502,39 +670,61 @@ async def annotation_overlays(asset_id: str, user: ReadUser) -> dict[str, Any]:
 
 @router.post("/batch-tags")
 async def batch_tags(body: BatchTagRequest, request: Request, user: WriteUser) -> dict[str, Any]:
+    ids = await resolve_selection_ids(user, body.asset_ids, body.selection_id, body.excluded_ids)
+    if not ids:
+        raise AppError(400, "SELECTION_EMPTY", "没有可操作的素材")
     succeeded, failed = [], []
-    for asset_id in body.asset_ids:
-        asset = await db.assets.find_one({"id": asset_id, "archived_at": None}, {"tags": 1})
-        if asset:
-            tags = updated_asset_tags(
-                asset.get("tags") or {},
-                body.set_tags,
-                body.remove_tags,
-                body.remove_tag_values,
-            )
-            await db.assets.update_one(
-                {"id": asset_id},
-                {"$set": {"tags": tags, "updated_at": now(), "modified_at": now()}},
-            )
+    timestamp = now()
+    for offset in range(0, len(ids), 1000):
+        chunk = ids[offset:offset + 1000]
+        assets = {item["id"]: item async for item in db.assets.find(
+            {"id": {"$in": chunk}, "archived_at": None}, {"id": 1, "tags": 1}
+        )}
+        operations = []
+        for asset_id in chunk:
+            asset = assets.get(asset_id)
+            if asset is None:
+                failed.append({"id": asset_id, "code": "ASSET_NOT_FOUND"})
+                continue
+            tags = updated_asset_tags(asset.get("tags") or {}, body.set_tags, body.remove_tags, body.remove_tag_values)
+            operations.append(UpdateOne(
+                {"id": asset_id, "archived_at": None},
+                {"$set": {"tags": tags, "updated_at": timestamp, "modified_at": timestamp}},
+            ))
             succeeded.append(asset_id)
-        else:
-            failed.append({"id": asset_id, "code": "ASSET_NOT_FOUND"})
+        if operations:
+            await db.assets.bulk_write(operations, ordered=False)
     await record_audit(
         actor=user,
         action="asset.batch_tags",
         object_type="asset",
         object_id="batch",
         request_id=request.state.request_id,
-        changes={"asset_ids": succeeded},
+        changes={"asset_ids": succeeded[:1000], "count": len(succeeded), "selection_id": body.selection_id},
     )
-    return {"succeeded": succeeded, "failed": failed}
+    return {"succeeded": succeeded if not body.selection_id else [],
+            "succeeded_count": len(succeeded), "failed": failed[:100], "failed_count": len(failed)}
 
 
 @router.post("/batch-delete")
 async def batch_delete(
     body: BatchAssetDeleteRequest, request: Request, user: WriteUser
 ) -> dict[str, Any]:
-    requested_ids = list(dict.fromkeys(body.asset_ids))
+    requested_ids = await resolve_selection_ids(user, body.asset_ids, body.selection_id, body.excluded_ids)
+    if not requested_ids:
+        raise AppError(400, "SELECTION_EMPTY", "没有可删除的素材")
+    if len(requested_ids) > 5000:
+        succeeded_count = failed_count = 0
+        failures: list[dict[str, str]] = []
+        for offset in range(0, len(requested_ids), 5000):
+            result = await batch_delete(
+                BatchAssetDeleteRequest(asset_ids=requested_ids[offset:offset + 5000]), request, user
+            )
+            succeeded_count += len(result["succeeded"])
+            failed_count += len(result["failed"])
+            failures.extend(result["failed"][:max(0, 100 - len(failures))])
+        return {"succeeded": [], "succeeded_count": succeeded_count,
+                "failed": failures, "failed_count": failed_count}
     current_member_ids = set(
         await db.dataset_memberships.distinct("asset_id", {"asset_id": {"$in": requested_ids}})
     )
@@ -579,7 +769,10 @@ async def batch_delete(
         request_id=request.state.request_id,
         changes={"asset_ids": succeeded, "count": result.modified_count},
     )
-    return {"succeeded": succeeded, "failed": failed}
+    return {"succeeded": succeeded if not body.selection_id else [],
+            "succeeded_count": len(succeeded),
+            "failed": failed if not body.selection_id else failed[:100],
+            "failed_count": len(failed)}
 
 
 @router.post("/{asset_id}/archive")

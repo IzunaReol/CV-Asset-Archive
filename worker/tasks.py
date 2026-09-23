@@ -819,11 +819,20 @@ def build_export(job_id: str) -> None:
             {"id": job_id},
             {"$set": {"state": "running", "progress": 2, "updated_at": utcnow()}},
         )
-        assets = list(
-            database.assets.find({"id": {"$in": job["input"]["asset_ids"]}, "archived_at": None})
-        )
-        if not assets:
+        selection_id = job["input"].get("selection_id")
+        if selection_id:
+            selection = database.asset_selection_sets.find_one({"id": selection_id})
+            if selection is None:
+                raise ValueError("export selection expired")
+            excluded = set(job["input"].get("excluded_ids", []))
+            asset_ids = [item for item in selection["asset_ids"] if item not in excluded]
+        else:
+            asset_ids = job["input"]["asset_ids"]
+        asset_query = {"id": {"$in": asset_ids}, "archived_at": None}
+        asset_count = database.assets.count_documents(asset_query)
+        if not asset_count:
             raise ValueError("no exportable assets")
+        assets = database.assets.find(asset_query)
         with tempfile.TemporaryDirectory(
             prefix="cv-archive-export-", dir=WORKER_TEMP_DIR
         ) as temp_dir:
@@ -846,7 +855,7 @@ def build_export(job_id: str) -> None:
                     finally:
                         response.close()
                         response.release_conn()
-                    progress = 5 + int(((index + 1) / len(assets)) * 85)
+                    progress = 5 + int(((index + 1) / asset_count) * 85)
                     database.jobs.update_one(
                         {"id": job_id},
                         {"$set": {"progress": progress, "updated_at": utcnow()}},
@@ -861,7 +870,7 @@ def build_export(job_id: str) -> None:
                 "$set": {
                     "state": "succeeded",
                     "progress": 100,
-                    "result": {"object_key": object_key, "asset_count": len(assets)},
+                    "result": {"object_key": object_key, "asset_count": asset_count},
                     "updated_at": utcnow(),
                 }
             },

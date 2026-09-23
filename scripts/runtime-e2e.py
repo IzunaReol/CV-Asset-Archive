@@ -67,9 +67,26 @@ def main() -> None:
     image = upload(token, "pair.JPG", pixels.getvalue(), "image")
     annotation = upload(token, "pair.txt", b"0 0.5 0.5 0.2 0.2\n", "annotation")
     model = upload(token, "model.onnx", b"e2e-model", "model")
+    batch_files = [("batch-one.jpg", pixels.getvalue()), ("batch-two.jpg", pixels.getvalue())]
+    batch = request("/assets/upload-sessions/batch", "POST", {"files": [
+        {"filename": name, "size": len(content), "mime_type": "image/jpeg", "asset_type": "image"}
+        for name, content in batch_files
+    ]}, token)
+    for item in batch["items"]:
+        session = item["session"]
+        put = urllib.request.Request(session["upload_url"], data=batch_files[item["index"]][1], method="PUT")
+        with urllib.request.urlopen(put, timeout=20):
+            pass
+    completed_batch = request("/assets/upload-sessions/complete-batch", "POST", {
+        "upload_session_ids": [item["session"]["upload_session_id"] for item in batch["items"]],
+        "tags": {},
+    }, token)
+    assert len(completed_batch["items"]) == 2
+    assert all("asset" in item for item in completed_batch["items"])
+    batched_assets = [item["asset"] for item in completed_batch["items"]]
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
-        states = [request(f"/assets/{item['id']}", token=token)["status"] for item in (image, annotation, model)]
+        states = [request(f"/assets/{item['id']}", token=token)["status"] for item in (image, annotation, model, *batched_assets)]
         if all(state == "ready" for state in states):
             break
         if any(state == "failed" for state in states):
@@ -170,8 +187,14 @@ def main() -> None:
     assert mismatch["invalid"][0]["code"] == "RELATION_TYPE_MISMATCH"
     filtered = request("/assets?page=1&page_size=20&q=pair&asset_type=image", token=token)
     assert filtered["total"] == 2
+    first_page = request("/assets?page=1&page_size=2", token=token)
+    next_page = request(f"/assets?page=1&page_size=2&after={first_page['next_cursor']}", token=token)
+    assert {item["id"] for item in first_page["items"]}.isdisjoint(
+        {item["id"] for item in next_page["items"]}
+    )
     print(json.dumps({
-        "uploads": 4,
+        "uploads": 6,
+        "batch_uploads": len(batched_assets),
         "dataset_version_members": version["member_count"],
         "auto_match_ready": auto["counts"]["ready"],
         "duplicate_conflicts": conflict["counts"]["image_conflicts"],
