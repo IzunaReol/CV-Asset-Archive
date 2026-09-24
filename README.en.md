@@ -37,7 +37,7 @@ See the [system design](docs/system-design.md), [API conventions](docs/api-conve
 
 ## Native Windows Setup
 
-Requirements: Windows 11, Python 3.12+, Node.js 20+, and curl. Dependencies, data, and logs are kept under `.runtime` in the project directory. No Windows service is installed.
+Requirements: Windows 11, Python 3.12+, Node.js 22.20+, and curl. Dependencies, data, and logs are kept under `.runtime` in the project directory. No Windows service is installed.
 
 Install once:
 
@@ -105,13 +105,13 @@ npm ci
 npm run build
 ```
 
-The isolated API workflow test is available at `scripts/runtime-e2e.py`. See the [testing guide](docs/testing.md) and [v1.3.0 release checklist](docs/release-checklist.md) for the full scope.
+The isolated API workflow test is available at `scripts/runtime-e2e.py`. See the [testing guide](docs/testing.md) and [v1.3.1 release checklist](docs/release-checklist.md) for the full scope.
 
-## Preparing to upgrade to v1.3.0
+## Preparing to upgrade to v1.3.1
 
-Back up MongoDB, MinIO, and deployment configuration before upgrading from v1.2.1. Update the source and dependencies, rebuild the frontend, and verify the job center, worker heartbeats, upload pause and resume, built-in tag protection, and the migration reconciliation report. The model relationship schema is unchanged; upgrades from older versions should still follow the [v1.2.0 migration notes](docs/releases/v1.2.0.md). A rollback requires the pre-upgrade database backup, not just older code.
+Back up MongoDB, MinIO, and deployment configuration before upgrading from v1.3.0. Update the source and dependencies, rebuild the frontend, and verify the job center, worker heartbeats, upload pause and resume, and built-in tag protection. The model relationship schema is unchanged; upgrades from older versions should still follow the [v1.2.0 migration notes](docs/releases/v1.2.0.md). A rollback requires the pre-upgrade database backup, not just older code.
 
-See the [dataset guide](docs/datasets.md) and [v1.3.0 release notes](docs/releases/v1.3.0.md) for behavior, validation status, and known limitations.
+See the [dataset guide](docs/datasets.md) and [v1.3.1 release notes](docs/releases/v1.3.1.md) for behavior, validation status, and known limitations.
 
 ## Documentation
 

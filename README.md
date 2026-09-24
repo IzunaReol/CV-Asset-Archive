@@ -37,7 +37,7 @@
 
 ## Windows 本机运行
 
-运行环境：Windows 11、Python 3.12+、Node.js 20+、curl。依赖、数据和日志保存在项目目录的 `.runtime` 中，不创建 Windows 服务。
+运行环境：Windows 11、Python 3.12+、Node.js 22.20+、curl。依赖、数据和日志保存在项目目录的 `.runtime` 中，不创建 Windows 服务。
 
 首次安装：
 
@@ -105,13 +105,13 @@ npm ci
 npm run build
 ```
 
-隔离数据库的 API 流程测试使用 `scripts/runtime-e2e.py`。完整范围见[测试说明](docs/testing.md)和 [v1.3.0 发布检查单](docs/release-checklist.md)。
+隔离数据库的 API 流程测试使用 `scripts/runtime-e2e.py`。完整范围见[测试说明](docs/testing.md)和 [v1.3.1 发布检查单](docs/release-checklist.md)。
 
-## v1.3.0 升级准备
+## v1.3.1 升级准备
 
-从 v1.2.1 升级前备份 MongoDB、MinIO 和部署配置。更新代码与依赖并重新构建前端后，验证任务中心、任务心跳、上传暂停恢复、默认标签保护和迁移核对报告。模型关系结构没有变化；从更早版本升级时仍需按 [v1.2.0 迁移说明](docs/releases/v1.2.0.md)核对旧模型直连素材关系。回退前应恢复升级前数据库备份，不能只回退代码。
+从 v1.3.0 升级前备份 MongoDB、MinIO 和部署配置。更新代码与依赖并重新构建前端后，验证任务中心、任务心跳、上传暂停恢复和默认标签保护。模型关系结构没有变化；从更早版本升级时仍需按 [v1.2.0 迁移说明](docs/releases/v1.2.0.md)核对旧模型直连素材关系。回退前应恢复升级前数据库备份，不能只回退代码。
 
-变更范围、验证状态及已知限制见[v1.3.0 发布说明](docs/releases/v1.3.0.md)。
+变更范围、验证状态及已知限制见[v1.3.1 发布说明](docs/releases/v1.3.1.md)。
 
 ## 项目文档
 

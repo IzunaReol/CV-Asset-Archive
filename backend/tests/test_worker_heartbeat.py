@@ -5,9 +5,9 @@ from worker import tasks
 
 
 def test_worker_heartbeat_refreshes_running_job(monkeypatch):
-    waits = iter([False, True])
+    waits = iter([False, False, True])
     event = SimpleNamespace(wait=lambda _seconds: next(waits), set=MagicMock())
-    update_one = MagicMock()
+    update_one = MagicMock(side_effect=[RuntimeError("temporary failure"), None])
 
     class InlineThread:
         def __init__(self, target, daemon):
@@ -33,6 +33,7 @@ def test_worker_heartbeat_refreshes_running_job(monkeypatch):
         return f"done:{job_id}"
 
     assert sample("job-1") == "done:job-1"
+    assert update_one.call_count == 2
     query, update = update_one.call_args.args
     assert query == {"id": "job-1", "state": "running"}
     assert update["$set"]["heartbeat_at"] == update["$set"]["updated_at"]

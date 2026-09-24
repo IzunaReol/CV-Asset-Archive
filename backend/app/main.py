@@ -29,7 +29,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="CV Archive API", version="1.3.0", lifespan=lifespan)
+app = FastAPI(title="CV Archive API", version="1.3.1", lifespan=lifespan)
 app.add_exception_handler(AppError, app_error_handler)
 app.add_middleware(
     CORSMiddleware,

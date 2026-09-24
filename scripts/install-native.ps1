@@ -12,6 +12,16 @@ function Require-Command([string]$Name, [string]$Help) {
     if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) { throw "$Name is required. $Help" }
 }
 
+function Require-Version([string]$Name, [version]$Minimum, [string]$Help) {
+    Require-Command $Name $Help
+    $rawVersion = (& $Name --version | Select-Object -First 1).Trim()
+    if ($rawVersion -notmatch '(\d+\.\d+\.\d+)') { throw "Cannot determine the $Name version: $rawVersion" }
+    $currentVersion = [version]$Matches[1]
+    if ($currentVersion -lt $Minimum) {
+        throw "$Name $Minimum or newer is required; found $currentVersion. $Help"
+    }
+}
+
 function Download-File([string]$Url, [string]$Destination, [string]$Sha256) {
     if ((Test-Path -LiteralPath $Destination) -and (Get-Item -LiteralPath $Destination).Length -gt 0) {
         $currentHash = (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash
@@ -37,9 +47,9 @@ function Download-File([string]$Url, [string]$Destination, [string]$Sha256) {
 }
 
 Require-Command "curl.exe" "Use Windows 11 or install curl."
-Require-Command "python.exe" "Install Python 3.12 or newer."
-Require-Command "node.exe" "Install Node.js 20 or newer."
-Require-Command "npm.cmd" "Install Node.js 20 or newer."
+Require-Version "python.exe" ([version]"3.12.0") "Install Python 3.12 or newer."
+Require-Version "node.exe" ([version]"22.20.0") "Install Node.js 22.20 or newer."
+Require-Command "npm.cmd" "Install Node.js 22.20 or newer."
 
 New-Item -ItemType Directory -Force -Path $downloads, $apps | Out-Null
 $mongoZip = Join-Path $downloads "mongodb-8.0.28.zip"

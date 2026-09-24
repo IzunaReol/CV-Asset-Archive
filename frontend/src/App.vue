@@ -2,6 +2,8 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api } from './api'
 import DatasetView from './DatasetView.vue'
+import { canDeleteTag, jobAction } from './uiPolicy'
+import { UploadPauseController } from './uploadPause'
 
 type Page = 'library' | 'datasets' | 'relations' | 'lineage' | 'downloads' | 'trash' | 'tags' | 'formats' | 'admin'
 type Skin = 'light' | 'command'
@@ -70,8 +72,7 @@ const uploadPaused = ref(false)
 const uploadProgress = ref(0)
 const uploadCompleted = ref(0)
 const uploadError = ref('')
-const uploadAbortControllers = new Set<AbortController>()
-let uploadResumeWaiters:Array<()=>void> = []
+const uploadPauseController = new UploadPauseController(paused => { uploadPaused.value = paused })
 const batchTagOpen = ref(false)
 const batchTagAction = ref<'add'|'remove'>('add')
 const batchTagKey = ref<TagKey>('status')
@@ -867,39 +868,18 @@ function openUpload() {
 }
 
 function pauseUpload() {
-  uploadPaused.value = true
-  uploadAbortControllers.forEach(controller => controller.abort())
-  uploadAbortControllers.clear()
+  uploadPauseController.pause()
 }
 
 function resumeUpload() {
-  uploadPaused.value = false
-  const waiters = uploadResumeWaiters
-  uploadResumeWaiters = []
-  waiters.forEach(resolve => resolve())
-}
-
-async function waitForUploadResume() {
-  if (!uploadPaused.value) return
-  await new Promise<void>(resolve => uploadResumeWaiters.push(resolve))
+  uploadPauseController.resume()
 }
 
 async function uploadRequest(url:string, body:Blob|File, failureMessage:string) {
-  while (true) {
-    await waitForUploadResume()
-    const controller = new AbortController()
-    uploadAbortControllers.add(controller)
-    try {
-      const response = await fetch(url, {method:'PUT',body,signal:controller.signal})
-      if (!response.ok) throw new Error(failureMessage)
-      return
-    } catch (error) {
-      if (uploadPaused.value && controller.signal.aborted) continue
-      throw error
-    } finally {
-      uploadAbortControllers.delete(controller)
-    }
-  }
+  await uploadPauseController.request(
+    signal => fetch(url, {method:'PUT',body,signal}),
+    failureMessage,
+  )
 }
 
 async function uploadAsset() {
@@ -1086,7 +1066,7 @@ async function exportSelected() {
     const part = (value:number) => String(value).padStart(2, '0')
     const timestamp = `${current.getFullYear()}${part(current.getMonth()+1)}${part(current.getDate())}_${part(current.getHours())}${part(current.getMinutes())}${part(current.getSeconds())}`
     await api.createExport({name:`素材导出_${timestamp}`,...selectedPayload()})
-    notify('导出任务已加入下载中心')
+    notify('导出任务已加入任务中心')
   } catch (error) { notifyError(error instanceof Error ? error.message : '创建导出任务失败') }
 }
 
@@ -1670,7 +1650,7 @@ async function revokeActiveRelation() {
       <template v-else-if="page === 'downloads'">
         <section class="page-head"><div><h1>任务中心</h1><p>查看素材处理、导出和系统清理任务。</p></div></section>
         <section class="job-toolbar"><div class="job-count">当前页 <b>{{jobRows.length}}</b> 项 <span>· 全部 {{jobTotal}} 项</span></div><div class="job-filters"><select v-model="jobTypeFilter"><option value="">全部类型</option><option v-for="(label,key) in jobTypeLabels" :key="key" :value="key">{{label}}</option></select><select v-model="jobStateFilter"><option value="">全部状态</option><option v-for="(label,key) in jobStateLabels" :key="key" :value="key">{{label}}</option></select><label>开始时间<input v-model="jobCreatedFrom" type="datetime-local" step="1" /></label><label>结束时间<input v-model="jobCreatedTo" type="datetime-local" step="1" :min="jobCreatedFrom" /></label><button @click="resetJobFilters">重置</button><button @click="applyJobFilters">筛选</button></div></section>
-        <section v-if="jobRows.length" class="data-table download-table"><div class="table-row head"><span>任务</span><span>任务创建时间</span><span>内容</span><span>进度</span><span>类型</span><span>状态</span><span>操作</span></div><div v-for="job in jobRows" :key="job.id" class="table-row"><span class="job-name"><b :title="jobNameText(job)">{{jobNameText(job)}}</b><small v-if="job.error?.message" :title="jobErrorText(job.error.message)">{{jobErrorText(job.error.message)}}</small></span><span>{{job.created_at ? new Date(job.created_at).toLocaleString('zh-CN') : '时间未知'}}</span><span>{{job.input?.asset_count ?? job.input?.asset_ids?.length ?? (job.input?.asset_id ? 1 : 0)}} 项</span><span class="progress"><i :style="{width:`${job.progress}%`}"></i><small>{{job.progress}}%</small></span><span>{{jobTypeText(job.type)}}</span><span :class="job.state==='failed'?'failed':job.state==='succeeded'?'done':job.state==='cancelled'?'cancelled':''">{{jobStateText(job.state)}}</span><button v-if="job.state==='succeeded'&&(job.type==='export'||job.type==='dataset_export')" class="primary" @click="downloadExport(job.id)">下载</button><button v-else-if="job.state==='failed'" @click="retryJob(job.id)">重试</button><button v-else-if="['queued','running'].includes(job.state)&&['export','dataset_export'].includes(job.type)" class="danger-inline" @click="cancelJob(job)">取消</button></div></section>
+        <section v-if="jobRows.length" class="data-table download-table"><div class="table-row head"><span>任务</span><span>任务创建时间</span><span>内容</span><span>进度</span><span>类型</span><span>状态</span><span>操作</span></div><div v-for="job in jobRows" :key="job.id" class="table-row"><span class="job-name"><b :title="jobNameText(job)">{{jobNameText(job)}}</b><small v-if="job.error?.message" :title="jobErrorText(job.error.message)">{{jobErrorText(job.error.message)}}</small></span><span>{{job.created_at ? new Date(job.created_at).toLocaleString('zh-CN') : '时间未知'}}</span><span>{{job.input?.asset_count ?? job.input?.asset_ids?.length ?? (job.input?.asset_id ? 1 : 0)}} 项</span><span class="progress"><i :style="{width:`${job.progress}%`}"></i><small>{{job.progress}}%</small></span><span>{{jobTypeText(job.type)}}</span><span :class="job.state==='failed'?'failed':job.state==='succeeded'?'done':job.state==='cancelled'?'cancelled':''">{{jobStateText(job.state)}}</span><button v-if="jobAction(job)==='download'" class="primary" @click="downloadExport(job.id)">下载</button><button v-else-if="jobAction(job)==='retry'" @click="retryJob(job.id)">重试</button><button v-else-if="jobAction(job)==='cancel'" class="danger-inline" @click="cancelJob(job)">取消</button></div></section>
         <div v-if="jobTotal" class="pagination"><span>第 {{jobPage}} / {{jobPages}} 页</span><label>每页 <select v-model="jobPageSize" @change="jobPage=1;loadJobs()"><option :value="20">20</option><option :value="50">50</option><option :value="100">100</option></select> 项</label><button :disabled="jobPage===1" @click="jobPage--;loadJobs()">‹</button><button :disabled="jobPage===jobPages" @click="jobPage++;loadJobs()">›</button></div>
         <section v-if="!jobTotal" class="empty"><b>暂无符合条件的任务</b><p>上传、导出和系统清理任务会显示在这里。</p><button v-if="jobTypeFilter||jobStateFilter||jobCreatedFrom||jobCreatedTo" @click="resetJobFilters">清除筛选</button><button v-else @click="setPage('library')">返回素材库</button></section>
       </template>
@@ -1691,7 +1671,7 @@ async function revokeActiveRelation() {
 
       <template v-else-if="page === 'tags'">
         <section class="page-head"><div><h1>标签管理</h1></div><button class="primary" @click="openNewTag">＋ 新建标签字段</button></section>
-        <section class="tag-admin"><article v-for="tag in tagRows" :key="tag.key"><div><span class="tag-dot" :style="{background:tag.color}"></span><b>{{tag.name}}</b><code>{{tag.key}}</code></div><p>{{(tag.values || []).join(' / ') || '允许自由输入'}}</p><div class="tag-actions"><button @click="openEditTag(tag)">修改</button><button v-if="!tag.built_in" @click="removeTag(tag.key,tag.name)">删除</button></div></article></section>
+        <section class="tag-admin"><article v-for="tag in tagRows" :key="tag.key"><div><span class="tag-dot" :style="{background:tag.color}"></span><b>{{tag.name}}</b><code>{{tag.key}}</code></div><p>{{(tag.values || []).join(' / ') || '允许自由输入'}}</p><div class="tag-actions"><button @click="openEditTag(tag)">修改</button><button v-if="canDeleteTag(tag)" @click="removeTag(tag.key,tag.name)">删除</button></div></article></section>
       </template>
 
       <template v-else-if="page === 'formats'">

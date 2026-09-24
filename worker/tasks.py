@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+import logging
 import mimetypes
 import os
 import subprocess
@@ -18,6 +19,8 @@ from PIL import Image, ImageDraw
 from pymongo import MongoClient
 
 from backend.app.annotation_overlay import annotation_document_metadata
+
+logger = logging.getLogger("cv-archive-worker")
 
 MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
 MONGODB_DATABASE = os.getenv("MONGODB_DATABASE", "cv_archive")
@@ -74,10 +77,17 @@ def with_job_heartbeat(task_function):
         def pulse() -> None:
             while not stopped.wait(15):
                 timestamp = utcnow()
-                database.jobs.update_one(
-                    {"id": job_id, "state": "running"},
-                    {"$set": {"heartbeat_at": timestamp, "updated_at": timestamp}},
-                )
+                try:
+                    database.jobs.update_one(
+                        {"id": job_id, "state": "running"},
+                        {"$set": {"heartbeat_at": timestamp, "updated_at": timestamp}},
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Job heartbeat update failed for %s (%s); retrying on the next interval",
+                        job_id,
+                        type(exc).__name__,
+                    )
 
         heartbeat = threading.Thread(target=pulse, daemon=True)
         heartbeat.start()

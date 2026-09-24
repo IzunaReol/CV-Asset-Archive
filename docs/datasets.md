@@ -13,4 +13,4 @@
 
 API前缀为 /api/v1/datasets，具体请求字段以 /docs 的OpenAPI为准。迁移保留旧集合ID映射，重复执行不会重复创建。
 
-并发写入受到数据集级租约限制，中断恢复会在下一次写入前继续完成。旧集合迁移结果可运行 `python scripts/verify_migrations.py` 只读核对；当前版本边界见 [v1.3.0 发布说明](releases/v1.3.0.md)。
+并发写入受到数据集级租约限制，中断恢复会在下一次写入前继续完成。旧集合迁移结果可运行 `python scripts/verify_migrations.py` 只读核对；当前版本边界见 [v1.3.1 发布说明](releases/v1.3.1.md)。
