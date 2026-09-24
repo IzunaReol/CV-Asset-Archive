@@ -5,9 +5,11 @@ import mimetypes
 import os
 import subprocess
 import tempfile
+import threading
 import uuid
 import zipfile
 from datetime import UTC, datetime
+from functools import wraps
 from pathlib import Path
 
 from celery import Celery
@@ -57,6 +59,35 @@ def fail_job(job_id: str, exc: Exception) -> None:
             }
         },
     )
+
+
+def job_cancelled(job_id: str) -> bool:
+    job = database.jobs.find_one({"id": job_id}, {"state": 1, "cancel_requested": 1})
+    return bool(job and (job.get("state") == "cancelled" or job.get("cancel_requested")))
+
+
+def with_job_heartbeat(task_function):
+    @wraps(task_function)
+    def wrapped(job_id: str, *args, **kwargs):
+        stopped = threading.Event()
+
+        def pulse() -> None:
+            while not stopped.wait(15):
+                timestamp = utcnow()
+                database.jobs.update_one(
+                    {"id": job_id, "state": "running"},
+                    {"$set": {"heartbeat_at": timestamp, "updated_at": timestamp}},
+                )
+
+        heartbeat = threading.Thread(target=pulse, daemon=True)
+        heartbeat.start()
+        try:
+            return task_function(job_id, *args, **kwargs)
+        finally:
+            stopped.set()
+            heartbeat.join(timeout=1)
+
+    return wrapped
 
 
 def fail_asset(asset_id: str, exc: Exception) -> None:
@@ -217,9 +248,9 @@ def annotation_metadata(path: Path) -> dict:
                     except ValueError:
                         invalid += 1
             if not labels:
-                raise ValueError("ZIP does not contain YOLO label files")
+                raise ValueError("压缩包中没有 YOLO 标注文件")
             if invalid:
-                raise ValueError(f"YOLO package contains {invalid} invalid label rows")
+                raise ValueError(f"YOLO 压缩包包含 {invalid} 行无效标注")
             return {"annotation_format": "YOLO", "label_file_count": len(labels)}
     return {"annotation_format": path.suffix.lstrip(".").upper() or "UNKNOWN"}
 
@@ -693,6 +724,7 @@ def yolo_preview(path: Path, asset_id: str) -> str | None:
     retry_backoff=True,
     max_retries=3,
 )
+@with_job_heartbeat
 def process_asset(job_id: str, asset_id: str) -> None:
     try:
         WORKER_TEMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -702,7 +734,7 @@ def process_asset(job_id: str, asset_id: str) -> None:
         )
         asset = database.assets.find_one({"id": asset_id})
         if asset is None:
-            raise ValueError("asset not found")
+            raise ValueError("素材不存在")
         stat = storage.stat_object(MINIO_BUCKET, asset["object_key"])
         media = {
             "etag": stat.etag,
@@ -809,21 +841,26 @@ def process_asset(job_id: str, asset_id: str) -> None:
     retry_backoff=True,
     max_retries=3,
 )
+@with_job_heartbeat
 def build_export(job_id: str) -> None:
     try:
         WORKER_TEMP_DIR.mkdir(parents=True, exist_ok=True)
         job = database.jobs.find_one({"id": job_id})
         if job is None:
-            raise ValueError("job not found")
-        database.jobs.update_one(
-            {"id": job_id},
+            raise ValueError("任务不存在")
+        if job_cancelled(job_id):
+            return
+        claimed = database.jobs.update_one(
+            {"id": job_id, "state": {"$ne": "cancelled"}},
             {"$set": {"state": "running", "progress": 2, "updated_at": utcnow()}},
         )
+        if not claimed.modified_count or job_cancelled(job_id):
+            return
         selection_id = job["input"].get("selection_id")
         if selection_id:
             selection = database.asset_selection_sets.find_one({"id": selection_id})
             if selection is None:
-                raise ValueError("export selection expired")
+                raise ValueError("导出选择范围已过期")
             excluded = set(job["input"].get("excluded_ids", []))
             asset_ids = [item for item in selection["asset_ids"] if item not in excluded]
         else:
@@ -831,7 +868,7 @@ def build_export(job_id: str) -> None:
         asset_query = {"id": {"$in": asset_ids}, "archived_at": None}
         asset_count = database.assets.count_documents(asset_query)
         if not asset_count:
-            raise ValueError("no exportable assets")
+            raise ValueError("没有可导出的素材")
         assets = database.assets.find(asset_query)
         with tempfile.TemporaryDirectory(
             prefix="cv-archive-export-", dir=WORKER_TEMP_DIR
@@ -842,6 +879,8 @@ def build_export(job_id: str) -> None:
                 zip_path, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True
             ) as archive:
                 for index, asset in enumerate(assets):
+                    if job_cancelled(job_id):
+                        return
                     filename = Path(asset["name"]).name
                     if filename in used_names:
                         stem, suffix = os.path.splitext(filename)
@@ -857,15 +896,20 @@ def build_export(job_id: str) -> None:
                         response.release_conn()
                     progress = 5 + int(((index + 1) / asset_count) * 85)
                     database.jobs.update_one(
-                        {"id": job_id},
+                        {"id": job_id, "state": {"$ne": "cancelled"}},
                         {"$set": {"progress": progress, "updated_at": utcnow()}},
                     )
+            if job_cancelled(job_id):
+                return
             export_name = str(job.get("name") or job_id).replace("/", "_").replace("\\", "_")
             object_key = f"exports/{job_id}/{export_name}.zip"
             content_type = mimetypes.guess_type(zip_path.name)[0] or "application/zip"
             storage.fput_object(MINIO_BUCKET, object_key, str(zip_path), content_type=content_type)
-        database.jobs.update_one(
-            {"id": job_id},
+        if job_cancelled(job_id):
+            storage.remove_object(MINIO_BUCKET, object_key)
+            return
+        completed = database.jobs.update_one(
+            {"id": job_id, "state": {"$ne": "cancelled"}},
             {
                 "$set": {
                     "state": "succeeded",
@@ -875,17 +919,20 @@ def build_export(job_id: str) -> None:
                 }
             },
         )
+        if not completed.modified_count:
+            storage.remove_object(MINIO_BUCKET, object_key)
     except Exception as exc:
         fail_job(job_id, exc)
         raise
 
 
 @app.task(name="worker.tasks.empty_trash")
+@with_job_heartbeat
 def empty_trash(job_id: str) -> None:
     try:
         job = database.jobs.find_one({"id": job_id})
         if job is None:
-            raise ValueError("job not found")
+            raise ValueError("任务不存在")
         database.jobs.update_one(
             {"id": job_id},
             {"$set": {"state": "running", "progress": 1, "updated_at": utcnow()}},

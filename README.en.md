@@ -104,13 +104,13 @@ npm ci
 npm run build
 ```
 
-The isolated API workflow test is available at `scripts/runtime-e2e.py`. See the [testing guide](docs/testing.md) and [v1.2.1 release checklist](docs/release-checklist.md) for the full scope.
+The isolated API workflow test is available at `scripts/runtime-e2e.py`. See the [testing guide](docs/testing.md) and [v1.3.0 release checklist](docs/release-checklist.md) for the full scope.
 
-## Preparing to upgrade to v1.2.1
+## Preparing to upgrade to v1.3.0
 
 Back up MongoDB and MinIO before upgrading from v1.2.0. Update the source and dependencies, rebuild the frontend, and verify resumable uploads, bulk selections, dataset writes, exports, and backup scripts. The model relationship schema is unchanged; upgrades from older versions should still follow the [v1.2.0 migration notes](docs/releases/v1.2.0.md) for legacy direct model-to-asset relationships. A rollback requires the pre-upgrade database backup, not just older code.
 
-See the [dataset guide](docs/datasets.md) and [v1.2.1 release notes](docs/releases/v1.2.1.md) for behavior, validation status, and known limitations.
+See the [dataset guide](docs/datasets.md) and [v1.3.0 release notes](docs/releases/v1.3.0.md) for behavior, validation status, and known limitations.
 
 ## Documentation
 

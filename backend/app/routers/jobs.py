@@ -1,5 +1,5 @@
 import asyncio
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from celery import Celery
@@ -18,6 +18,72 @@ from .assets import resolve_selection_ids
 router = APIRouter(tags=["jobs"])
 settings = get_settings()
 celery_client = Celery(broker=settings.redis_url)
+
+TASK_NAMES = {
+    "process_asset": "worker.tasks.process_asset",
+    "export": "worker.tasks.build_export",
+    "dataset_export": "worker.tasks.build_export",
+    "trash_empty": "worker.tasks.empty_trash",
+}
+CANCELLABLE_JOB_TYPES = {"export", "dataset_export"}
+
+
+def _job_task_args(job: dict[str, Any]) -> list[str]:
+    if job["type"] == "process_asset":
+        return [job["id"], job["input"]["asset_id"]]
+    return [job["id"]]
+
+
+async def _dispatch_job(job: dict[str, Any]) -> None:
+    task_name = TASK_NAMES.get(job["type"])
+    if task_name is None:
+        raise AppError(409, "JOB_TYPE_NOT_RETRYABLE", "该任务类型不支持重新提交")
+    await asyncio.to_thread(celery_client.send_task, task_name, args=_job_task_args(job))
+
+
+async def reconcile_stale_jobs() -> int:
+    cutoff = now() - timedelta(minutes=settings.job_stale_minutes)
+    stale = await db.jobs.find(
+        {"state": "running", "updated_at": {"$lt": cutoff}},
+        {"id": 1, "type": 1, "input": 1},
+    ).to_list(length=None)
+    if not stale:
+        return 0
+    stale_ids = [item["id"] for item in stale]
+    timestamp = now()
+    await db.jobs.update_many(
+        {"id": {"$in": stale_ids}, "state": "running"},
+        {
+            "$set": {
+                "state": "failed",
+                "error": {
+                    "code": "TASK_INTERRUPTED",
+                    "message": "服务异常中断，任务未正常结束，可重新提交",
+                },
+                "updated_at": timestamp,
+            }
+        },
+    )
+    asset_ids = [
+        item.get("input", {}).get("asset_id")
+        for item in stale
+        if item.get("type") == "process_asset" and item.get("input", {}).get("asset_id")
+    ]
+    if asset_ids:
+        await db.assets.update_many(
+            {"id": {"$in": asset_ids}, "status": "processing"},
+            {
+                "$set": {
+                    "status": "failed",
+                    "processing_error": {
+                        "code": "TASK_INTERRUPTED",
+                        "message": "服务异常中断，素材处理未正常结束",
+                    },
+                    "updated_at": timestamp,
+                }
+            },
+        )
+    return len(stale_ids)
 
 
 @router.post("/exports", status_code=202)
@@ -87,6 +153,9 @@ async def list_jobs(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     job_type: str | None = Query(None, alias="type"),
+    state: str | None = Query(None),
+    created_from: datetime | None = Query(None),
+    created_to: datetime | None = Query(None),
     download_only: bool = Query(False),
 ) -> dict[str, Any]:
     query = (
@@ -98,6 +167,16 @@ async def list_jobs(
         query["type"] = {"$in": ["export", "dataset_export"]}
     elif job_type:
         query["type"] = job_type
+    if state:
+        query["state"] = state
+    if created_from and created_to and created_from > created_to:
+        raise AppError(400, "INVALID_TIME_RANGE", "开始时间不能晚于结束时间")
+    if created_from or created_to:
+        query["created_at"] = {}
+        if created_from:
+            query["created_at"]["$gte"] = created_from
+        if created_to:
+            query["created_at"]["$lte"] = created_to
     total = await db.jobs.count_documents(query)
     cursor = (
         db.jobs.find(query).sort([("created_at", -1), ("id", -1)]).skip((page - 1) * page_size).limit(page_size)
@@ -141,33 +220,30 @@ async def export_download_url(job_id: str, user: ReadUser) -> dict[str, Any]:
 
 @router.post("/jobs/{job_id}/retry", status_code=202)
 async def retry_job(job_id: str, user: WriteUser) -> dict[str, Any]:
-    job = await db.jobs.find_one({"id": job_id, "state": "failed"})
+    query: dict[str, Any] = {"id": job_id, "state": "failed"}
+    if not ({"admin", "data_manager"} & set(user["roles"])):
+        query["owner_id"] = user["id"]
+    job = await db.jobs.find_one(query)
     if job is None:
         raise AppError(409, "JOB_NOT_RETRYABLE", "任务不存在或当前状态不可重试")
-    await db.jobs.update_one(
-        {"id": job_id},
+    if job["type"] not in TASK_NAMES:
+        raise AppError(409, "JOB_TYPE_NOT_RETRYABLE", "该任务类型不支持重新提交")
+    claimed = await db.jobs.update_one(
+        query,
         {
             "$set": {"state": "queued", "progress": 0, "error": None, "updated_at": now()},
             "$inc": {"attempt": 1},
         },
     )
+    if not claimed.modified_count:
+        raise AppError(409, "JOB_NOT_RETRYABLE", "任务状态已变化，请刷新后重试")
     if job["type"] == "process_asset":
         await db.assets.update_one(
             {"id": job["input"]["asset_id"]},
             {"$set": {"status": "processing", "processing_error": None, "updated_at": now()}},
         )
-    task_name = (
-        "worker.tasks.build_export"
-        if job["type"] in {"export", "dataset_export"}
-        else "worker.tasks.process_asset"
-    )
     try:
-        await asyncio.to_thread(
-            celery_client.send_task,
-            task_name,
-            args=[job_id]
-            + ([job["input"]["asset_id"]] if job["type"] not in {"export", "dataset_export"} else []),
-        )
+        await _dispatch_job(job)
     except Exception as exc:
         await db.jobs.update_one(
             {"id": job_id},
@@ -193,4 +269,39 @@ async def retry_job(job_id: str, user: WriteUser) -> dict[str, Any]:
                     }
                 },
             )
+    return public_document(await db.jobs.find_one({"id": job_id})) or {}
+
+
+@router.post("/jobs/{job_id}/cancel", status_code=202)
+async def cancel_job(job_id: str, request: Request, user: WriteUser) -> dict[str, Any]:
+    query: dict[str, Any] = {
+        "id": job_id,
+        "type": {"$in": sorted(CANCELLABLE_JOB_TYPES)},
+        "state": {"$in": ["queued", "running"]},
+    }
+    if not ({"admin", "data_manager"} & set(user["roles"])):
+        query["owner_id"] = user["id"]
+    timestamp = now()
+    result = await db.jobs.update_one(
+        query,
+        {
+            "$set": {
+                "state": "cancelled",
+                "cancel_requested": True,
+                "cancelled_at": timestamp,
+                "cancelled_by": user["id"],
+                "updated_at": timestamp,
+            }
+        },
+    )
+    if not result.modified_count:
+        raise AppError(409, "JOB_NOT_CANCELLABLE", "任务不存在、已结束或不支持取消")
+    await record_audit(
+        actor=user,
+        action="job.cancelled",
+        object_type="job",
+        object_id=job_id,
+        request_id=request.state.request_id,
+        changes={},
+    )
     return public_document(await db.jobs.find_one({"id": job_id})) or {}

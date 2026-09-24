@@ -66,9 +66,12 @@ const uploadOpen = ref(false)
 const uploadFiles = ref<File[]>([])
 const uploadTypeOverrides = ref<Record<string,string>>({})
 const uploadBusy = ref(false)
+const uploadPaused = ref(false)
 const uploadProgress = ref(0)
 const uploadCompleted = ref(0)
 const uploadError = ref('')
+const uploadAbortControllers = new Set<AbortController>()
+let uploadResumeWaiters:Array<()=>void> = []
 const batchTagOpen = ref(false)
 const batchTagAction = ref<'add'|'remove'>('add')
 const batchTagKey = ref<TagKey>('status')
@@ -112,8 +115,13 @@ const lineagePickerTotal = ref(0)
 const lineagePickerLoading = ref(false)
 const jobRows = ref<any[]>([])
 const jobTotal = ref(0)
+const jobAllTotal = ref(0)
 const jobPage = ref(1)
 const jobPageSize = ref(20)
+const jobTypeFilter = ref('')
+const jobStateFilter = ref('')
+const jobCreatedFrom = ref('')
+const jobCreatedTo = ref('')
 const jobPages = computed(() => Math.max(1, Math.ceil(jobTotal.value / jobPageSize.value)))
 let jobPoll: number | null = null
 const tagRows = ref<any[]>([])
@@ -177,11 +185,11 @@ const manageableFormatTypes = ['image','video','annotation','model','archive','i
 const availableFormatTypes = computed(() => manageableFormatTypes.filter(type => !formatRows.value.some(row => row.asset_type === type)))
 const relationTypeLabels: Record<string,string> = { annotates:'对应标注', contains:'属于数据集', trained_on:'用于训练', produced_by:'由训练产生', version_of:'版本关系' }
 const historyRelationTypeLabels: Record<string,string> = {annotates:'对应标注',trained_on:'用于训练'}
-const jobTypeLabels: Record<string,string> = { export:'素材导出', dataset_export:'数据集导出' }
-const jobStateLabels: Record<string,string> = { queued:'等待处理', running:'处理中', succeeded:'已完成', failed:'失败' }
+const jobTypeLabels: Record<string,string> = { export:'素材导出', dataset_export:'数据集导出', process_asset:'素材处理', trash_empty:'清空回收站' }
+const jobStateLabels: Record<string,string> = { queued:'等待处理', running:'处理中', succeeded:'已完成', failed:'失败', cancelled:'已取消' }
 const roleLabels: Record<string,string> = { admin:'管理员', data_manager:'数据管理员', annotator:'标注员', ml_engineer:'算法工程师', viewer:'只读访客' }
 const userStatusLabels: Record<string,string> = { active:'正常', disabled:'已停用' }
-const auditActionLabels: Record<string,string> = { 'asset.created':'创建素材', 'asset.deleted':'删除素材', 'asset.batch_deleted':'移入回收站', 'asset.batch_restored':'还原素材', 'asset.remark_updated':'修改素材备注', 'trash.emptied':'清空回收站', 'asset.tags_updated':'修改素材标签', 'export.created':'创建导出任务', 'relation.created':'建立关联关系', 'relation.revoked':'撤销关联关系' }
+const auditActionLabels: Record<string,string> = { 'asset.created':'创建素材', 'asset.deleted':'删除素材', 'asset.batch_deleted':'移入回收站', 'asset.batch_restored':'还原素材', 'asset.remark_updated':'修改素材备注', 'trash.emptied':'清空回收站', 'asset.tags_updated':'修改素材标签', 'export.created':'创建导出任务', 'job.cancelled':'取消任务', 'relation.created':'建立关联关系', 'relation.revoked':'撤销关联关系' }
 
 const relationHistory = ref<any[]>([])
 const lineageRoot = ref<any>(null)
@@ -855,14 +863,50 @@ async function removeUploadFile(file:File) {
 }
 function openUpload() {
   void loadFormats()
-  uploadFiles.value = []; uploadTypeOverrides.value = {}; uploadTags.value={}; uploadError.value = ''; uploadProgress.value = 0; uploadCompleted.value = 0; uploadOpen.value = true
+  uploadFiles.value = []; uploadTypeOverrides.value = {}; uploadTags.value={}; uploadError.value = ''; uploadProgress.value = 0; uploadCompleted.value = 0; uploadPaused.value = false; uploadOpen.value = true
+}
+
+function pauseUpload() {
+  uploadPaused.value = true
+  uploadAbortControllers.forEach(controller => controller.abort())
+  uploadAbortControllers.clear()
+}
+
+function resumeUpload() {
+  uploadPaused.value = false
+  const waiters = uploadResumeWaiters
+  uploadResumeWaiters = []
+  waiters.forEach(resolve => resolve())
+}
+
+async function waitForUploadResume() {
+  if (!uploadPaused.value) return
+  await new Promise<void>(resolve => uploadResumeWaiters.push(resolve))
+}
+
+async function uploadRequest(url:string, body:Blob|File, failureMessage:string) {
+  while (true) {
+    await waitForUploadResume()
+    const controller = new AbortController()
+    uploadAbortControllers.add(controller)
+    try {
+      const response = await fetch(url, {method:'PUT',body,signal:controller.signal})
+      if (!response.ok) throw new Error(failureMessage)
+      return
+    } catch (error) {
+      if (uploadPaused.value && controller.signal.aborted) continue
+      throw error
+    } finally {
+      uploadAbortControllers.delete(controller)
+    }
+  }
 }
 
 async function uploadAsset() {
   if (!uploadFiles.value.length) { uploadError.value = '请选择文件'; return }
   const unresolved = uploadFiles.value.filter(file => !resolvedUploadType(file))
   if (unresolved.length) { uploadError.value = `请为 ${unresolved.map(file=>file.name).join('、')} 选择资产类型`; return }
-  uploadBusy.value = true; uploadProgress.value = 0; uploadCompleted.value = 0; uploadError.value = ''
+  uploadBusy.value = true; uploadPaused.value = false; uploadProgress.value = 0; uploadCompleted.value = 0; uploadError.value = ''
   const files = [...uploadFiles.value]
   const failed:Array<{file:File;message:string}> = []
   let succeeded = 0
@@ -895,8 +939,7 @@ async function uploadAsset() {
             if (item.error) { failed.push({file,message:item.error.message}); markCompleted(); continue }
             try {
               if (item.session.upload_required) {
-                const response = await fetch(item.session.upload_url, {method:'PUT',body:file})
-                if (!response.ok) throw new Error('文件上传到对象存储失败')
+                await uploadRequest(item.session.upload_url, file, '文件上传到对象存储失败')
               }
               ready.push({file,sessionId:item.session.upload_session_id})
             } catch (error) {
@@ -950,8 +993,7 @@ async function uploadAsset() {
               while (pending.length) {
                 const index = pending.shift()!
                 const offset = index * status.chunk_size
-                const response = await fetch(status.upload_urls[String(index)], {method:'PUT',body:file.slice(offset,Math.min(offset+status.chunk_size,file.size))})
-                if (!response.ok) throw new Error(`第 ${index+1} 个分片上传失败`)
+                await uploadRequest(status.upload_urls[String(index)], file.slice(offset,Math.min(offset+status.chunk_size,file.size)), `第 ${index+1} 个分片上传失败`)
               }
             }
             await Promise.all(Array.from({length:Math.min(3,pending.length)},()=>uploadChunk()))
@@ -978,7 +1020,7 @@ async function uploadAsset() {
     }
     await loadAssets()
   } catch (error) { uploadError.value = error instanceof Error ? error.message : '批量上传失败' }
-  finally { uploadBusy.value = false }
+  finally { resumeUpload(); uploadBusy.value = false }
 }
 
 onMounted(() => { if (api.session()) void Promise.all([loadAssets(), loadJobs(), loadFormats(), loadTrash()]); startJobPolling() })
@@ -1124,8 +1166,13 @@ async function loadJobs() {
   const requestedPage = jobPage.value
   const requestedPageSize = jobPageSize.value
   try {
-    const result = await api.jobs(requestedPage, requestedPageSize, true)
+    const requestedType = jobTypeFilter.value
+    const requestedState = jobStateFilter.value
+    const requestedFrom = jobCreatedFrom.value
+    const requestedTo = jobCreatedTo.value
+    const result = await api.jobs(requestedPage, requestedPageSize, requestedType, requestedState, requestedFrom ? new Date(requestedFrom).toISOString() : '', requestedTo ? new Date(requestedTo).toISOString() : '')
     if (requestedPage !== jobPage.value || requestedPageSize !== jobPageSize.value) return
+    if (requestedType !== jobTypeFilter.value || requestedState !== jobStateFilter.value || requestedFrom !== jobCreatedFrom.value || requestedTo !== jobCreatedTo.value) return
     const lastPage = Math.max(1, Math.ceil(result.total / requestedPageSize))
     if (requestedPage > lastPage) {
       jobPage.value = lastPage
@@ -1134,6 +1181,7 @@ async function loadJobs() {
     }
     jobRows.value = result.items
     jobTotal.value = result.total
+    if (!requestedType && !requestedState && !requestedFrom && !requestedTo) jobAllTotal.value = result.total
   }
   catch (error) { notifyError(error instanceof Error ? error.message : '任务加载失败') }
 }
@@ -1361,6 +1409,13 @@ function processingStatusText(status:string) {
 }
 
 function jobTypeText(type:string) { return jobTypeLabels[type] || type }
+function jobNameText(job:any) { return job.name || `${jobTypeText(job.type)}任务` }
+function jobErrorText(message:string) {
+  if (message === 'ZIP does not contain YOLO label files') return '压缩包中没有 YOLO 标注文件'
+  const invalid = message.match(/^YOLO package contains (\d+) invalid label rows$/)
+  if (invalid) return `YOLO 压缩包包含 ${invalid[1]} 行无效标注`
+  return ({'asset not found':'素材不存在','job not found':'任务不存在','export selection expired':'导出选择范围已过期','no exportable assets':'没有可导出的素材'} as Record<string,string>)[message] || message
+}
 function jobStateText(state:string) { return jobStateLabels[state] || state }
 function roleText(role:string) { return roleLabels[role] || role }
 function userStatusText(status:string) { return userStatusLabels[status] || status }
@@ -1369,6 +1424,31 @@ function auditActionText(action:string) { return auditActionLabels[action] || ac
 async function retryJob(id:string) {
   try { await api.retryJob(id); notify('任务已重新提交'); await loadJobs() }
   catch (error) { notifyError(error instanceof Error ? error.message : '任务重试失败') }
+}
+
+function cancelJob(job:any) {
+  askConfirmation(`确定取消任务“${job.name || jobTypeText(job.type)}”吗？`, async () => {
+    try { await api.cancelJob(job.id); notify('任务已取消'); await loadJobs() }
+    catch (error) { notifyError(error instanceof Error ? error.message : '任务取消失败') }
+  })
+}
+
+function resetJobFilters() {
+  jobTypeFilter.value=''
+  jobStateFilter.value=''
+  jobCreatedFrom.value=''
+  jobCreatedTo.value=''
+  jobPage.value=1
+  void loadJobs()
+}
+
+function applyJobFilters() {
+  if (jobCreatedFrom.value && jobCreatedTo.value && new Date(jobCreatedFrom.value) > new Date(jobCreatedTo.value)) {
+    notifyError('开始时间不能晚于结束时间')
+    return
+  }
+  jobPage.value=1
+  void loadJobs()
 }
 
 async function loadAdmin() {
@@ -1484,7 +1564,7 @@ async function revokeActiveRelation() {
         <button :class="{ active: page === 'datasets' }" @click="setPage('datasets')"><span>▤</span>数据集</button>
         <button :class="{ active: page === 'relations' }" @click="setPage('relations')"><span>⌁</span>关联关系</button>
         <button :class="{ active: page === 'lineage' }" @click="setPage('lineage')"><span>⑂</span>模型溯源</button>
-        <button :class="{ active: page === 'downloads' }" @click="setPage('downloads')"><span>⇩</span>下载中心<em>{{jobTotal}}</em></button>
+        <button :class="{ active: page === 'downloads' }" @click="setPage('downloads')"><span>⇩</span>任务中心<em>{{jobAllTotal}}</em></button>
         <button :class="{ active: page === 'trash' }" @click="setPage('trash')"><span>♲</span>回收站<em>{{trashTotal || ''}}</em></button>
         <div class="nav-label">系统管理</div>
         <button :class="{ active: page === 'tags' }" @click="setPage('tags')"><span>◇</span>标签管理</button>
@@ -1588,10 +1668,11 @@ async function revokeActiveRelation() {
       </template>
 
       <template v-else-if="page === 'downloads'">
-        <section class="page-head"><div><h1>下载中心</h1></div><span>共 {{jobTotal}} 个任务</span></section>
-        <section v-if="jobRows.length" class="data-table download-table"><div class="table-row head"><span>任务</span><span>任务创建时间</span><span>内容</span><span>进度</span><span>类型</span><span>状态</span><span>操作</span></div><div v-for="job in jobRows" :key="job.id" class="table-row"><b>{{job.name || jobTypeText(job.type)}}</b><span>{{job.created_at ? new Date(job.created_at).toLocaleString('zh-CN') : '时间未知'}}</span><span>{{job.input?.asset_count ?? job.input?.asset_ids?.length ?? 0}} 项</span><span class="progress"><i :style="{width:`${job.progress}%`}"></i><small>{{job.progress}}%</small></span><span>{{jobTypeText(job.type)}}</span><span :class="job.state==='failed'?'failed':job.state==='succeeded'?'done':''">{{jobStateText(job.state)}}</span><button v-if="job.state==='succeeded'&&(job.type==='export'||job.type==='dataset_export')" class="primary" @click="downloadExport(job.id)">下载</button><button v-else-if="job.state==='failed'" @click="retryJob(job.id)">重试</button><button v-else disabled>{{job.state==='running'?'处理中':'等待'}}</button></div></section>
+        <section class="page-head"><div><h1>任务中心</h1><p>查看素材处理、导出和系统清理任务。</p></div></section>
+        <section class="job-toolbar"><div class="job-count">当前页 <b>{{jobRows.length}}</b> 项 <span>· 全部 {{jobTotal}} 项</span></div><div class="job-filters"><select v-model="jobTypeFilter"><option value="">全部类型</option><option v-for="(label,key) in jobTypeLabels" :key="key" :value="key">{{label}}</option></select><select v-model="jobStateFilter"><option value="">全部状态</option><option v-for="(label,key) in jobStateLabels" :key="key" :value="key">{{label}}</option></select><label>开始时间<input v-model="jobCreatedFrom" type="datetime-local" step="1" /></label><label>结束时间<input v-model="jobCreatedTo" type="datetime-local" step="1" :min="jobCreatedFrom" /></label><button @click="resetJobFilters">重置</button><button @click="applyJobFilters">筛选</button></div></section>
+        <section v-if="jobRows.length" class="data-table download-table"><div class="table-row head"><span>任务</span><span>任务创建时间</span><span>内容</span><span>进度</span><span>类型</span><span>状态</span><span>操作</span></div><div v-for="job in jobRows" :key="job.id" class="table-row"><span class="job-name"><b :title="jobNameText(job)">{{jobNameText(job)}}</b><small v-if="job.error?.message" :title="jobErrorText(job.error.message)">{{jobErrorText(job.error.message)}}</small></span><span>{{job.created_at ? new Date(job.created_at).toLocaleString('zh-CN') : '时间未知'}}</span><span>{{job.input?.asset_count ?? job.input?.asset_ids?.length ?? (job.input?.asset_id ? 1 : 0)}} 项</span><span class="progress"><i :style="{width:`${job.progress}%`}"></i><small>{{job.progress}}%</small></span><span>{{jobTypeText(job.type)}}</span><span :class="job.state==='failed'?'failed':job.state==='succeeded'?'done':job.state==='cancelled'?'cancelled':''">{{jobStateText(job.state)}}</span><button v-if="job.state==='succeeded'&&(job.type==='export'||job.type==='dataset_export')" class="primary" @click="downloadExport(job.id)">下载</button><button v-else-if="job.state==='failed'" @click="retryJob(job.id)">重试</button><button v-else-if="['queued','running'].includes(job.state)&&['export','dataset_export'].includes(job.type)" class="danger-inline" @click="cancelJob(job)">取消</button></div></section>
         <div v-if="jobTotal" class="pagination"><span>第 {{jobPage}} / {{jobPages}} 页</span><label>每页 <select v-model="jobPageSize" @change="jobPage=1;loadJobs()"><option :value="20">20</option><option :value="50">50</option><option :value="100">100</option></select> 项</label><button :disabled="jobPage===1" @click="jobPage--;loadJobs()">‹</button><button :disabled="jobPage===jobPages" @click="jobPage++;loadJobs()">›</button></div>
-        <section v-if="!jobTotal" class="empty"><b>暂无下载任务</b><p>在素材库选择素材后，点击“导出”创建打包任务。</p><button @click="setPage('library')">返回素材库</button></section>
+        <section v-if="!jobTotal" class="empty"><b>暂无符合条件的任务</b><p>上传、导出和系统清理任务会显示在这里。</p><button v-if="jobTypeFilter||jobStateFilter||jobCreatedFrom||jobCreatedTo" @click="resetJobFilters">清除筛选</button><button v-else @click="setPage('library')">返回素材库</button></section>
       </template>
 
       <template v-else-if="page === 'trash'">
@@ -1610,7 +1691,7 @@ async function revokeActiveRelation() {
 
       <template v-else-if="page === 'tags'">
         <section class="page-head"><div><h1>标签管理</h1></div><button class="primary" @click="openNewTag">＋ 新建标签字段</button></section>
-        <section class="tag-admin"><article v-for="tag in tagRows" :key="tag.key"><div><span class="tag-dot" :style="{background:tag.color}"></span><b>{{tag.name}}</b><code>{{tag.key}}</code></div><p>{{(tag.values || []).join(' / ') || '允许自由输入'}}</p><div class="tag-actions"><button @click="openEditTag(tag)">修改</button><button @click="removeTag(tag.key,tag.name)">删除</button></div></article></section>
+        <section class="tag-admin"><article v-for="tag in tagRows" :key="tag.key"><div><span class="tag-dot" :style="{background:tag.color}"></span><b>{{tag.name}}</b><code>{{tag.key}}</code></div><p>{{(tag.values || []).join(' / ') || '允许自由输入'}}</p><div class="tag-actions"><button @click="openEditTag(tag)">修改</button><button v-if="!tag.built_in" @click="removeTag(tag.key,tag.name)">删除</button></div></article></section>
       </template>
 
       <template v-else-if="page === 'formats'">
@@ -1655,7 +1736,7 @@ async function revokeActiveRelation() {
       <button class="login-close" aria-label="关闭登录预览" @click="showLogin=false">×</button>
       <section class="login-card">
         <div class="login-brand"><span class="brand-mark">VA</span><b>视觉资产库</b></div>
-        <h1>登录后继续归档工作</h1><p>使用管理员分配的团队账户访问素材、数据集和模型。</p>
+        <h1>登录</h1>
         <label>用户名<input v-model="loginUsername" autocomplete="username" @keyup.enter="login" /></label><label>密码<input v-model="loginPassword" type="password" autocomplete="current-password" @keyup.enter="login" /></label>
         <div class="login-option"><label><input type="checkbox" checked /> 保持登录</label></div>
         <p v-if="loginError" class="form-error">{{loginError}}</p>
@@ -1669,8 +1750,8 @@ async function revokeActiveRelation() {
         <label class="file-select-button"><input type="file" multiple @change="chooseFile" /><span>点击选择文件</span></label>
         <div v-if="uploadFiles.length" class="selected-files"><article v-for="file in uploadFiles" :key="uploadFileKey(file)" class="selected-file"><div><b>{{file.name}}</b><small>{{(file.size/1024/1024).toFixed(1)}} MB · {{uploadTypeStatus(file)}}</small></div><select v-model="uploadTypeOverrides[uploadFileKey(file)]" aria-label="选择资产类型"><option value="" disabled>选择类型</option><option value="image">图片</option><option value="video">视频</option><option value="annotation">标注</option><option value="model">模型</option><option value="archive">压缩文件</option><option value="image_annotation">图片+标注</option><option value="other">其他</option></select><button type="button" aria-label="移除文件" title="移除" :disabled="uploadBusy" @click="removeUploadFile(file)">×</button></article></div>
         <div v-if="uploadFiles.length" class="upload-tag-tools"><button class="secondary" type="button" @click="openBatchTag('upload')">＋ 添加标签</button><div v-if="uploadTagEntries.length" class="upload-tag-list"><span v-for="tag in uploadTagEntries" :key="`${tag.key}-${tag.value}`"><b>{{tag.label}}</b>：{{tag.value}}<button type="button" :aria-label="`删除${tag.label}标签${tag.value}`" @click="removeUploadTag(tag.key,tag.value)">×</button></span></div></div>
-        <div v-if="uploadBusy" class="upload-meter"><i :style="{width:`${uploadProgress}%`}"></i></div><p v-if="uploadBusy" class="upload-count">已处理 {{uploadCompleted}} / {{uploadFiles.length}} 项</p><p v-if="uploadError" class="form-error">{{uploadError}}</p>
-        <div class="dialog-actions"><button class="secondary" :disabled="uploadBusy" @click="uploadOpen=false">取消</button><button class="primary" :disabled="uploadBusy" @click="uploadAsset">{{uploadBusy?'正在上传…':'开始上传'}}</button></div>
+        <div v-if="uploadBusy" class="upload-meter"><i :style="{width:`${uploadProgress}%`}"></i></div><p v-if="uploadBusy" class="upload-count">{{uploadPaused?'上传已暂停':'正在上传'}} · 已处理 {{uploadCompleted}} / {{uploadFiles.length}} 项</p><p v-if="uploadError" class="form-error">{{uploadError}}</p>
+        <div class="dialog-actions"><button class="secondary" :disabled="uploadBusy" @click="uploadOpen=false">取消</button><button v-if="uploadBusy" class="secondary" @click="uploadPaused?resumeUpload():pauseUpload()">{{uploadPaused?'继续上传':'暂停上传'}}</button><button class="primary" :disabled="uploadBusy" @click="uploadAsset">{{uploadBusy?'正在上传…':'开始上传'}}</button></div>
       </section>
     </div>
     <div v-if="batchTagOpen" class="modal-stage">

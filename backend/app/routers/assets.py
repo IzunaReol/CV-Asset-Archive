@@ -332,6 +332,7 @@ async def complete_upload(
     job = {
         "id": new_id(),
         "type": "process_asset",
+        "name": f"素材处理：{asset['name']}",
         "state": "queued",
         "progress": 0,
         "owner_id": user["id"],
@@ -849,6 +850,7 @@ async def empty_trash(request: Request, user: WriteUser) -> dict[str, Any]:
     job = {
         "id": new_id(),
         "type": "trash_empty",
+        "name": "清空回收站",
         "state": "queued",
         "progress": 0,
         "owner_id": user["id"],

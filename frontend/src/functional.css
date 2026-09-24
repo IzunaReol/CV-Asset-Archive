@@ -118,6 +118,21 @@
 .asset-info small .processing-state { color: #d97706; }
 .asset-info small .failed-state { color: #dc2626; }
 .download-table .table-row { grid-template-columns:minmax(190px,1.5fr) minmax(155px,1.05fr) .55fr 1fr .6fr .7fr 72px; }
+.job-toolbar { display:flex; align-items:flex-end; justify-content:space-between; gap:14px; margin-bottom:12px; padding:13px 17px; border:1px solid var(--line); border-radius:9px; background:var(--panel); }
+.job-count { flex:0 0 auto; color:var(--ink); font-size:13px; white-space:nowrap; }
+.job-count span { color:var(--muted); }
+.job-filters { display:flex; align-items:flex-end; justify-content:flex-end; gap:8px; min-width:0; }
+.job-filters label { display:grid; gap:4px; color:var(--muted); font-size:12px; }
+.job-filters select,.job-filters input,.job-filters button { min-width:140px; border:1px solid var(--line); border-radius:7px; padding:9px 11px; background:var(--panel); color:var(--ink); }
+.job-filters input { min-width:185px; }
+.job-filters button { min-width:auto; }
+.job-name { display:grid; min-width:0; gap:3px; }
+.job-name b,.job-name small { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.job-name small,.cancelled { color:var(--muted); }
+.download-table .danger-inline { border:1px solid #b6453c; border-radius:6px; background:transparent; color:#b6453c; }
+.job-filters input[type="datetime-local"] { color-scheme:light; }
+.skin-command .job-filters input[type="datetime-local"] { color-scheme:dark; background:#101d1a; border-color:#36524a; color:var(--ink); }
+@media(max-width:1100px){.job-toolbar{align-items:stretch;flex-direction:column}.job-filters{display:grid;grid-template-columns:1fr 1fr}.job-filters select,.job-filters input{width:100%;min-width:0}.job-filters button{width:100%}}
 .detail-tags span { position:relative; display:inline-flex; align-items:center; padding:5px 8px; }
 .detail-tags span i { font-style:normal; }
 .detail-tags span button { position:absolute; top:-7px; right:-7px; width:18px; height:18px; padding:0; display:none; align-items:center; justify-content:center; border:1px solid var(--line); border-radius:50%; background:var(--panel); color:var(--ink); font-size:13px; line-height:1; }

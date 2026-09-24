@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     initial_admin_password: str = "admin"
     max_upload_size_bytes: int = 10 * 1024 * 1024 * 1024
     export_expiry_hours: int = 72
+    job_stale_minutes: int = 120
 
 
 @lru_cache

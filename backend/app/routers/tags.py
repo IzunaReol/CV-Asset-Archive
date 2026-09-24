@@ -28,6 +28,7 @@ async def create_tag(
     tag = {
         "id": new_id(),
         **body.model_dump(mode="json"),
+        "built_in": False,
         "created_by": user["id"],
         "created_at": now(),
         "updated_at": now(),
@@ -62,6 +63,11 @@ async def update_tag(
 
 @router.delete("/{key}", status_code=204)
 async def delete_tag(key: str, request: Request, user: AdminUser) -> None:
+    definition = await db.tag_definitions.find_one({"key": key})
+    if not definition:
+        raise AppError(404, "TAG_DEFINITION_NOT_FOUND", "标签字段不存在")
+    if definition.get("built_in"):
+        raise AppError(409, "BUILT_IN_TAG_PROTECTED", "默认标签不允许删除")
     in_use = await db.assets.count_documents({f"tags.{key}": {"$exists": True}}, limit=1)
     if in_use:
         raise AppError(409, "TAG_DEFINITION_IN_USE", "标签正在使用，请先迁移或移除素材标签")

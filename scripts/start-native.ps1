@@ -22,10 +22,17 @@ function Start-ManagedProcess([string]$Name, [string]$FilePath, [string[]]$Argum
     $pidFile = Join-Path $pids "$Name.pid"
     if (Test-Path -LiteralPath $pidFile) {
         $oldPid = [int](Get-Content -LiteralPath $pidFile -Raw)
-        if (Get-Process -Id $oldPid -ErrorAction SilentlyContinue) {
-            Write-Host "$Name already running (PID $oldPid)."
-            return
+        $oldProcess = Get-Process -Id $oldPid -ErrorAction SilentlyContinue
+        if ($oldProcess) {
+            $expectedPath = [IO.Path]::GetFullPath($FilePath)
+            $actualPath = $oldProcess.Path
+            if ($actualPath -and [IO.Path]::GetFullPath($actualPath) -eq $expectedPath) {
+                Write-Host "$Name already running (PID $oldPid)."
+                return
+            }
+            Write-Warning "$Name PID file points to another process (PID $oldPid); replacing the stale record."
         }
+        Remove-Item -LiteralPath $pidFile -Force
     }
     $stdout = Join-Path $logs "$Name.out.log"
     $stderr = Join-Path $logs "$Name.err.log"

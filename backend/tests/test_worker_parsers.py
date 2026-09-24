@@ -110,7 +110,7 @@ def test_parse_yolo_and_reject_invalid_rows(tmp_path):
     invalid = tmp_path / "invalid.zip"
     with zipfile.ZipFile(invalid, "w") as archive:
         archive.writestr("labels/a.txt", "0 1.2 0.5 0.2 0.2\n")
-    with pytest.raises(ValueError, match="invalid label rows"):
+    with pytest.raises(ValueError, match="无效标注"):
         annotation_metadata(invalid)
 
 

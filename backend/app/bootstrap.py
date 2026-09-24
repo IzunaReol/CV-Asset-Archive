@@ -51,6 +51,7 @@ async def bootstrap() -> None:
         await db.tag_definitions.update_one(
             {"key": key},
             {
+                "$set": {"built_in": True},
                 "$setOnInsert": {
                     "id": new_id(),
                     "key": key,

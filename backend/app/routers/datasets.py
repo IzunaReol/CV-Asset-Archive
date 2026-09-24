@@ -806,7 +806,7 @@ async def export_dataset(dataset_id: str, body: DatasetExportRequest, request: R
     if not asset_ids:
         raise AppError(400, "DATASET_EMPTY", "数据集中没有可导出的素材")
     timestamp = now()
-    job = {"id": new_id(), "type": "dataset_export", "name": body.name or f"{dataset['name']}-{timestamp.strftime('%Y%m%d%H%M%S')}", "state": "queued", "progress": 0, "owner_id": user["id"], "input": {"asset_ids": asset_ids, "asset_count": len(asset_ids), "dataset_id": dataset_id}, "result": None, "error": None, "created_at": timestamp, "updated_at": timestamp, "expires_at": timestamp + timedelta(hours=settings.export_expiry_hours)}
+    job = {"id": new_id(), "type": "dataset_export", "name": body.name or f"数据集导出：{dataset['name']}-{timestamp.strftime('%Y%m%d%H%M%S')}", "state": "queued", "progress": 0, "owner_id": user["id"], "input": {"asset_ids": asset_ids, "asset_count": len(asset_ids), "dataset_id": dataset_id}, "result": None, "error": None, "created_at": timestamp, "updated_at": timestamp, "expires_at": timestamp + timedelta(hours=settings.export_expiry_hours)}
     await db.jobs.insert_one(job)
     try:
         await asyncio.to_thread(celery_client.send_task, "worker.tasks.build_export", args=[job["id"]])
