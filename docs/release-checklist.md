@@ -10,3 +10,5 @@
 - [ ] Linux Docker 全新部署、容器备份恢复和镜像扫描实机复核：按用户要求跳过，不计入本次验收完成项。
 
 具体变更和限制见 [v1.3.0 发布说明](releases/v1.3.0.md)。
+
+后续版本的发布说明统一使用 [Release 模板](releases/TEMPLATE.md)。

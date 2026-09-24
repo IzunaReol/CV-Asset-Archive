@@ -25,7 +25,7 @@
 
 - 认证：`POST /auth/login`、`/auth/refresh`、`/auth/logout`
 - 素材：`GET /assets`、`/assets/stats`、`/assets/{id}`
-- 上传：`POST /assets/upload-sessions`、`GET|DELETE /assets/upload-sessions/{id}`、`POST /assets/upload-sessions/complete`；64 MB 及以上文件使用 64 MB 分片，重新选择同一文件时查询会话并跳过已完成分片。多文件可使用 `/assets/upload-sessions/batch` 和 `/assets/upload-sessions/complete-batch`，单次最多 100 项。
+- 上传：`POST /assets/upload-sessions`、`GET|DELETE /assets/upload-sessions/{id}`、`POST /assets/upload-sessions/complete`；64 MB 及以上文件使用 64 MB 分片。前端暂停时中止当前请求但保留会话，继续或重新选择同一文件时查询会话并跳过已完成分片。多文件可使用 `/assets/upload-sessions/batch` 和 `/assets/upload-sessions/complete-batch`，单次最多 100 项。
 - 选择集：`POST /assets/selection-sets` 固化当前筛选结果，有效期 2 小时，最多 10 万项。批量标签、删除、集合及导出可以提交 `selection_id` 和 `excluded_ids`。
 - 素材编辑：`PATCH /assets/{id}/remark`、`POST /assets/batch-tags`
 - 标注：`GET /assets/{id}/annotation-overlays`
@@ -56,6 +56,7 @@ CVAT 在线任务和 MLflow 接口尚未实现。
 - 新建模型关系仅允许“模型 → 已发布数据集版本”。图谱按版本成员推导素材路径，拒绝模型直连素材的写入。
 - 撤销原因可不填且不限制业务字数；已撤销记录仍可在历史中查询。
 - 清空回收站返回 `202` 和任务记录，实际文件清理由 Worker 执行。
+- 默认标签带有 `built_in=true`，允许修改但拒绝删除；用户创建的未使用标签可以删除。
 
 ## 常用状态码
 

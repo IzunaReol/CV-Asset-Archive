@@ -14,8 +14,9 @@ CV Asset Archive is an asset and relationship management system for computer vis
 - Bounding-box and polygon overlays
 - Automatic image-to-annotation matching, model-to-dataset-version relationships, history, and model lineage
 - Soft deletion, recycle-bin recovery, and background physical cleanup
-- Background ZIP exports with progress tracking and expiring downloads
-- User, role, tag, format, and audit management
+- Unified job center with type, state, and creation-time filters, retry, export cancellation, heartbeats, and expiring downloads
+- Chunked uploads for files 64 MB and larger, with pause, resume, and session recovery after reselecting the same file
+- User, role, tag, format, and audit management, with deletion protection for built-in tags
 - Dataset membership, immutable versions, custom version names, comparison, and restoration
 - Dataset duplication, version-specific model relationships, and dataset exports
 - Light and dark themes
@@ -97,7 +98,7 @@ Change the administrator password, MinIO credentials, and JWT secret before a te
 ## Development and Tests
 
 ```powershell
-.\.runtime\venv\Scripts\python.exe -m ruff check backend worker
+.\.runtime\venv\Scripts\python.exe -m ruff check backend worker scripts
 .\.runtime\venv\Scripts\python.exe -m pytest backend/tests -q
 cd frontend
 npm ci
@@ -108,7 +109,7 @@ The isolated API workflow test is available at `scripts/runtime-e2e.py`. See the
 
 ## Preparing to upgrade to v1.3.0
 
-Back up MongoDB and MinIO before upgrading from v1.2.0. Update the source and dependencies, rebuild the frontend, and verify resumable uploads, bulk selections, dataset writes, exports, and backup scripts. The model relationship schema is unchanged; upgrades from older versions should still follow the [v1.2.0 migration notes](docs/releases/v1.2.0.md) for legacy direct model-to-asset relationships. A rollback requires the pre-upgrade database backup, not just older code.
+Back up MongoDB, MinIO, and deployment configuration before upgrading from v1.2.1. Update the source and dependencies, rebuild the frontend, and verify the job center, worker heartbeats, upload pause and resume, built-in tag protection, and the migration reconciliation report. The model relationship schema is unchanged; upgrades from older versions should still follow the [v1.2.0 migration notes](docs/releases/v1.2.0.md). A rollback requires the pre-upgrade database backup, not just older code.
 
 See the [dataset guide](docs/datasets.md) and [v1.3.0 release notes](docs/releases/v1.3.0.md) for behavior, validation status, and known limitations.
 

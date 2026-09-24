@@ -34,8 +34,8 @@ API 保存业务元数据并签发 MinIO 地址。浏览器直接传输大文件
 | `dataset_versions`、`dataset_version_memberships` | version, member_count, content_digest, snapshot | 不可变版本与成员摘要 |
 | `collections` | name, kind, asset_ids, revision, frozen_at | 旧集合兼容与迁移来源 |
 | `saved_views` | owner_id, name, query, sort, fields, shared | 保存筛选规则 |
-| `jobs` | type, state, progress, input, result, error, expires_at | 后台任务 |
-| `tag_definitions` | key, name, values, color, free_input | 标签字段配置 |
+| `jobs` | type, state, progress, input, result, error, heartbeat_at, expires_at | 后台任务、取消状态和运行心跳 |
+| `tag_definitions` | key, name, values, color, free_input, built_in | 标签字段配置及默认标签保护 |
 | `format_definitions` | asset_type, extensions, protected_extensions, built_in, remark | 格式识别配置 |
 | `users` | username, password_hash, status, roles | 用户与角色 |
 | `audit_logs` | actor_id, action, object_type, object_id, changes, request_id | 只追加审计 |
@@ -44,7 +44,7 @@ API 保存业务元数据并签发 MinIO 地址。浏览器直接传输大文件
 
 持久素材类型包括 `image`、`video`、`annotation`、`model`、`archive` 和 `other`。`image_annotation` 是上传时手动选择的处理方式：Worker 成功导入后删除原压缩对象和临时资产，只保留解压得到的图片、标注及关系，因此素材库不展示“图片+标注”类型。
 
-内置格式类别和扩展名不可修改、删除；用户新增内容可维护，但已有素材正在使用时不允许删除。
+内置格式类别和扩展名不可修改、删除。默认标签可以修改但不允许删除；用户新增标签可以维护和删除，但已有素材正在使用时必须先迁移或移除对应标签。
 
 ## 标注导入与预览
 
@@ -75,7 +75,7 @@ API 保存业务元数据并签发 MinIO 地址。浏览器直接传输大文件
 
 删除素材先进入回收站。还原会清除删除状态；清空回收站由后台任务物理删除 MinIO 对象和相关记录。
 
-导出 ZIP 只包含所选原文件，同名文件自动增加序号。任务名称与导出文件名均为“素材导出+时间戳”。
+导出 ZIP 只包含所选原文件，同名文件自动增加标识避免覆盖。任务中心统一展示素材处理、素材导出、数据集导出和清空回收站任务，支持筛选、失败重试和导出取消。Worker 定期写入运行心跳，API 启动时恢复长时间无更新的异常任务。
 
 ## 安全与权限
 
@@ -87,5 +87,5 @@ API 保存业务元数据并签发 MinIO 地址。浏览器直接传输大文件
 
 - 单机部署，不包含高可用、多租户和 Kubernetes；
 - CVAT 和 MLflow 在线集成尚未实现；
-- “全部”素材选择由前端分批读取，超大数据量需改为服务端选择集；
-- 尚未完成 10 万条数据性能基线和生产备份恢复演练。
+- Linux Docker 全新部署和生产备份恢复尚未完成实机演练；
+- 超大列表仍采用分页和分批加载，前端尚未使用虚拟滚动。
