@@ -1,6 +1,6 @@
 # API 服务
 
-FastAPI 服务提供认证与 RBAC、素材元数据、分片上传会话、标签与格式、关系、模型图谱、数据集与保存视图、回收站、统一任务、用户和审计接口。服务启动时会恢复长时间无更新的异常任务，并保护默认标签不被删除。
+FastAPI 服务提供认证与 RBAC、素材元数据、分片上传会话、标签与格式、关系、模型图谱、数据集与保存视图、回收站、统一任务、用户和审计接口。刷新令牌使用 `HttpOnly` Cookie，服务启动时会恢复长时间无更新的异常任务、保护默认标签，并在生产模式拒绝默认密钥。
 
 ## 本地开发
 
@@ -16,7 +16,7 @@ python -m uvicorn backend.app.main:app --reload --port 8000
 ## 验证
 
 ```powershell
-python -m ruff check backend worker
+python -m ruff check backend worker scripts
 python -m pytest backend/tests -q
 ```
 

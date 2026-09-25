@@ -22,6 +22,9 @@ logger = logging.getLogger("cv-archive")
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    security_errors = settings.deployment_security_errors()
+    if security_errors:
+        raise RuntimeError("生产环境配置不安全：" + "；".join(security_errors))
     await bootstrap()
     recovered = await jobs.reconcile_stale_jobs()
     if recovered:
@@ -29,7 +32,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="CV Archive API", version="1.3.1", lifespan=lifespan)
+app = FastAPI(title="CV Archive API", version="1.3.2", lifespan=lifespan)
 app.add_exception_handler(AppError, app_error_handler)
 app.add_middleware(
     CORSMiddleware,
@@ -69,14 +72,27 @@ async def ready() -> dict[str, object]:
     checks: dict[str, bool] = {}
     try:
         checks["mongodb"] = await ping_database()
+    except Exception as exc:
+        checks["mongodb"] = False
+        logger.warning({"event": "readiness_check_failed", "dependency": "mongodb", "error": type(exc).__name__})
+    try:
         checks["minio"] = await asyncio.to_thread(storage.bucket_exists, settings.minio_bucket)
+    except Exception as exc:
+        checks["minio"] = False
+        logger.warning({"event": "readiness_check_failed", "dependency": "minio", "error": type(exc).__name__})
+    redis = None
+    try:
         redis = Redis.from_url(settings.redis_url)
         checks["redis"] = bool(await redis.ping())
-        await redis.aclose()
-    except Exception:
-        checks.setdefault("mongodb", False)
-        checks.setdefault("minio", False)
-        checks.setdefault("redis", False)
+    except Exception as exc:
+        checks["redis"] = False
+        logger.warning({"event": "readiness_check_failed", "dependency": "redis", "error": type(exc).__name__})
+    finally:
+        if redis is not None:
+            try:
+                await redis.aclose()
+            except Exception as exc:
+                logger.warning({"event": "readiness_cleanup_failed", "dependency": "redis", "error": type(exc).__name__})
     if not all(checks.values()):
         raise AppError(503, "DEPENDENCY_UNAVAILABLE", "一个或多个基础服务不可用", checks)
     return {"status": "ok", "checks": checks}

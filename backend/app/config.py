@@ -30,6 +30,20 @@ class Settings(BaseSettings):
     export_expiry_hours: int = 72
     job_stale_minutes: int = 120
 
+    def deployment_security_errors(self) -> list[str]:
+        if self.app_env.lower() in {"development", "test", "local"}:
+            return []
+        errors: list[str] = []
+        if len(self.jwt_secret.strip()) < 32 or self.jwt_secret in {"development-secret-change-me-32-bytes", "replace-with-at-least-32-random-bytes"}:
+            errors.append("JWT_SECRET 必须为至少 32 字符的非默认值")
+        if len(self.initial_admin_password.strip()) < 12 or self.initial_admin_password in {"admin", "replace-me", "replace-with-a-strong-password"}:
+            errors.append("INITIAL_ADMIN_PASSWORD 必须为至少 12 字符的非默认值")
+        if len(self.minio_access_key.strip()) < 3 or self.minio_access_key in {"minioadmin", "replace-me"}:
+            errors.append("MINIO_ACCESS_KEY 必须为至少 3 字符的非默认值")
+        if len(self.minio_secret_key.strip()) < 12 or self.minio_secret_key in {"minioadmin", "replace-me"}:
+            errors.append("MINIO_SECRET_KEY 必须为至少 12 字符的非默认值")
+        return errors
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -1,32 +1,54 @@
+import { persistedSession } from './sessionPolicy'
+
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api/v1'
 
-type Tokens = { access_token:string; refresh_token:string; access_expires_at:string; user:Record<string, unknown> }
+type Tokens = { access_token:string; access_expires_at:string; user:Record<string, unknown> }
 
-let tokens: Tokens | null = JSON.parse(localStorage.getItem('cv-archive-session') || 'null')
+const SESSION_KEY = 'cv-archive-session'
+let rememberSession = Boolean(localStorage.getItem(SESSION_KEY))
+let tokens: Tokens | null = JSON.parse(localStorage.getItem(SESSION_KEY) || sessionStorage.getItem(SESSION_KEY) || 'null')
 let refreshPromise: Promise<boolean> | null = null
+let sessionExpiredHandler: (() => void) | null = null
+
+if (tokens) {
+  const storage = rememberSession ? localStorage : sessionStorage
+  storage.setItem(SESSION_KEY, JSON.stringify(persistedSession(tokens)))
+}
 
 function saveTokens(next: Tokens | null) {
   tokens = next
-  if (next) localStorage.setItem('cv-archive-session', JSON.stringify(next))
-  else localStorage.removeItem('cv-archive-session')
+  localStorage.removeItem(SESSION_KEY)
+  sessionStorage.removeItem(SESSION_KEY)
+  if (next) {
+    const storage = rememberSession ? localStorage : sessionStorage
+    storage.setItem(SESSION_KEY, JSON.stringify(persistedSession(next)))
+  }
+}
+
+function expireSession() {
+  saveTokens(null)
+  sessionExpiredHandler?.()
 }
 
 async function refreshSession(): Promise<boolean> {
-  if (!tokens?.refresh_token) return false
+  if (!tokens) return false
   if (!refreshPromise) {
-    const refreshToken = tokens.refresh_token
     refreshPromise = fetch(`${API_BASE}/auth/refresh`, {
       method:'POST',
+      credentials:'include',
       headers:{'content-type':'application/json'},
-      body:JSON.stringify({refresh_token:refreshToken}),
+      body:'{}',
     }).then(async (response) => {
       if (!response.ok) {
-        saveTokens(null)
+        expireSession()
         return false
       }
       saveTokens(await response.json())
       return true
-    }).catch(() => false).finally(() => { refreshPromise = null })
+    }).catch(() => {
+      expireSession()
+      return false
+    }).finally(() => { refreshPromise = null })
   }
   return refreshPromise
 }
@@ -37,11 +59,11 @@ async function request<T>(path: string, init: RequestInit = {}, retry = true): P
   if (tokens?.access_token) headers.set('authorization', `Bearer ${tokens.access_token}`)
   let response: Response
   try {
-    response = await fetch(`${API_BASE}${path}`, { ...init, headers })
+    response = await fetch(`${API_BASE}${path}`, { ...init, headers, credentials:'include' })
   } catch {
     throw new Error('无法连接至服务器，请重启后端服务')
   }
-  if (response.status === 401 && retry && tokens?.refresh_token) {
+  if (response.status === 401 && retry && tokens) {
     if (await refreshSession()) return request<T>(path, init, false)
   }
   if (!response.ok) {
@@ -61,13 +83,16 @@ async function request<T>(path: string, init: RequestInit = {}, retry = true): P
 
 export const api = {
   session: () => tokens,
-  login: async (username:string, password:string) => {
-    const result = await request<Tokens>('/auth/login', {method:'POST', body:JSON.stringify({username,password})}, false)
+  onSessionExpired: (handler:() => void) => { sessionExpiredHandler = handler },
+  restoreSession: () => tokens?.access_token ? Promise.resolve(true) : refreshSession(),
+  login: async (username:string, password:string, remember=true) => {
+    rememberSession = remember
+    const result = await request<Tokens>('/auth/login', {method:'POST', body:JSON.stringify({username,password,remember})}, false)
     saveTokens(result)
     return result
   },
   logout: async () => {
-    if (tokens?.refresh_token) await request('/auth/logout', {method:'POST', body:JSON.stringify({refresh_token:tokens.refresh_token})}).catch(() => undefined)
+    if (tokens) await request('/auth/logout', {method:'POST', body:'{}'}).catch(() => undefined)
     saveTokens(null)
   },
   assets: (params:URLSearchParams) => request<{items:any[];total:number;next_cursor?:string|null}>(`/assets?${params}`),

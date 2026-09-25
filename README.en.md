@@ -86,14 +86,14 @@ Common settings are documented in [.env.example](.env.example):
 | --- | --- | --- |
 | `JWT_SECRET` | Access-token signing secret | Must be replaced |
 | `INITIAL_ADMIN_USERNAME` | Initial administrator | `admin` |
-| `INITIAL_ADMIN_PASSWORD` | Initial administrator password | `admin` |
+| `INITIAL_ADMIN_PASSWORD` | Initial administrator password | Must be replaced |
 | `MAX_UPLOAD_SIZE_BYTES` | Per-file upload limit | `10737418240` |
 | `EXPORT_EXPIRY_HOURS` | Export lifetime in hours | `72` |
 | `MINIO_*` | Object-storage connection | Example values |
 | `MONGODB_*` | MongoDB connection | Example values |
 | `REDIS_URL` | Celery queue connection | Example value |
 
-Change the administrator password, MinIO credentials, and JWT secret before a team deployment.
+Set `APP_ENV=production` and replace the administrator password, MinIO credentials, and JWT secret before a team deployment. The API refuses to start in production when known defaults remain.
 
 ## Development and Tests
 
@@ -102,16 +102,19 @@ Change the administrator password, MinIO credentials, and JWT secret before a te
 .\.runtime\venv\Scripts\python.exe -m pytest backend/tests -q
 cd frontend
 npm ci
+npm test
+npx playwright install chromium
+npm run test:ui
 npm run build
 ```
 
-The isolated API workflow test is available at `scripts/runtime-e2e.py`. See the [testing guide](docs/testing.md) and [v1.3.1 release checklist](docs/release-checklist.md) for the full scope.
+The isolated API workflow test is available at `scripts/runtime-e2e.py`. See the [testing guide](docs/testing.md) and [v1.3.2 release checklist](docs/release-checklist.md) for the full scope.
 
-## Preparing to upgrade to v1.3.1
+## Preparing to upgrade to v1.3.2
 
-Back up MongoDB, MinIO, and deployment configuration before upgrading from v1.3.0. Update the source and dependencies, rebuild the frontend, and verify the job center, worker heartbeats, upload pause and resume, and built-in tag protection. The model relationship schema is unchanged; upgrades from older versions should still follow the [v1.2.0 migration notes](docs/releases/v1.2.0.md). A rollback requires the pre-upgrade database backup, not just older code.
+Back up MongoDB, MinIO, and deployment configuration before upgrading from v1.3.1. Update the source and dependencies, rebuild the frontend, sign in again to establish the new `HttpOnly` refresh cookie, and verify page refresh, sign-out, the job center, and the mobile layout. The database schema is unchanged. A rollback requires the pre-upgrade database backup, not just older code.
 
-See the [dataset guide](docs/datasets.md) and [v1.3.1 release notes](docs/releases/v1.3.1.md) for behavior, validation status, and known limitations.
+See the [dataset guide](docs/datasets.md) and [v1.3.2 release notes](docs/releases/v1.3.2.md) for behavior, validation status, and known limitations.
 
 ## Documentation
 

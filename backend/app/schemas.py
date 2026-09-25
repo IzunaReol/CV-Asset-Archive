@@ -34,15 +34,11 @@ class RelationType(StrEnum):
 class LoginRequest(BaseModel):
     username: str
     password: str
-
-
-class RefreshRequest(BaseModel):
-    refresh_token: str
+    remember: bool = True
 
 
 class TokenResponse(BaseModel):
     access_token: str
-    refresh_token: str
     token_type: str = "bearer"
     access_expires_at: datetime
     user: dict[str, Any]

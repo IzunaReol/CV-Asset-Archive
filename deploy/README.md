@@ -6,7 +6,7 @@
 
 ```bash
 cp .env.example .env
-# 修改 JWT_SECRET、管理员密码和 MinIO 凭据
+# 保持 APP_ENV=production，并修改 JWT_SECRET、管理员密码和 MinIO 凭据；默认值会导致 API 拒绝启动
 docker compose -f deploy/docker-compose.yml up --build -d
 docker compose -f deploy/docker-compose.yml ps
 ```

@@ -1,11 +1,12 @@
 {
   "name": "cv-archive-frontend",
   "private": true,
-  "version": "1.3.1",
+  "version": "1.3.2",
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
-    "test": "vitest run",
+    "test": "vitest run src",
+    "test:ui": "playwright test",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview --host 0.0.0.0"
   },
@@ -16,6 +17,7 @@
     "vue": "3.5.22"
   },
   "devDependencies": {
+    "@playwright/test": "^1.55.1",
     "@vitejs/plugin-vue": "6.0.1",
     "typescript": "5.9.3",
     "vite": "7.3.6",

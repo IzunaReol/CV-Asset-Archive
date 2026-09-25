@@ -4,6 +4,7 @@ import { api } from './api'
 import DatasetView from './DatasetView.vue'
 import { canDeleteTag, jobAction } from './uiPolicy'
 import { UploadPauseController } from './uploadPause'
+import { jobPollDelay } from './sessionPolicy'
 
 type Page = 'library' | 'datasets' | 'relations' | 'lineage' | 'downloads' | 'trash' | 'tags' | 'formats' | 'admin'
 type Skin = 'light' | 'command'
@@ -63,7 +64,9 @@ const loginUsername = ref('admin')
 const loginPassword = ref('admin')
 const loginBusy = ref(false)
 const loginError = ref('')
+const loginRemember = ref(true)
 const currentUser = ref<any>(api.session()?.user || null)
+api.onSessionExpired(resetAuthenticatedView)
 const uploadOpen = ref(false)
 const uploadFiles = ref<File[]>([])
 const uploadTypeOverrides = ref<Record<string,string>>({})
@@ -759,19 +762,60 @@ async function login() {
   loginBusy.value = true
   loginError.value = ''
   try {
-    const result = await api.login(loginUsername.value, loginPassword.value)
+    const result = await api.login(loginUsername.value, loginPassword.value, loginRemember.value)
     currentUser.value = result.user
     showLogin.value = false
     await Promise.all([loadAssets(), loadJobs(), loadTrash()])
+    startJobPolling()
   } catch (error) {
     loginError.value = error instanceof Error ? error.message : '登录失败'
   } finally { loginBusy.value = false }
 }
 
+function resetAuthenticatedView() {
+  currentUser.value = null
+  page.value = 'library'
+  assets.value = []
+  assetTotal.value = 0
+  assetFilteredTotal.value = 0
+  untaggedTotal.value = 0
+  assetTypeCounts.value = {image:0,video:0,annotation:0,model:0,archive:0,image_annotation:0,other:0}
+  storageStats.value = {total:0,used:0,free:0}
+  selected.value = []
+  selectedSetId.value = ''
+  selectedSetTotal.value = 0
+  selectedSetExcluded.value = []
+  detailId.value = null
+  detailAsset.value = null
+  annotationSources.value = []
+  jobRows.value = []
+  jobTotal.value = 0
+  jobAllTotal.value = 0
+  trashAssets.value = []
+  trashSelected.value = []
+  trashTotal.value = 0
+  tagRows.value = []
+  formatRows.value = []
+  formatsLoaded.value = false
+  savedViewRows.value = []
+  relationHistory.value = []
+  relationTotal.value = 0
+  relationDetailId.value = null
+  relationDetailData.value = null
+  lineageRoot.value = null
+  lineageNodes.value = []
+  lineageEdges.value = []
+  userRows.value = []
+  auditRows.value = []
+  datasetOpenRequest.value = null
+  if (jobPoll !== null) window.clearTimeout(jobPoll)
+  jobPoll = null
+  showLogin.value = true
+}
+
 async function logout() {
   await api.logout()
-  currentUser.value = null
-  showLogin.value = true
+  resetAuthenticatedView()
 }
 
 async function loadAssets() {
@@ -1003,7 +1047,13 @@ async function uploadAsset() {
   finally { resumeUpload(); uploadBusy.value = false }
 }
 
-onMounted(() => { if (api.session()) void Promise.all([loadAssets(), loadJobs(), loadFormats(), loadTrash()]); startJobPolling() })
+onMounted(async () => {
+  if (!await api.restoreSession()) return
+  currentUser.value = api.session()?.user || null
+  showLogin.value = false
+  await Promise.all([loadAssets(), loadJobs(), loadFormats(), loadTrash()])
+  startJobPolling()
+})
 
 async function loadRelations() {
   if (!api.session()) return
@@ -1169,9 +1219,10 @@ async function loadJobs() {
 function previewDatasetExport() { void loadJobs() }
 
 function startJobPolling() {
-  if (jobPoll !== null) window.clearInterval(jobPoll)
-  jobPoll = window.setInterval(async () => {
-    if (page.value === 'downloads') void loadJobs()
+  if (jobPoll !== null) window.clearTimeout(jobPoll)
+  const poll = async () => {
+    if (!api.session()) { jobPoll = null; return }
+    if (page.value === 'downloads') await loadJobs()
     if (page.value === 'library' && assets.value.some(asset => ['queued','processing'].includes(asset.status))) {
       const detailStatus = detailAsset.value?.status
       const detailAssetId = detailAsset.value?.id
@@ -1179,7 +1230,9 @@ function startJobPolling() {
       const refreshed = assets.value.find(asset => asset.id === detailAssetId)
       if (refreshed && refreshed.status !== detailStatus) await openAsset(refreshed)
     }
-  }, 3000)
+    jobPoll = window.setTimeout(poll, jobPollDelay({page:page.value,jobs:jobRows.value,assets:assets.value}))
+  }
+  jobPoll = window.setTimeout(poll, jobPollDelay({page:page.value,jobs:jobRows.value,assets:assets.value}))
 }
 
 function showDetailScrollbar() {
@@ -1225,7 +1278,7 @@ function showPageScrollbar() {
 onMounted(() => window.addEventListener('scroll', showPageScrollbar, { passive: true }))
 
 onBeforeUnmount(() => {
-  if (jobPoll !== null) window.clearInterval(jobPoll)
+  if (jobPoll !== null) window.clearTimeout(jobPoll)
   if (detailScrollTimer !== null) window.clearTimeout(detailScrollTimer)
   if (relationPreviewScrollTimer !== null) window.clearTimeout(relationPreviewScrollTimer)
   for (const timer of transientScrollbarTimers.values()) window.clearTimeout(timer)
@@ -1713,12 +1766,11 @@ async function revokeActiveRelation() {
 
     <div v-if="toast" class="toast" :class="`toast-${toastKind}`"><template v-if="toastKind==='success'">✓ </template>{{ toast }}</div>
     <div v-if="showLogin" class="login-stage">
-      <button class="login-close" aria-label="关闭登录预览" @click="showLogin=false">×</button>
       <section class="login-card">
         <div class="login-brand"><span class="brand-mark">VA</span><b>视觉资产库</b></div>
         <h1>登录</h1>
         <label>用户名<input v-model="loginUsername" autocomplete="username" @keyup.enter="login" /></label><label>密码<input v-model="loginPassword" type="password" autocomplete="current-password" @keyup.enter="login" /></label>
-        <div class="login-option"><label><input type="checkbox" checked /> 保持登录</label></div>
+        <div class="login-option"><label><input v-model="loginRemember" type="checkbox" /> 保持登录</label></div>
         <p v-if="loginError" class="form-error">{{loginError}}</p>
         <button class="primary full" :disabled="loginBusy" @click="login">{{loginBusy?'正在登录…':'登录'}}</button>
       </section>

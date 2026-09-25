@@ -133,6 +133,16 @@
 .job-filters input[type="datetime-local"] { color-scheme:light; }
 .skin-command .job-filters input[type="datetime-local"] { color-scheme:dark; background:#101d1a; border-color:#36524a; color:var(--ink); }
 @media(max-width:1100px){.job-toolbar{align-items:stretch;flex-direction:column}.job-filters{display:grid;grid-template-columns:1fr 1fr}.job-filters select,.job-filters input{width:100%;min-width:0}.job-filters button{width:100%}}
+@media(max-width:760px){
+  .download-table{border:0;background:transparent;overflow:visible}
+  .download-table .table-row.head{display:none}
+  .download-table .table-row:not(.head){display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px 12px;margin-bottom:10px;padding:14px;border:1px solid var(--line);border-radius:9px;background:var(--panel)}
+  .download-table .table-row:not(.head)>:nth-child(1){grid-column:1;grid-row:1}
+  .download-table .table-row:not(.head)>:nth-child(2),.download-table .table-row:not(.head)>:nth-child(4),.download-table .table-row:not(.head)>:nth-child(5){display:none}
+  .download-table .table-row:not(.head)>:nth-child(3){display:block;grid-column:1;grid-row:2;color:var(--muted)}
+  .download-table .table-row:not(.head)>:nth-child(6){display:block;grid-column:2;grid-row:1;align-self:start;white-space:nowrap}
+  .download-table .table-row:not(.head)>:nth-child(7){display:block;grid-column:2;grid-row:2;min-width:64px}
+}
 .detail-tags span { position:relative; display:inline-flex; align-items:center; padding:5px 8px; }
 .detail-tags span i { font-style:normal; }
 .detail-tags span button { position:absolute; top:-7px; right:-7px; width:18px; height:18px; padding:0; display:none; align-items:center; justify-content:center; border:1px solid var(--line); border-radius:50%; background:var(--panel); color:var(--ink); font-size:13px; line-height:1; }

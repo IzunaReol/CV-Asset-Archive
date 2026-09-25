@@ -86,14 +86,14 @@ PowerShell 启停脚本和离线镜像导入、导出方法见[部署说明](dep
 | --- | --- | --- |
 | `JWT_SECRET` | 访问令牌签名密钥 | 部署时必须替换 |
 | `INITIAL_ADMIN_USERNAME` | 初始管理员 | `admin` |
-| `INITIAL_ADMIN_PASSWORD` | 初始管理员密码 | `admin` |
+| `INITIAL_ADMIN_PASSWORD` | 初始管理员密码 | 部署时必须替换 |
 | `MAX_UPLOAD_SIZE_BYTES` | 单文件上传上限 | `10737418240` |
 | `EXPORT_EXPIRY_HOURS` | 导出文件有效期（小时） | `72` |
 | `MINIO_*` | 对象存储连接参数 | 示例值 |
 | `MONGODB_*` | MongoDB 连接参数 | 示例值 |
 | `REDIS_URL` | Celery 队列连接地址 | 示例值 |
 
-团队部署前必须修改默认管理员密码、MinIO 凭据和 JWT 密钥。
+团队部署前必须将 `APP_ENV` 设为 `production`，并修改默认管理员密码、MinIO 凭据和 JWT 密钥；生产模式检测到默认值时 API 会拒绝启动。
 
 ## 开发与测试
 
@@ -102,16 +102,19 @@ PowerShell 启停脚本和离线镜像导入、导出方法见[部署说明](dep
 .\.runtime\venv\Scripts\python.exe -m pytest backend/tests -q
 cd frontend
 npm ci
+npm test
+npx playwright install chromium
+npm run test:ui
 npm run build
 ```
 
-隔离数据库的 API 流程测试使用 `scripts/runtime-e2e.py`。完整范围见[测试说明](docs/testing.md)和 [v1.3.1 发布检查单](docs/release-checklist.md)。
+隔离数据库的 API 流程测试使用 `scripts/runtime-e2e.py`。完整范围见[测试说明](docs/testing.md)和 [v1.3.2 发布检查单](docs/release-checklist.md)。
 
-## v1.3.1 升级准备
+## v1.3.2 升级准备
 
-从 v1.3.0 升级前备份 MongoDB、MinIO 和部署配置。更新代码与依赖并重新构建前端后，验证任务中心、任务心跳、上传暂停恢复和默认标签保护。模型关系结构没有变化；从更早版本升级时仍需按 [v1.2.0 迁移说明](docs/releases/v1.2.0.md)核对旧模型直连素材关系。回退前应恢复升级前数据库备份，不能只回退代码。
+从 v1.3.1 升级前备份 MongoDB、MinIO 和部署配置。更新代码与依赖并重新构建前端后，重新登录以建立 `HttpOnly` 刷新 Cookie，并验证刷新页面、退出登录、任务中心及手机端布局。数据库结构没有变化。回退前应恢复升级前数据库备份，不能只回退代码。
 
-变更范围、验证状态及已知限制见[v1.3.1 发布说明](docs/releases/v1.3.1.md)。
+变更范围、验证状态及已知限制见[v1.3.2 发布说明](docs/releases/v1.3.2.md)。
 
 ## 项目文档
 
