@@ -27,3 +27,18 @@ def test_issue_tokens_keeps_refresh_token_in_http_only_cookie(monkeypatch):
     assert "SameSite=strict" in cookie
     assert "Max-Age" not in cookie
     insert_one.assert_awaited_once()
+
+
+def test_login_failure_counter_expires_and_clears(monkeypatch):
+    redis = SimpleNamespace(
+        incr=AsyncMock(return_value=1),
+        expire=AsyncMock(),
+        delete=AsyncMock(),
+        aclose=AsyncMock(),
+    )
+    monkeypatch.setattr(auth.Redis, "from_url", lambda *args, **kwargs: redis)
+
+    assert asyncio.run(auth._login_failure_count("login-key", increment=True)) == 1
+    redis.expire.assert_awaited_once_with("login-key", auth.settings.login_failure_window_seconds)
+    assert asyncio.run(auth._login_failure_count("login-key", clear=True)) == 0
+    redis.delete.assert_awaited_once_with("login-key")

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -16,7 +17,17 @@ from .storage import storage
 from .utils import new_id
 
 settings = get_settings()
-logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+
+class JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        payload = record.msg if isinstance(record.msg, dict) else {"message": record.getMessage()}
+        return json.dumps({"level": record.levelname.lower(), **payload}, ensure_ascii=False, default=str)
+
+
+handler = logging.StreamHandler()
+handler.setFormatter(JsonFormatter())
+logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
 logger = logging.getLogger("cv-archive")
 
 
@@ -32,7 +43,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="CV Archive API", version="1.3.2", lifespan=lifespan)
+app = FastAPI(title="CV Archive API", version="1.4.0", lifespan=lifespan)
 app.add_exception_handler(AppError, app_error_handler)
 app.add_middleware(
     CORSMiddleware,
@@ -50,15 +61,17 @@ async def request_context(request: Request, call_next):
     started = time.perf_counter()
     response = await call_next(request)
     response.headers["x-request-id"] = request_id
-    logger.info(
-        {
-            "request_id": request_id,
-            "method": request.method,
-            "path": request.url.path,
-            "status": response.status_code,
-            "duration_ms": round((time.perf_counter() - started) * 1000, 2),
-        }
-    )
+    duration_ms = round((time.perf_counter() - started) * 1000, 2)
+    event = {
+        "event": "http_request",
+        "request_id": request_id,
+        "method": request.method,
+        "path": request.url.path,
+        "status": response.status_code,
+        "duration_ms": duration_ms,
+        "slow": duration_ms >= settings.slow_request_ms,
+    }
+    (logger.warning if event["slow"] else logger.info)(event)
     return response
 
 

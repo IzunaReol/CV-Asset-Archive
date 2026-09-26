@@ -1,4 +1,5 @@
-import { persistedSession } from './sessionPolicy'
+import { parseStoredSession, persistedSession } from './sessionPolicy'
+import type { ApiList, AssetStats, DatasetOption, Job, RelationGraph } from './apiTypes'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api/v1'
 
@@ -6,13 +7,16 @@ type Tokens = { access_token:string; access_expires_at:string; user:Record<strin
 
 const SESSION_KEY = 'cv-archive-session'
 let rememberSession = Boolean(localStorage.getItem(SESSION_KEY))
-let tokens: Tokens | null = JSON.parse(localStorage.getItem(SESSION_KEY) || sessionStorage.getItem(SESSION_KEY) || 'null')
+let tokens: Tokens | null = parseStoredSession(localStorage.getItem(SESSION_KEY) || sessionStorage.getItem(SESSION_KEY))
 let refreshPromise: Promise<boolean> | null = null
 let sessionExpiredHandler: (() => void) | null = null
 
 if (tokens) {
   const storage = rememberSession ? localStorage : sessionStorage
   storage.setItem(SESSION_KEY, JSON.stringify(persistedSession(tokens)))
+} else {
+  localStorage.removeItem(SESSION_KEY)
+  sessionStorage.removeItem(SESSION_KEY)
 }
 
 function saveTokens(next: Tokens | null) {
@@ -97,12 +101,13 @@ export const api = {
   },
   assets: (params:URLSearchParams) => request<{items:any[];total:number;next_cursor?:string|null}>(`/assets?${params}`),
   createAssetSelection: (body:Record<string,unknown>) => request<{selection_id:string;total:number}>('/assets/selection-sets', {method:'POST',body:JSON.stringify(body)}),
-  assetStats: () => request<{total:number;untagged:number;by_type:Record<string,number>;storage:{total:number;used:number;free:number}}>('/assets/stats'),
+  assetStats: () => request<AssetStats>('/assets/stats'),
   asset: (id:string) => request<any>(`/assets/${id}`),
   updateAssetRemark: (id:string, remark:string) => request<any>(`/assets/${id}/remark`, {method:'PATCH',body:JSON.stringify({remark})}),
   annotationOverlays: (id:string) => request<any>(`/assets/${id}/annotation-overlays`),
   archiveAsset: (id:string) => request<any>(`/assets/${id}/archive`, {method:'POST'}),
   initUpload: (body:Record<string, unknown>) => request<any>('/assets/upload-sessions', {method:'POST',body:JSON.stringify(body)}),
+  checkUploadConflicts: (files:Record<string, unknown>[]) => request<any>('/assets/upload-conflicts', {method:'POST',body:JSON.stringify({files})}),
   completeUpload: (body:Record<string, unknown>) => request<any>('/assets/upload-sessions/complete', {method:'POST',body:JSON.stringify(body)}),
   initUploadBatch: (files:Record<string, unknown>[]) => request<any>('/assets/upload-sessions/batch', {method:'POST',body:JSON.stringify({files})}),
   completeUploadBatch: (uploadSessionIds:string[], tags:Record<string,string[]>) => request<any>('/assets/upload-sessions/complete-batch', {method:'POST',body:JSON.stringify({upload_session_ids:uploadSessionIds,tags})}),
@@ -119,7 +124,7 @@ export const api = {
     return request<any>(`/relations?${params}`)
   },
   relation: (id:string) => request<any>(`/relations/${id}`),
-  relationGraph: (id:string) => request<any>(`/relations/graph/${encodeURIComponent(id)}?depth=4`),
+  relationGraph: (id:string) => request<RelationGraph>(`/relations/graph/${encodeURIComponent(id)}?depth=4&member_limit=500`),
   previewRelations: (body:Record<string, unknown>) => request<any>('/relations/preview', {method:'POST',body:JSON.stringify(body)}),
   previewAnnotationMatches: (body:Record<string, unknown>) => request<any>('/relations/annotation-match-preview', {method:'POST',body:JSON.stringify(body)}),
   createRelations: (body:Record<string, unknown>) => request<any>('/relations/batch', {method:'POST',body:JSON.stringify(body)}),
@@ -128,6 +133,7 @@ export const api = {
   collections: () => request<any>('/collections'),
   createCollection: (body:Record<string, unknown>) => request<any>('/collections', {method:'POST',body:JSON.stringify(body)}),
   datasets: (params=new URLSearchParams()) => request<any>(`/datasets?${params}`),
+  datasetOptions: (q='') => request<ApiList<DatasetOption>>(`/datasets/options?page=1&page_size=200${q ? `&q=${encodeURIComponent(q)}` : ''}`),
   dataset: (id:string) => request<any>(`/datasets/${id}`),
   createDataset: (body:Record<string, unknown>) => request<any>('/datasets', {method:'POST',body:JSON.stringify(body)}),
   updateDataset: (id:string, body:Record<string, unknown>) => request<any>(`/datasets/${id}`, {method:'PATCH',body:JSON.stringify(body)}),
@@ -154,7 +160,7 @@ export const api = {
   updateSavedView: (id:string, name:string) => request<any>(`/saved-views/${id}`, {method:'PATCH',body:JSON.stringify({name})}),
   deleteSavedView: (id:string) => request<void>(`/saved-views/${id}`, {method:'DELETE'}),
   createExport: (body:Record<string, unknown>) => request<any>('/exports', {method:'POST',body:JSON.stringify(body)}),
-  jobs: (page=1, pageSize=20, type='', state='', createdFrom='', createdTo='') => request<any>(`/jobs?page=${page}&page_size=${pageSize}${type ? `&type=${encodeURIComponent(type)}` : ''}${state ? `&state=${encodeURIComponent(state)}` : ''}${createdFrom ? `&created_from=${encodeURIComponent(createdFrom)}` : ''}${createdTo ? `&created_to=${encodeURIComponent(createdTo)}` : ''}`),
+  jobs: (page=1, pageSize=20, type='', state='', createdFrom='', createdTo='') => request<ApiList<Job>>(`/jobs?page=${page}&page_size=${pageSize}${type ? `&type=${encodeURIComponent(type)}` : ''}${state ? `&state=${encodeURIComponent(state)}` : ''}${createdFrom ? `&created_from=${encodeURIComponent(createdFrom)}` : ''}${createdTo ? `&created_to=${encodeURIComponent(createdTo)}` : ''}`),
   retryJob: (id:string) => request<any>(`/jobs/${id}/retry`, {method:'POST'}),
   cancelJob: (id:string) => request<any>(`/jobs/${id}/cancel`, {method:'POST'}),
   exportDownload: (id:string) => request<any>(`/exports/${id}/download-url`),

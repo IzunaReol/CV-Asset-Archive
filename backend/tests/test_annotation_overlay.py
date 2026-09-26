@@ -3,7 +3,7 @@ import json
 import zipfile
 
 import pytest
-from backend.app.annotation_overlay import (
+from app.annotation_overlay import (
     annotation_document_metadata,
     parse_annotation_overlay,
     parse_coco_overlay,
@@ -136,3 +136,46 @@ def test_metadata_does_not_link_images_without_supported_annotations():
     assert annotation_document_metadata(coco, "instances.json")["image_refs"] == []
     assert annotation_document_metadata(cvat, "annotations.xml")["image_refs"] == []
     assert annotation_document_metadata(voc, "empty.xml")["image_refs"] == []
+
+
+def test_invalid_or_unknown_annotation_documents_are_not_treated_as_metadata():
+    assert annotation_document_metadata(b"not-json", "broken.json") is None
+    assert annotation_document_metadata(b'{"items": []}', "unknown.json") is None
+    assert annotation_document_metadata(b"plain text", "notes.txt") is None
+
+
+def test_coco_overlay_rejects_invalid_schema_and_dimensions():
+    with pytest.raises(ValueError, match="valid COCO"):
+        parse_coco_overlay(b'{"images": []}', "frame.jpg")
+    content = json.dumps(
+        {"images": [{"id": 1, "file_name": "frame.jpg"}], "annotations": [], "categories": []}
+    ).encode()
+    with pytest.raises(ValueError, match="width and height"):
+        parse_coco_overlay(content, "frame.jpg")
+
+
+def test_coco_overlay_can_report_no_filename_match():
+    content = json.dumps(
+        {
+            "images": [
+                {"id": 1, "file_name": "one.jpg", "width": 10, "height": 10},
+                {"id": 2, "file_name": "two.jpg", "width": 10, "height": 10},
+            ],
+            "annotations": [],
+            "categories": [],
+        }
+    ).encode()
+    assert parse_coco_overlay(content, "missing.jpg") == {
+        "format": "COCO", "matched": False, "items": []
+    }
+
+
+def test_pascal_voc_filename_mismatch_is_not_matched():
+    content = b"""<annotation><filename>other.jpg</filename><size><width>10</width><height>10</height></size></annotation>"""
+    result = parse_annotation_overlay(content, "other.xml", "frame.jpg")
+    assert result == {"format": "Pascal VOC", "matched": False, "items": []}
+
+
+def test_invalid_xml_is_rejected_with_clear_error():
+    with pytest.raises(ValueError, match="XML annotation file is invalid"):
+        parse_annotation_overlay(b"<annotation>", "broken.xml", "frame.jpg")

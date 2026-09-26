@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { jobPollDelay, persistedSession } from './sessionPolicy'
+import { jobPollDelay, parseStoredSession, persistedSession } from './sessionPolicy'
 
 describe('会话与轮询策略', () => {
   it('只在存在活动任务时保持三秒轮询', () => {
@@ -19,5 +19,19 @@ describe('会话与轮询策略', () => {
     })
     expect(stored.access_token).toBe('')
     expect(stored).not.toHaveProperty('refresh_token')
+  })
+
+  it('安全解析会话并拒绝损坏缓存', () => {
+    expect(parseStoredSession('{broken')).toBeNull()
+    expect(parseStoredSession(JSON.stringify({ user: { username: 'admin' } }))).toBeNull()
+    expect(parseStoredSession(JSON.stringify({
+      access_token: 'legacy-token',
+      access_expires_at: '2026-09-26T00:00:00Z',
+      user: { username: 'admin' },
+    }))).toEqual({
+      access_token: '',
+      access_expires_at: '2026-09-26T00:00:00Z',
+      user: { username: 'admin' },
+    })
   })
 })

@@ -4,7 +4,7 @@ from pathlib import PurePath
 from typing import Any
 
 from fastapi import APIRouter, Query, Request
-from pymongo import DESCENDING
+from pymongo import ASCENDING, DESCENDING
 
 from ..audit import record_audit
 from ..database import db
@@ -569,7 +569,10 @@ async def preview_revoke_relation(relation_id: str, user: ReadUser) -> dict[str,
 
 @router.get("/graph/{asset_id}")
 async def relation_graph(
-    asset_id: str, user: ReadUser, depth: int = Query(2, ge=1, le=4)
+    asset_id: str,
+    user: ReadUser,
+    depth: int = Query(2, ge=1, le=4),
+    member_limit: int = Query(500, ge=0, le=500),
 ) -> dict[str, Any]:
     nodes: dict[str, dict[str, Any]] = {}
     edges: dict[str, dict[str, Any]] = {}
@@ -644,8 +647,18 @@ async def relation_graph(
         node["dataset_name"] = dataset_names.get(version.get("dataset_id"), version.get("name", "数据集"))
         node["counts"] = version_counts.get(version["id"], {})
         nodes[version["id"]] = node
-    if version_ids:
-        memberships = await db.dataset_version_memberships.find({"version_id": {"$in": version_ids}}).to_list(length=None)
+    member_total = 0
+    members_truncated = False
+    if version_ids and member_limit:
+        member_query = {"version_id": {"$in": version_ids}}
+        member_total = await db.dataset_version_memberships.count_documents(member_query)
+        memberships = await (
+            db.dataset_version_memberships.find(member_query)
+            .sort([("version_id", ASCENDING), ("asset_id", ASCENDING)])
+            .limit(member_limit)
+            .to_list(length=member_limit)
+        )
+        members_truncated = member_total > len(memberships)
         member_ids = list({item["asset_id"] for item in memberships})
         member_assets = {item["id"]: item for item in await db.assets.find({"id": {"$in": member_ids}}).to_list(length=None)}
         for membership in memberships:
@@ -659,4 +672,10 @@ async def relation_graph(
             source, target = member_assets.get(relation["source_id"]), member_assets.get(relation["target_id"])
             if source and target:
                 edges[relation["id"]] = {**(public_document(relation) or {}), "source_name": source.get("name", source["id"]), "target_name": target.get("name", target["id"]), "source_type": source.get("type"), "target_type": target.get("type")}
-    return {"nodes": list(nodes.values()), "edges": list(edges.values())}
+    return {
+        "nodes": list(nodes.values()),
+        "edges": list(edges.values()),
+        "member_total": member_total,
+        "members_truncated": members_truncated,
+        "member_limit": member_limit,
+    }

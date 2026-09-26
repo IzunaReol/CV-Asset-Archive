@@ -20,7 +20,7 @@ jobs:
       - run: pip install -e "backend[dev]"
       - run: pip install -e worker
       - run: ruff check backend worker scripts
-      - run: pytest -q backend/tests
+      - run: pytest -q backend/tests --cov=app --cov-report=term-missing --cov-fail-under=45
       - run: python -m pip install --upgrade pip pip-audit
       - run: pip-audit --progress-spinner off
 
@@ -38,6 +38,7 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npm test
+      - run: npm run test:coverage
       - run: npx playwright install --with-deps chromium
       - run: npm run test:ui
       - run: npm run build

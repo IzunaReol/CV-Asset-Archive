@@ -23,9 +23,9 @@
 
 ## 当前接口
 
-- 认证：`POST /auth/login`、`/auth/refresh`、`/auth/logout`。刷新令牌仅通过 `HttpOnly` Cookie 传递，接口响应不返回刷新令牌；“保持登录”关闭时 Cookie 仅在当前浏览器会话有效。
+- 认证：`POST /auth/login`、`/auth/refresh`、`/auth/logout`。刷新令牌仅通过 `HttpOnly` Cookie 传递，接口响应不返回刷新令牌；“保持登录”关闭时 Cookie 仅在当前浏览器会话有效。登录失败默认按 IP 和用户名组合限制为 5 分钟 5 次，超限返回 `429`。
 - 素材：`GET /assets`、`/assets/stats`、`/assets/{id}`
-- 上传：`POST /assets/upload-sessions`、`GET|DELETE /assets/upload-sessions/{id}`、`POST /assets/upload-sessions/complete`；64 MB 及以上文件使用 64 MB 分片。前端暂停时中止当前请求但保留会话，继续或重新选择同一文件时查询会话并跳过已完成分片。多文件可使用 `/assets/upload-sessions/batch` 和 `/assets/upload-sessions/complete-batch`，单次最多 100 项。
+- 上传：先使用 `POST /assets/upload-conflicts` 检查同名同类型文件，再通过 `POST /assets/upload-sessions` 创建上传会话；冲突处理支持 `overwrite` 和 `rename`，未明确选择时拒绝同名上传。`GET|DELETE /assets/upload-sessions/{id}` 用于恢复或取消，`POST /assets/upload-sessions/complete` 完成入库；64 MB 及以上文件使用 64 MB 分片。前端暂停时中止当前请求但保留会话，继续或重新选择同一文件时查询会话并跳过已完成分片。多文件可使用 `/assets/upload-sessions/batch` 和 `/assets/upload-sessions/complete-batch`，接口不限制文件总数；客户端应分批提交，避免单次请求过大。
 - 选择集：`POST /assets/selection-sets` 固化当前筛选结果，有效期 2 小时，最多 10 万项。批量标签、删除、集合及导出可以提交 `selection_id` 和 `excluded_ids`。
 - 素材编辑：`PATCH /assets/{id}/remark`、`POST /assets/batch-tags`
 - 标注：`GET /assets/{id}/annotation-overlays`
@@ -33,7 +33,7 @@
 - 关系：`GET|POST /relations`、`POST /relations/batch`、`POST /relations/preview`
 - 自动关联：`POST /relations/annotation-match-preview`
 - 关系详情：`GET /relations/{id}`、`POST /relations/{id}/revoke`、`GET /relations/graph/{asset_id}`
-- 数据集：`GET|POST /datasets`、`GET|POST|DELETE /datasets/{id}/members`、`POST /datasets/{id}/members/preview`、`POST /datasets/{id}/versions`、`GET /datasets/{id}/compare`、`POST /datasets/{id}/restore`、`GET|POST /datasets/{id}/models`、`POST /datasets/{id}/export`
+- 数据集：`GET|POST /datasets`、`GET /datasets/options`、`GET|POST|DELETE /datasets/{id}/members`、`POST /datasets/{id}/members/preview`、`POST /datasets/{id}/versions`、`GET /datasets/{id}/compare`、`POST /datasets/{id}/restore`、`GET|POST /datasets/{id}/models`、`POST /datasets/{id}/export`
 - 集合与视图：`GET|POST /collections`、`POST /collections/{id}/freeze`、`GET|POST /saved-views`
 - 任务与下载：`POST /exports`、`GET /jobs`、`GET /jobs/{id}`、`POST /jobs/{id}/retry`、`POST /jobs/{id}/cancel`、`GET /exports/{id}/download-url`
 - 管理：`/tag-definitions`、`/format-definitions`、`/users`、`/roles`、`/audit-logs`
@@ -67,4 +67,5 @@ CVAT 在线任务和 MLflow 接口尚未实现。
 - `409`：重复资源、状态冲突或正在使用
 - `413`：文件超过上传限制
 - `422`：请求校验或标注解析失败
+- `429`：登录失败次数超过短时限制
 - `503`：存储、队列或外部依赖不可用

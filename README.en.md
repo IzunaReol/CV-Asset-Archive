@@ -7,6 +7,7 @@ CV Asset Archive is an asset and relationship management system for computer vis
 ## Features
 
 - Batch upload for images, videos, annotations, models, and archives
+- Same-name checks before upload, grouped by asset type, with overwrite or automatic rename choices
 - Automatic format detection with a configurable 10 GB default per-file limit
 - Image thumbnails, video posters, in-browser playback, and original-resolution preview
 - Fuzzy search over names and notes, advanced filters, saved views, and multi-value tags
@@ -108,13 +109,13 @@ npm run test:ui
 npm run build
 ```
 
-The isolated API workflow test is available at `scripts/runtime-e2e.py`. See the [testing guide](docs/testing.md) and [v1.3.2 release checklist](docs/release-checklist.md) for the full scope.
+The isolated API workflow test is available at `scripts/runtime-e2e.py`. See the [testing guide](docs/testing.md) and [v1.4.0 release checklist](docs/release-checklist.md) for the full scope.
 
-## Preparing to upgrade to v1.3.2
+## Preparing to upgrade to v1.4.0
 
-Back up MongoDB, MinIO, and deployment configuration before upgrading from v1.3.1. Update the source and dependencies, rebuild the frontend, sign in again to establish the new `HttpOnly` refresh cookie, and verify page refresh, sign-out, the job center, and the mobile layout. The database schema is unchanged. A rollback requires the pre-upgrade database backup, not just older code.
+Back up MongoDB, MinIO, and deployment configuration before upgrading from v1.3.3. Update the source and dependencies, rebuild the frontend, and verify duplicate detection, overwrite and rename uploads, relationship-preserving confirmation, and batch uploads. No manual data migration is required.
 
-See the [dataset guide](docs/datasets.md) and [v1.3.2 release notes](docs/releases/v1.3.2.md) for behavior, validation status, and known limitations.
+See the [dataset guide](docs/datasets.md) and [v1.4.0 release notes](docs/releases/v1.4.0.md) for behavior, validation status, and known limitations.
 
 ## Documentation
 

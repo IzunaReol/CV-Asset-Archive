@@ -51,6 +51,11 @@ class UploadInitRequest(BaseModel):
     asset_type: AssetType
     project: str = Field(default="未分类", min_length=1, max_length=100)
     sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
+    name_conflict: Literal["reject", "overwrite", "rename"] = "reject"
+
+
+class UploadConflictCheckRequest(BaseModel):
+    files: list[UploadInitRequest] = Field(min_length=1)
 
 
 class UploadCompleteRequest(BaseModel):
@@ -59,11 +64,11 @@ class UploadCompleteRequest(BaseModel):
 
 
 class UploadBatchInitRequest(BaseModel):
-    files: list[UploadInitRequest] = Field(min_length=1, max_length=100)
+    files: list[UploadInitRequest] = Field(min_length=1)
 
 
 class UploadBatchCompleteRequest(BaseModel):
-    upload_session_ids: list[str] = Field(min_length=1, max_length=100)
+    upload_session_ids: list[str] = Field(min_length=1)
     tags: dict[str, str | list[str]] = Field(default_factory=dict)
 
     @field_validator("upload_session_ids")

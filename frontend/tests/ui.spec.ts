@@ -45,7 +45,18 @@ async function mockApi(page: Page) {
     if (path.endsWith('/auth/refresh')) return json(route, tokens)
     if (path.endsWith('/assets/stats')) return json(route, { total: 0, untagged: 0, by_type: {}, storage: { total: 0, used: 0, free: 0 } })
     if (path.endsWith('/assets/trash/items')) return json(route, { items: [], total: 0 })
-    if (path.endsWith('/saved-views') || path.endsWith('/tag-definitions') || path.endsWith('/format-definitions')) return json(route, [])
+    if (path.endsWith('/format-definitions')) return json(route, { items: [{ asset_type: 'image', extensions: ['.jpg'] }] })
+    if (path.endsWith('/saved-views') || path.endsWith('/tag-definitions')) return json(route, { items: [] })
+    if (path.endsWith('/assets/upload-conflicts')) return json(route, {
+      total: 1,
+      groups: [{ asset_type: 'image', count: 1, items: [{ id: 'old-image', name: 'same.jpg', type: 'image', size: 1024, tags: {}, media: {}, has_active_relations: true }] }],
+      items: [{ index: 0, filename: 'same.jpg', asset_type: 'image', existing_count: 1, has_active_relations: true }],
+    })
+    if (path.endsWith('/assets/upload-sessions/batch')) {
+      await new Promise(resolve => setTimeout(resolve, 800))
+      return json(route, { items: [{ index: 0, error: { code: 'TEST_DELAY', message: '测试上传结束' } }] })
+    }
+    if (path.endsWith('/assets/old-image')) return json(route, { id: 'old-image', name: 'same.jpg', type: 'image', size: 1024, tags: {}, media: {}, status: 'ready', created_at: '2026-09-26T01:00:00Z' })
     if (path.endsWith('/jobs')) return json(route, { items: [job], total: 1 })
     if (path.endsWith('/assets')) return json(route, { items: [], total: 0, next_cursor: null })
     return json(route, {})
@@ -87,4 +98,56 @@ test('手机宽度下任务状态和操作按钮保持在视口内', async ({ pa
   const box = await download.boundingBox()
   expect(box).not.toBeNull()
   expect((box?.x || 0) + (box?.width || 0)).toBeLessThanOrEqual(390)
+})
+
+test('上传同名文件时按类型展示覆盖和重命名选择', async ({ page }) => {
+  await mockApi(page)
+  await page.addInitScript(value => localStorage.setItem('cv-archive-session', JSON.stringify(value)), tokens)
+  await page.goto('/')
+  await expect(page.getByText('没有匹配的素材')).toBeVisible()
+  await page.getByRole('combobox', { name: '界面' }).selectOption('command')
+  await page.getByRole('button', { name: '＋ 上传素材' }).click()
+  const uploadDialog = page.getByRole('heading', { name: '上传素材', exact: true }).locator('..')
+  await expect(uploadDialog).toBeVisible()
+  await expect.poll(() => uploadDialog.evaluate(element => ({
+    overflowY: getComputedStyle(element).overflowY,
+    overscroll: getComputedStyle(element).overscrollBehaviorY,
+    backgroundLocked: getComputedStyle(document.documentElement).overflow,
+  }))).toEqual({ overflowY: 'auto', overscroll: 'contain', backgroundLocked: 'hidden' })
+  await uploadDialog.locator('input[type="file"]').setInputFiles({
+    name: 'same.jpg',
+    mimeType: 'image/jpeg',
+    buffer: Buffer.from('image-content'),
+  })
+  await page.getByRole('button', { name: '开始上传' }).click()
+
+  await expect(page.getByText('图片1 项')).toBeVisible()
+  await expect(page.getByText('存在共1项重名文件，请选择：')).toBeVisible()
+  await expect(page.getByText('共1项文件')).toBeVisible()
+  await expect(page.locator('.upload-conflict-items')).toHaveCount(0)
+  await page.locator('.upload-conflict-group').click()
+  await expect(page.locator('.upload-conflict-items')).toBeVisible()
+  await page.getByRole('button', { name: /same.jpg/ }).click()
+  await expect(page.locator('.detail-sheet').getByRole('heading', { name: 'same.jpg' })).toBeVisible()
+  await expect.poll(() => page.locator('.detail-sheet').evaluate(element => ({
+    overflowY: getComputedStyle(element).overflowY,
+    overscroll: getComputedStyle(element).overscrollBehaviorY,
+  }))).toEqual({ overflowY: 'auto', overscroll: 'contain' })
+  await page.locator('.detail-sheet .close').click()
+  await expect(page.locator('.detail-sheet')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '覆盖原文件' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '重命名并上传' })).toBeVisible()
+  await page.getByRole('button', { name: '覆盖原文件' }).click()
+  await expect(page.getByText('覆盖原文件会保留关联关系，是否确定？')).toBeVisible()
+  const cancelConfirm = page.locator('.confirm-dialog').getByRole('button', { name: '取消', exact: true })
+  const acceptConfirm = page.getByRole('button', { name: '确定', exact: true })
+  await expect(acceptConfirm).toBeVisible()
+  await expect.poll(() => acceptConfirm.evaluate(element => getComputedStyle(element).backgroundColor)).toBe('rgb(110, 231, 183)')
+  const [cancelBox, acceptBox] = await Promise.all([cancelConfirm.boundingBox(), acceptConfirm.boundingBox()])
+  expect(cancelBox?.width).toBe(acceptBox?.width)
+  expect(cancelBox?.height).toBe(acceptBox?.height)
+  await acceptConfirm.click()
+  await expect(page.locator('.confirm-dialog')).toHaveCount(0)
+  await expect(page.getByText('正在上传 · 已处理 0 / 1 项')).toBeVisible()
+  await expect(page.getByRole('button', { name: '暂停上传', exact: true })).toBeEnabled()
 })

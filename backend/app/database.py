@@ -16,6 +16,7 @@ async def ensure_indexes() -> None:
     await db.assets.create_index([("sha256", ASCENDING), ("size", ASCENDING)])
     await db.assets.create_index([("archived_at", ASCENDING), ("created_at", DESCENDING)])
     await db.assets.create_index([("archived_at", ASCENDING), ("type", ASCENDING), ("created_at", DESCENDING), ("id", ASCENDING)])
+    await db.assets.create_index([("type", ASCENDING), ("name", ASCENDING), ("archived_at", ASCENDING), ("created_at", DESCENDING)])
     await db.assets.create_index([("name", "text"), ("project", "text")])
     await db.relations.create_index(
         [
@@ -44,6 +45,12 @@ async def ensure_indexes() -> None:
     )
     await db.dataset_version_memberships.create_index("asset_id")
     await db.jobs.create_index([("owner_id", ASCENDING), ("created_at", DESCENDING)])
+    await db.jobs.create_index(
+        [("owner_id", ASCENDING), ("type", ASCENDING), ("state", ASCENDING), ("created_at", DESCENDING), ("id", DESCENDING)]
+    )
+    await db.jobs.create_index(
+        [("type", ASCENDING), ("state", ASCENDING), ("created_at", DESCENDING), ("id", DESCENDING)]
+    )
     await db.jobs.create_index([("state", ASCENDING), ("updated_at", ASCENDING)])
     await db.jobs.create_index("expires_at", expireAfterSeconds=0)
     await db.asset_selection_sets.create_index("id", unique=True)

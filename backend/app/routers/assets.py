@@ -23,6 +23,7 @@ from ..schemas import (
     BatchTagRequest,
     UploadBatchCompleteRequest,
     UploadBatchInitRequest,
+    UploadConflictCheckRequest,
     UploadCompleteRequest,
     UploadInitRequest,
 )
@@ -129,23 +130,26 @@ def updated_asset_tags(
 @router.get("/stats")
 async def asset_stats(user: ReadUser) -> dict[str, Any]:
     active = {"archived_at": None}
-    untagged = {"$and": [active, {"$or": [{"tags": {}}, {"tags": {"$exists": False}}]}]}
-    counts = {
-        asset_type: await db.assets.count_documents({**active, "type": asset_type})
-        for asset_type in (
-            "image",
-            "video",
-            "annotation",
-            "model",
-            "archive",
-            "image_annotation",
-            "other",
-        )
-    }
+    pipeline = [
+        {"$match": active},
+        {"$facet": {
+            "by_type": [{"$group": {"_id": "$type", "count": {"$sum": 1}}}],
+            "total": [{"$count": "count"}],
+            "untagged": [
+                {"$match": {"$or": [{"tags": {}}, {"tags": {"$exists": False}}]}},
+                {"$count": "count"},
+            ],
+        }},
+    ]
+    rows = await (await db.assets.aggregate(pipeline)).to_list(length=1)
+    summary = rows[0] if rows else {}
+    counts = {item["_id"]: item["count"] for item in summary.get("by_type", [])}
+    for asset_type in ("image", "video", "annotation", "model", "archive", "image_annotation", "other"):
+        counts.setdefault(asset_type, 0)
     disk = await asyncio.to_thread(shutil.disk_usage, settings.storage_data_path)
     return {
-        "total": await db.assets.count_documents(active),
-        "untagged": await db.assets.count_documents(untagged),
+        "total": (summary.get("total") or [{"count": 0}])[0]["count"],
+        "untagged": (summary.get("untagged") or [{"count": 0}])[0]["count"],
         "by_type": counts,
         "storage": {"total": disk.total, "used": disk.used, "free": disk.free},
     }
@@ -154,6 +158,81 @@ async def asset_stats(user: ReadUser) -> dict[str, Any]:
 def safe_filename(filename: str) -> str:
     name = PurePath(filename.replace("\\", "/")).name
     return re.sub(r"[^\w.()\- ]", "_", name, flags=re.UNICODE)[:255]
+
+
+async def matching_name_assets(filename: str, asset_type: str) -> list[dict[str, Any]]:
+    return await db.assets.find(
+        {
+            "name": {"$regex": f"^{re.escape(filename)}$", "$options": "i"},
+            "type": asset_type,
+            "archived_at": None,
+        },
+        {
+            "id": 1,
+            "name": 1,
+            "type": 1,
+            "size": 1,
+            "mime_type": 1,
+            "status": 1,
+            "tags": 1,
+            "media": 1,
+            "remark": 1,
+            "created_at": 1,
+            "modified_at": 1,
+        },
+    ).sort("created_at", DESCENDING).to_list(length=None)
+
+
+@router.post("/upload-conflicts")
+async def check_upload_conflicts(
+    body: UploadConflictCheckRequest, user: WriteUser
+) -> dict[str, Any]:
+    conflicts = []
+    counts: dict[str, int] = {}
+    for index, item in enumerate(body.files):
+        filename = safe_filename(item.filename)
+        matches = await matching_name_assets(filename, item.asset_type.value)
+        if not matches:
+            continue
+        asset_ids = [match["id"] for match in matches]
+        related_source_ids = set(await db.relations.distinct(
+            "source_id", {"source_id": {"$in": asset_ids}, "status": "active"}
+        ))
+        related_target_ids = set(await db.relations.distinct(
+            "target_id", {"target_id": {"$in": asset_ids}, "status": "active"}
+        ))
+        related_ids = related_source_ids | related_target_ids
+        conflict_items = [
+            {**public_document(match), "has_active_relations": match["id"] in related_ids}
+            for match in matches
+        ]
+        conflicts.append({
+            "index": index,
+            "filename": filename,
+            "asset_type": item.asset_type.value,
+            "existing_count": len(matches),
+            "existing_asset_id": matches[0]["id"],
+            "has_active_relations": bool(related_ids),
+            "items": conflict_items,
+        })
+        counts[item.asset_type.value] = counts.get(item.asset_type.value, 0) + 1
+    return {
+        "total": len(conflicts),
+        "groups": [
+            {
+                "asset_type": asset_type,
+                "count": count,
+                "items": [
+                    existing
+                    for conflict in conflicts
+                    if conflict["asset_type"] == asset_type
+                    for existing in conflict["items"]
+                ],
+            }
+            for asset_type, count in counts.items()
+        ],
+        "items": conflicts,
+    }
 
 
 @router.post("/upload-sessions", status_code=201)
@@ -165,6 +244,20 @@ async def initialize_upload(body: UploadInitRequest, user: WriteUser) -> dict[st
             "文件超过当前 10 GB 上传限制",
             {"limit": settings.max_upload_size_bytes},
         )
+    filename = safe_filename(body.filename)
+    name_matches = await matching_name_assets(filename, body.asset_type.value)
+    overwrite_asset = name_matches[0] if name_matches and body.name_conflict == "overwrite" else None
+    if name_matches and body.name_conflict == "reject":
+        raise AppError(409, "ASSET_NAME_CONFLICT", "素材库中已存在同名同类型文件")
+    if name_matches and body.name_conflict == "rename":
+        original = PurePath(filename)
+        index = 1
+        while True:
+            candidate = f"{original.stem} ({index}){original.suffix}"
+            if not await matching_name_assets(candidate, body.asset_type.value):
+                filename = candidate
+                break
+            index += 1
     duplicate = None
     if body.sha256:
         duplicate = await db.assets.find_one(
@@ -182,7 +275,7 @@ async def initialize_upload(body: UploadInitRequest, user: WriteUser) -> dict[st
     document = {
         "id": session_id,
         "asset_id": asset_id,
-        "filename": safe_filename(body.filename),
+        "filename": filename,
         "declared_size": body.size,
         "mime_type": body.mime_type,
         "asset_type": body.asset_type.value,
@@ -190,6 +283,7 @@ async def initialize_upload(body: UploadInitRequest, user: WriteUser) -> dict[st
         "sha256": body.sha256.lower() if body.sha256 else None,
         "object_key": object_key,
         "duplicate_asset_id": duplicate["id"] if duplicate else None,
+        "overwrite_asset_id": overwrite_asset["id"] if overwrite_asset else None,
         "owner_id": user["id"],
         "state": "reused" if duplicate else "pending",
         "transfer_mode": "chunks" if chunked else "single",
@@ -208,6 +302,7 @@ async def initialize_upload(body: UploadInitRequest, user: WriteUser) -> dict[st
         "chunk_size": document["chunk_size"],
         "chunk_count": document["chunk_count"],
         "duplicate_asset_id": document["duplicate_asset_id"],
+        "overwrite_asset_id": document["overwrite_asset_id"],
         "expires_at": document["expires_at"],
     }
 
@@ -305,8 +400,10 @@ async def complete_upload(
         if obj.size != session["declared_size"]:
             raise AppError(409, "SIZE_MISMATCH", "实际文件大小与申报大小不一致")
     timestamp = now()
+    overwrite_asset_id = session.get("overwrite_asset_id")
+    asset_id = overwrite_asset_id or session["asset_id"]
     asset = {
-        "id": session["asset_id"],
+        "id": asset_id,
         "name": session["filename"],
         "type": session["asset_type"],
         "object_key": session["object_key"],
@@ -325,7 +422,16 @@ async def complete_upload(
         "archived_at": None,
         "reuses_asset_id": session.get("duplicate_asset_id"),
     }
-    await db.assets.insert_one(asset)
+    if overwrite_asset_id:
+        existing = await db.assets.find_one({"id": overwrite_asset_id, "archived_at": None})
+        if existing is None:
+            raise AppError(409, "OVERWRITE_TARGET_NOT_FOUND", "要覆盖的原文件已不存在")
+        asset["created_at"] = existing.get("created_at", timestamp)
+        asset["tags"] = body.tags or existing.get("tags", {})
+        asset["remark"] = existing.get("remark", "")
+        await db.assets.replace_one({"id": overwrite_asset_id}, asset)
+    else:
+        await db.assets.insert_one(asset)
     await db.upload_sessions.update_one({"id": session["id"]}, {"$set": {"state": "completed"}})
     if session.get("transfer_mode") == "chunks":
         await asyncio.to_thread(delete_chunks, chunk_prefix(session["id"]))
@@ -360,7 +466,7 @@ async def complete_upload(
         )
     await record_audit(
         actor=user,
-        action="asset.created",
+        action="asset.overwritten" if overwrite_asset_id else "asset.created",
         object_type="asset",
         object_id=asset["id"],
         request_id=request.state.request_id,

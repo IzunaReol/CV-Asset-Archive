@@ -243,7 +243,7 @@ async def create_dataset(body: DatasetCreate, request: Request, user: WriteUser)
 async def list_datasets(
     user: ReadUser, q: str | None = None, status: str | None = None,
     creator: str | None = None, updated_from: str | None = None,
-    page: int = Query(1, ge=1), page_size: int = Query(50, ge=0, le=200),
+    page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200),
 ) -> dict[str, Any]:
     clauses: list[dict[str, Any]] = [{"deleted_at": None}]
     if q:
@@ -261,9 +261,32 @@ async def list_datasets(
             raise AppError(400, "DATE_INVALID", "更新时间格式不正确") from exc
     query = {"$and": clauses}
     total = await db.datasets.count_documents(query)
-    cursor = db.datasets.find(query).sort([("updated_at", DESCENDING), ("id", ASCENDING)]).skip((page - 1) * page_size if page_size else 0).limit(page_size)
+    cursor = db.datasets.find(query).sort([("updated_at", DESCENDING), ("id", ASCENDING)]).skip((page - 1) * page_size).limit(page_size)
     return {"items": await _dataset_summaries(await cursor.to_list(length=None)),
             "page": page, "page_size": page_size, "total": total}
+
+
+@router.get("/options")
+async def dataset_options(
+    user: ReadUser,
+    q: str = Query("", max_length=120),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(100, ge=1, le=200),
+) -> dict[str, Any]:
+    query: dict[str, Any] = {"deleted_at": None, "current_version_id": {"$ne": None}}
+    if q.strip():
+        query["name"] = {"$regex": re.escape(q.strip()), "$options": "i"}
+    total = await db.datasets.count_documents(query)
+    cursor = (
+        db.datasets.find(
+            query,
+            {"_id": 0, "id": 1, "name": 1, "current_version": 1, "current_version_id": 1},
+        )
+        .sort([("name", ASCENDING), ("id", ASCENDING)])
+        .skip((page - 1) * page_size)
+        .limit(page_size)
+    )
+    return {"items": [item async for item in cursor], "page": page, "page_size": page_size, "total": total}
 
 
 @router.get("/creators")

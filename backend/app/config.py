@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     max_upload_size_bytes: int = 10 * 1024 * 1024 * 1024
     export_expiry_hours: int = 72
     job_stale_minutes: int = 120
+    login_max_failures: int = Field(default=5, ge=1, le=20)
+    login_failure_window_seconds: int = Field(default=300, ge=60, le=3600)
+    slow_request_ms: int = Field(default=1000, ge=100, le=60000)
 
     def deployment_security_errors(self) -> list[str]:
         if self.app_env.lower() in {"development", "test", "local"}:

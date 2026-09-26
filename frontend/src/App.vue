@@ -53,6 +53,7 @@ const relationPreviewScrolling = ref(false)
 let relationPreviewScrollTimer: number | null = null
 const transientScrollbarTimers = new Map<Element, number>()
 let pageScrollbarTimer: number | null = null
+let assetLoadGeneration = 0
 const toast = ref('')
 const toastKind = ref<'success'|'error'>('success')
 const confirmOpen = ref(false)
@@ -75,6 +76,9 @@ const uploadPaused = ref(false)
 const uploadProgress = ref(0)
 const uploadCompleted = ref(0)
 const uploadError = ref('')
+const uploadConflictResult = ref<any>(null)
+const uploadConflictChecking = ref(false)
+const uploadConflictExpanded = ref('')
 const uploadPauseController = new UploadPauseController(paused => { uploadPaused.value = paused })
 const batchTagOpen = ref(false)
 const batchTagAction = ref<'add'|'remove'>('add')
@@ -103,6 +107,7 @@ const relationPickerOriginPage = ref<Page>('relations')
 const selectedModel = ref<any>(null)
 const modelTargets = ref<any[]>([])
 const relationDatasets = ref<any[]>([])
+const relationDatasetQuery = ref('')
 const relationVersions = ref<any[]>([])
 const relationDatasetId = ref('')
 const relationVersionId = ref('')
@@ -184,6 +189,8 @@ const tagDefinitions = computed(() => tagRows.value.map((tag:any) => ({key:tag.k
 const datasetStatusValues = computed(() => tagRows.value.find((tag:any) => tag.key === 'status')?.values || ['待整理','未标注','已标注','审核中','待复核','已训练'])
 const filterDefinitions = computed(() => [{key:'remark',label:'备注',values:[],free_input:true},{key:'created_at',label:'创建时间',values:[],free_input:false,time:true},{key:'updated_at',label:'修改时间',values:[],free_input:false,time:true}, ...tagDefinitions.value])
 const uploadTagEntries = computed(() => Object.entries(uploadTags.value).flatMap(([key,values]) => values.map(value => ({key,value,label:tagDefinitions.value.find((tag:any)=>tag.key===key)?.label || key}))))
+const uploadConflictGroups = computed(() => uploadConflictResult.value?.groups || [])
+const uploadConflictHasRelations = computed(() => uploadConflictGroups.value.some((group:any) => group.items?.some((item:any) => item.has_active_relations)))
 const assetTypeLabels: Record<string,string> = { image:'图片', video:'视频', annotation:'标注', model:'模型', dataset:'数据集', dataset_version:'数据集版本', snapshot:'数据集', manual:'数据集', archive:'压缩文件', image_annotation:'图片+标注', other:'其他', asset:'素材' }
 const manageableFormatTypes = ['image','video','annotation','model','archive','image_annotation']
 const availableFormatTypes = computed(() => manageableFormatTypes.filter(type => !formatRows.value.some(row => row.asset_type === type)))
@@ -193,12 +200,14 @@ const jobTypeLabels: Record<string,string> = { export:'素材导出', dataset_ex
 const jobStateLabels: Record<string,string> = { queued:'等待处理', running:'处理中', succeeded:'已完成', failed:'失败', cancelled:'已取消' }
 const roleLabels: Record<string,string> = { admin:'管理员', data_manager:'数据管理员', annotator:'标注员', ml_engineer:'算法工程师', viewer:'只读访客' }
 const userStatusLabels: Record<string,string> = { active:'正常', disabled:'已停用' }
-const auditActionLabels: Record<string,string> = { 'asset.created':'创建素材', 'asset.deleted':'删除素材', 'asset.batch_deleted':'移入回收站', 'asset.batch_restored':'还原素材', 'asset.remark_updated':'修改素材备注', 'trash.emptied':'清空回收站', 'asset.tags_updated':'修改素材标签', 'export.created':'创建导出任务', 'job.cancelled':'取消任务', 'relation.created':'建立关联关系', 'relation.revoked':'撤销关联关系' }
+const auditActionLabels: Record<string,string> = { 'asset.created':'创建素材', 'asset.overwritten':'覆盖素材', 'asset.deleted':'删除素材', 'asset.batch_deleted':'移入回收站', 'asset.batch_restored':'还原素材', 'asset.remark_updated':'修改素材备注', 'trash.emptied':'清空回收站', 'asset.tags_updated':'修改素材标签', 'export.created':'创建导出任务', 'job.cancelled':'取消任务', 'relation.created':'建立关联关系', 'relation.revoked':'撤销关联关系' }
 
 const relationHistory = ref<any[]>([])
 const lineageRoot = ref<any>(null)
 const lineageNodes = ref<any[]>([])
 const lineageEdges = ref<any[]>([])
+const lineageMembersTruncated = ref(false)
+const lineageMemberTotal = ref(0)
 const lineageLoading = ref(false)
 const lineageView = ref<'graph'|'list'>('graph')
 const lineageTypeFilter = ref('')
@@ -275,8 +284,8 @@ const trashPages = computed(() => trashPageSize.value === 0 ? 1 : Math.max(1, Ma
 const allTrashSelected = computed(() => Boolean(trashAssets.value.length) && trashAssets.value.every(asset => trashSelected.value.includes(asset.id)))
 const storageUsedPercent = computed(() => storageStats.value.total ? Math.round(storageStats.value.used / storageStats.value.total * 100) : 0)
 const storageFreePercent = computed(() => storageStats.value.total ? 100 - storageUsedPercent.value : 0)
-const confirmTitle = computed(() => confirmMessage.value.includes('撤销关联') ? '撤销确认' : confirmMessage.value.includes('还原') ? '还原确认' : '删除确认')
-const confirmActionText = computed(() => confirmMessage.value.includes('撤销关联') ? '确认撤销' : confirmMessage.value.includes('还原') ? '确认还原' : confirmMessage.value.includes('清空回收站') ? '确认清空' : '确认删除')
+const confirmTitle = computed(() => confirmMessage.value.includes('覆盖原文件') ? '覆盖确认' : confirmMessage.value.includes('撤销关联') ? '撤销确认' : confirmMessage.value.includes('还原') ? '还原确认' : '删除确认')
+const confirmActionText = computed(() => confirmMessage.value.includes('覆盖原文件') ? '确定' : confirmMessage.value.includes('撤销关联') ? '确认撤销' : confirmMessage.value.includes('还原') ? '确认还原' : confirmMessage.value.includes('清空回收站') ? '确认清空' : '确认删除')
 
 function isAssetSelected(id:AssetId) {
   return selectedSetId.value ? !selectedSetExcluded.value.includes(String(id)) : selected.value.includes(id)
@@ -356,13 +365,21 @@ function askConfirmation(message:string, action:() => void | Promise<void>) {
 
 async function runConfirmedAction() {
   if (!pendingConfirmAction) return
+  const action = pendingConfirmAction
+  const dismissBeforeAction = confirmMessage.value.includes('覆盖原文件')
   confirmBusy.value = true
-  try {
-    await pendingConfirmAction()
+  if (dismissBeforeAction) {
     confirmOpen.value = false
     pendingConfirmAction = null
+  }
+  try {
+    await action()
+    if (!dismissBeforeAction) {
+      confirmOpen.value = false
+      pendingConfirmAction = null
+    }
   } catch (error) {
-    notifyError(error instanceof Error ? error.message : '删除失败')
+    notifyError(error instanceof Error ? error.message : '操作失败')
   } finally { confirmBusy.value = false }
 }
 
@@ -544,11 +561,16 @@ async function openLineage(asset:any) {
   try {
     const graph = await api.relationGraph(String(asset.id))
     lineageNodes.value = graph.nodes || []
+    lineageMembersTruncated.value = Boolean(graph.members_truncated)
+    lineageMemberTotal.value = Number(graph.member_total || 0)
+    if (lineageMembersTruncated.value) notify(`该版本共 ${lineageMemberTotal.value} 项素材，图谱仅展示前 500 项`)
     lineageEdges.value = (graph.edges || []).map((edge:any)=>({...edge,relation:relationTypeLabels[edge.relation_type]||edge.relation_type,source:edge.source_name||edge.source_id,target:edge.target_name||edge.target_id,sourceType:assetTypeLabels[edge.source_type]||edge.source_type,targetType:assetTypeLabels[edge.target_type]||edge.target_type,operator:edge.created_by_name||'系统',createdAt:edge.created_at?new Date(edge.created_at).toLocaleString('zh-CN'):'时间未知',status:edge.status==='active'?'生效中':'已撤销',origin:edge.provenance?.source||'未记录'}))
   } catch (error) {
     notifyError(error instanceof Error ? error.message : '模型溯源加载失败')
     lineageNodes.value = []
     lineageEdges.value = []
+    lineageMembersTruncated.value = false
+    lineageMemberTotal.value = 0
   } finally { lineageLoading.value = false }
 }
 
@@ -820,10 +842,12 @@ async function logout() {
 
 async function loadAssets() {
   if (!api.session()) return
+  const generation = ++assetLoadGeneration
   demoState.value = 'loading'
   try {
     const assetsRequest = api.assets(assetListParams(assetPageSize.value===0?1:assetPage.value, effectiveAssetPageSize.value))
     const [result, views, stats, tags] = await Promise.all([assetsRequest, api.savedViews(), api.assetStats(), api.tags()])
+    if (generation !== assetLoadGeneration) return
     assetFilteredTotal.value = result.total
     assetTotal.value = stats.total
     untaggedTotal.value = stats.untagged
@@ -835,6 +859,7 @@ async function loadAssets() {
     demoState.value = result.items.length ? 'normal' : 'empty'
     savedViewRows.value = views.items
   } catch (error) {
+    if (generation !== assetLoadGeneration) return
     demoState.value = 'error'
     notifyError(error instanceof Error ? error.message : '素材加载失败')
   }
@@ -879,6 +904,7 @@ function chooseFile(event: Event) {
   incoming.forEach(file => { uploadTypeOverrides.value[uploadFileKey(file)] = detectAssetType(file) })
   input.value = ''
   uploadError.value = ''
+  uploadConflictResult.value = null
 }
 
 const uploadTypeLabels:Record<string,string> = {image:'图片',video:'视频',annotation:'标注',model:'模型',archive:'压缩文件',image_annotation:'图片+标注',other:'其他'}
@@ -905,10 +931,11 @@ async function removeUploadFile(file:File) {
   }
   uploadFiles.value = uploadFiles.value.filter(item => uploadFileKey(item) !== uploadFileKey(file))
   delete uploadTypeOverrides.value[uploadFileKey(file)]
+  uploadConflictResult.value = null
 }
 function openUpload() {
   void loadFormats()
-  uploadFiles.value = []; uploadTypeOverrides.value = {}; uploadTags.value={}; uploadError.value = ''; uploadProgress.value = 0; uploadCompleted.value = 0; uploadPaused.value = false; uploadOpen.value = true
+  uploadFiles.value = []; uploadTypeOverrides.value = {}; uploadTags.value={}; uploadError.value = ''; uploadConflictResult.value = null; uploadProgress.value = 0; uploadCompleted.value = 0; uploadPaused.value = false; uploadOpen.value = true
 }
 
 function pauseUpload() {
@@ -926,10 +953,30 @@ async function uploadRequest(url:string, body:Blob|File, failureMessage:string) 
   )
 }
 
+function uploadRequestFiles(nameConflict:'reject'|'overwrite'|'rename' = 'reject') {
+  return uploadFiles.value.map(file => ({filename:file.name,size:file.size,mime_type:file.type || 'application/octet-stream',asset_type:resolvedUploadType(file),name_conflict:nameConflict}))
+}
+
 async function uploadAsset() {
   if (!uploadFiles.value.length) { uploadError.value = '请选择文件'; return }
   const unresolved = uploadFiles.value.filter(file => !resolvedUploadType(file))
   if (unresolved.length) { uploadError.value = `请为 ${unresolved.map(file=>file.name).join('、')} 选择资产类型`; return }
+  uploadConflictChecking.value = true
+  uploadError.value = ''
+  try {
+    const result = await api.checkUploadConflicts(uploadRequestFiles())
+    uploadConflictResult.value = result.total ? result : null
+    uploadConflictExpanded.value = ''
+    if (result.total) return
+  } catch (error) {
+    uploadError.value = error instanceof Error ? error.message : '重名文件检查失败'
+    return
+  } finally { uploadConflictChecking.value = false }
+  await performUpload('reject')
+}
+
+async function performUpload(nameConflict:'reject'|'overwrite'|'rename') {
+  uploadConflictResult.value = null
   uploadBusy.value = true; uploadPaused.value = false; uploadProgress.value = 0; uploadCompleted.value = 0; uploadError.value = ''
   const files = [...uploadFiles.value]
   const failed:Array<{file:File;message:string}> = []
@@ -948,7 +995,7 @@ async function uploadAsset() {
         let initialized:any[]
         try {
           initialized = (await api.initUploadBatch(chunk.map(file => ({
-            filename:file.name,size:file.size,mime_type:file.type || 'application/octet-stream',asset_type:resolvedUploadType(file),
+            filename:file.name,size:file.size,mime_type:file.type || 'application/octet-stream',asset_type:resolvedUploadType(file),name_conflict:nameConflict,
           })))).items
         } catch (error) {
           chunk.forEach(file => { failed.push({file,message:error instanceof Error?error.message:'创建上传任务失败'}); markCompleted() })
@@ -1006,7 +1053,7 @@ async function uploadAsset() {
           }
           if (!status) {
             localStorage.removeItem(storageKey)
-            const initial = await api.initUpload({filename:file.name,size:file.size,mime_type:file.type || 'application/octet-stream',asset_type:resolvedUploadType(file)})
+            const initial = await api.initUpload({filename:file.name,size:file.size,mime_type:file.type || 'application/octet-stream',asset_type:resolvedUploadType(file),name_conflict:nameConflict})
             sessionId = initial.upload_session_id
             localStorage.setItem(storageKey, sessionId!)
             status = await api.uploadSession(sessionId!)
@@ -1039,7 +1086,7 @@ async function uploadAsset() {
       uploadError.value = failed.map(item => `${item.file.name}：${item.message}`).join('；')
       notify(`已上传 ${succeeded} 个，失败 ${failed.length} 个`, 'error')
     } else {
-      uploadOpen.value = false; uploadFiles.value = []; uploadTypeOverrides.value = {}; uploadTags.value={}
+      uploadOpen.value = false; uploadFiles.value = []; uploadTypeOverrides.value = {}; uploadTags.value={}; uploadConflictResult.value = null
       notify(hasDatasetPackage ? `已上传 ${succeeded} 个文件，数据集包正在解压并建立关联` : `已上传 ${succeeded} 个文件，正在生成预览`)
     }
     await loadAssets()
@@ -1161,7 +1208,7 @@ function openLineageEdge(edge:any) {
 }
 
 async function loadRelationDatasets() {
-  try { relationDatasets.value=(await api.datasets(new URLSearchParams({page:'1',page_size:'0'}))).items.filter((item:any)=>item.current_version_id) }
+  try { relationDatasets.value=(await api.datasetOptions(relationDatasetQuery.value.trim())).items }
   catch(error){ notifyError(error instanceof Error?error.message:'数据集加载失败') }
 }
 
@@ -1233,6 +1280,18 @@ function startJobPolling() {
     jobPoll = window.setTimeout(poll, jobPollDelay({page:page.value,jobs:jobRows.value,assets:assets.value}))
   }
   jobPoll = window.setTimeout(poll, jobPollDelay({page:page.value,jobs:jobRows.value,assets:assets.value}))
+}
+
+function overwriteUploadFiles() {
+  if (uploadConflictHasRelations.value) {
+    askConfirmation('覆盖原文件会保留关联关系，是否确定？', () => performUpload('overwrite'))
+    return
+  }
+  void performUpload('overwrite')
+}
+
+function openUploadConflictAsset(item:any, index:number) {
+  void openAsset(mapAsset(item, index))
 }
 
 function showDetailScrollbar() {
@@ -1682,6 +1741,7 @@ async function revokeActiveRelation() {
         <section v-else-if="relationWorkflow==='model'" class="relation-builder">
           <article><span>第 1 步</span><h2>选择模型</h2><div class="drop-zone"><b>{{selectedModel?.name||'尚未选择模型'}}</b><small v-if="!selectedModel">只展示模型类型素材</small><button @click="openAdvancedRelationPicker('model')">{{selectedModel?'更换模型':'选择模型'}}</button></div></article>
           <div class="relation-arrow"><b>数据集版本</b><span>→</span></div>
+          <div class="relation-history-filters"><input v-model="relationDatasetQuery" placeholder="搜索已发布数据集" @keyup.enter="loadRelationDatasets" /><button type="button" @click="loadRelationDatasets">搜索</button></div>
           <article><span>第 2 步</span><h2>选择已发布版本</h2><div class="drop-zone target"><div class="relation-select"><button type="button" class="relation-select-trigger" aria-label="数据集" :aria-expanded="relationSelectOpen==='dataset'" @click="relationSelectOpen=relationSelectOpen==='dataset'?'':'dataset'">{{relationDatasets.find((item:any)=>item.id===relationDatasetId)?.name||'选择数据集'}}<span>⌄</span></button><div v-if="relationSelectOpen==='dataset'" class="relation-select-options"><button v-for="dataset in relationDatasets" :key="dataset.id" type="button" :class="{active:relationDatasetId===dataset.id}" @click="relationDatasetId=dataset.id;relationSelectOpen='';changeRelationDataset()">{{dataset.name}}</button></div></div><div class="relation-select"><button type="button" class="relation-select-trigger" aria-label="数据集版本" :aria-expanded="relationSelectOpen==='version'" :disabled="!relationDatasetId" @click="relationSelectOpen=relationSelectOpen==='version'?'':'version'">{{relationVersions.find((item:any)=>item.id===relationVersionId)?.version||'选择版本'}}<span>⌄</span></button><div v-if="relationSelectOpen==='version'" class="relation-select-options"><button v-for="version in relationVersions" :key="version.id" type="button" :class="{active:relationVersionId===version.id}" @click="relationVersionId=version.id;relationSelectOpen=''">{{version.version}} · {{version.member_count}} 项素材</button></div></div></div></article>
         </section>
         <section v-if="relationWorkflow==='model'" class="validation"><span>第 3 步</span><b>关系预览</b><div><span>{{selectedModel?.name||'未选择模型'}} → {{relationVersions.find((item:any)=>item.id===relationVersionId)?.version||'未选择版本'}}</span></div><button class="primary" @click="previewModelRelations">确认关系</button></section>
@@ -1738,7 +1798,7 @@ async function revokeActiveRelation() {
       </template>
     </main>
 
-    <aside v-if="activeAsset" class="detail-sheet" :class="{'is-scrolling':detailSheetScrolling}" @scroll.passive="showDetailScrollbar">
+    <aside v-if="activeAsset" class="detail-sheet" :class="{'is-scrolling':detailSheetScrolling,'upload-conflict-detail':uploadOpen&&uploadConflictResult}" @scroll.passive="showDetailScrollbar">
       <button class="close" @click="mediaViewerOpen=false;detailId=null;detailAsset=null">×</button>
       <button v-if="activeAsset.type==='图片'||activeAsset.type==='视频'" class="media-nav previous" :disabled="!hasPreviousMedia" aria-label="上一个图片或视频" @click="openAdjacentMedia(-1)">‹</button>
       <button v-if="activeAsset.type==='图片'||activeAsset.type==='视频'" class="media-nav next" :disabled="!hasNextMedia" aria-label="下一个图片或视频" @click="openAdjacentMedia(1)">›</button>
@@ -1780,10 +1840,11 @@ async function revokeActiveRelation() {
       <section class="upload-dialog">
         <button class="close" :disabled="uploadBusy" @click="uploadOpen=false">×</button><h2>上传素材</h2><p>单文件默认上限 10 GB；压缩包默认作为压缩文件保存，手动选择“图片+标注”后才会按 CVAT 数据集包解析。</p>
         <label class="file-select-button"><input type="file" multiple @change="chooseFile" /><span>点击选择文件</span></label>
-        <div v-if="uploadFiles.length" class="selected-files"><article v-for="file in uploadFiles" :key="uploadFileKey(file)" class="selected-file"><div><b>{{file.name}}</b><small>{{(file.size/1024/1024).toFixed(1)}} MB · {{uploadTypeStatus(file)}}</small></div><select v-model="uploadTypeOverrides[uploadFileKey(file)]" aria-label="选择资产类型"><option value="" disabled>选择类型</option><option value="image">图片</option><option value="video">视频</option><option value="annotation">标注</option><option value="model">模型</option><option value="archive">压缩文件</option><option value="image_annotation">图片+标注</option><option value="other">其他</option></select><button type="button" aria-label="移除文件" title="移除" :disabled="uploadBusy" @click="removeUploadFile(file)">×</button></article></div>
+        <div v-if="uploadFiles.length" class="selected-files"><article v-for="file in uploadFiles" :key="uploadFileKey(file)" class="selected-file"><div><b>{{file.name}}</b><small>{{(file.size/1024/1024).toFixed(1)}} MB · {{uploadTypeStatus(file)}}</small></div><select v-model="uploadTypeOverrides[uploadFileKey(file)]" aria-label="选择资产类型" @change="uploadConflictResult=null"><option value="" disabled>选择类型</option><option value="image">图片</option><option value="video">视频</option><option value="annotation">标注</option><option value="model">模型</option><option value="archive">压缩文件</option><option value="image_annotation">图片+标注</option><option value="other">其他</option></select><button type="button" aria-label="移除文件" title="移除" :disabled="uploadBusy" @click="removeUploadFile(file)">×</button></article></div>
         <div v-if="uploadFiles.length" class="upload-tag-tools"><button class="secondary" type="button" @click="openBatchTag('upload')">＋ 添加标签</button><div v-if="uploadTagEntries.length" class="upload-tag-list"><span v-for="tag in uploadTagEntries" :key="`${tag.key}-${tag.value}`"><b>{{tag.label}}</b>：{{tag.value}}<button type="button" :aria-label="`删除${tag.label}标签${tag.value}`" @click="removeUploadTag(tag.key,tag.value)">×</button></span></div></div>
+        <div v-if="uploadConflictResult" class="upload-conflicts"><div class="upload-conflict-tree"><section v-for="group in uploadConflictGroups" :key="group.asset_type"><button class="upload-conflict-group" type="button" @click="uploadConflictExpanded=uploadConflictExpanded===group.asset_type?'':group.asset_type"><span><i>{{uploadTypeLabels[group.asset_type]||group.asset_type}}</i><b>{{uploadTypeLabels[group.asset_type]||group.asset_type}}</b></span><strong>{{group.items?.length||group.count}} 项 {{uploadConflictExpanded===group.asset_type?'⌃':'⌄'}}</strong></button><div v-if="uploadConflictExpanded===group.asset_type" class="upload-conflict-items"><button v-for="(item,index) in group.items" :key="item.id" type="button" @click="openUploadConflictAsset(item,index)"><span><b>{{item.name}}</b><small>{{(Number(item.size||0)/1024/1024).toFixed(1)}} MB</small></span><em v-if="item.has_active_relations">有关联关系</em><i>详情 ›</i></button></div></section></div><p>存在共{{uploadConflictResult.total}}项重名文件，请选择：</p><div class="upload-conflict-actions"><button class="secondary" type="button" @click="overwriteUploadFiles">覆盖原文件</button><button class="primary" type="button" @click="performUpload('rename')">重命名并上传</button></div></div>
         <div v-if="uploadBusy" class="upload-meter"><i :style="{width:`${uploadProgress}%`}"></i></div><p v-if="uploadBusy" class="upload-count">{{uploadPaused?'上传已暂停':'正在上传'}} · 已处理 {{uploadCompleted}} / {{uploadFiles.length}} 项</p><p v-if="uploadError" class="form-error">{{uploadError}}</p>
-        <div class="dialog-actions"><button class="secondary" :disabled="uploadBusy" @click="uploadOpen=false">取消</button><button v-if="uploadBusy" class="secondary" @click="uploadPaused?resumeUpload():pauseUpload()">{{uploadPaused?'继续上传':'暂停上传'}}</button><button class="primary" :disabled="uploadBusy" @click="uploadAsset">{{uploadBusy?'正在上传…':'开始上传'}}</button></div>
+        <p v-if="uploadFiles.length" class="upload-file-total">共{{uploadFiles.length}}项文件</p><div class="dialog-actions"><button class="secondary" :disabled="uploadBusy" @click="uploadOpen=false">取消</button><button v-if="uploadBusy" class="secondary" @click="uploadPaused?resumeUpload():pauseUpload()">{{uploadPaused?'继续上传':'暂停上传'}}</button><button v-if="!uploadConflictResult" class="primary" :disabled="uploadBusy||uploadConflictChecking" @click="uploadAsset">{{uploadBusy?'正在上传…':uploadConflictChecking?'正在检查…':'开始上传'}}</button></div>
       </section>
     </div>
     <div v-if="batchTagOpen" class="modal-stage">
@@ -1792,7 +1853,7 @@ async function revokeActiveRelation() {
     <div v-if="collectionOpen" class="modal-stage"><section class="upload-dialog compact-dialog"><button class="close" @click="collectionOpen=false">×</button><h2>用 {{selectedCount}} 项素材创建数据集</h2><div class="form-stack"><label>名称<input v-model="collectionName" placeholder="例如 helmet_train_v1" /></label><label>说明<textarea v-model="collectionDescription" rows="3" /></label><label class="inline-check"><input v-model="collectionFreeze" type="checkbox" /> 创建后冻结，作为不可变训练集快照</label></div><div class="dialog-actions"><button class="secondary" @click="collectionOpen=false">取消</button><button class="primary" @click="createCollection">创建数据集</button></div></section></div>
     <div v-if="savedViewOpen" class="modal-stage"><section class="upload-dialog compact-dialog"><button class="close" @click="savedViewOpen=false">×</button><h2>{{editingViewId?'修改视图名称':'保存视图'}}</h2><div class="form-stack"><label>请输入视图名称<input v-model="savedViewName" autofocus @keyup.enter="saveCurrentView" /></label></div><div class="dialog-actions"><button class="secondary" @click="savedViewOpen=false">取消</button><button class="primary" @click="saveCurrentView">{{editingViewId?'保存修改':'保存视图'}}</button></div></section></div>
     <div v-if="tagOpen" class="modal-stage"><section class="upload-dialog compact-dialog tag-dialog"><button class="close" @click="tagOpen=false">×</button><h2>{{editingTagKey?'修改标签字段':'新建标签字段'}}</h2><div class="form-stack"><label>标签名称<input v-model="newTag.name" placeholder="例如 天气" /></label><label>备注<input v-model="newTag.key" :disabled="Boolean(editingTagKey)" placeholder="例如 weather" /></label><div class="tag-values-editor"><div class="field-label"><span>标签值</span><button class="add-value" type="button" @click="addTagValue">＋ 新增</button></div><p v-if="!tagValueRows.length" class="value-empty">暂无标签值，点击“新增”添加</p><div v-for="row in tagValueRows" :key="row.id" class="tag-value-row"><input v-model="row.value" :disabled="!row.editing" placeholder="请输入标签值" @keyup.enter="row.editing=false" /><button type="button" @click="toggleTagValueEdit(row)">{{row.editing?'完成':'修改'}}</button><button class="remove-value" type="button" @click="removeTagValue(row.id)">删除</button></div></div><label class="color-field">颜色<div class="color-control"><label class="color-picker-button" title="点击选择颜色"><span class="color-swatch large" :style="{background:newTag.color}"></span><span>选择颜色</span><input v-model="tagPickerColor" type="color" aria-label="选择颜色" @change="applyPickerColor" /></label><input v-model="newTag.color" class="color-code" aria-label="颜色值" maxlength="7" placeholder="#64748B" /></div></label><label class="inline-check"><input v-model="newTag.free_input" type="checkbox" /> 允许输入枚举以外的值</label></div><div class="dialog-actions"><button class="secondary" @click="tagOpen=false">取消</button><button class="primary" @click="createTag">保存标签</button></div></section></div>
-    <div v-if="confirmOpen" class="modal-stage confirm-stage"><section class="upload-dialog compact-dialog confirm-dialog"><h2>{{confirmTitle}}</h2><p>{{confirmMessage}}</p><div class="dialog-actions"><button class="secondary" :disabled="confirmBusy" @click="cancelConfirmation">取消</button><button class="confirm-delete" :disabled="confirmBusy" @click="runConfirmedAction">{{confirmBusy?'正在处理…':confirmActionText}}</button></div></section></div>
+    <div v-if="confirmOpen" class="modal-stage confirm-stage"><section class="upload-dialog compact-dialog confirm-dialog"><h2>{{confirmTitle}}</h2><p>{{confirmMessage}}</p><div class="dialog-actions"><button class="secondary" :disabled="confirmBusy" @click="cancelConfirmation">取消</button><button :class="confirmMessage.includes('覆盖原文件')?'confirm-primary':'confirm-delete'" :disabled="confirmBusy" @click="runConfirmedAction">{{confirmBusy?'正在处理…':confirmActionText}}</button></div></section></div>
     <div v-if="userOpen" class="modal-stage"><section class="upload-dialog compact-dialog"><button class="close" @click="userOpen=false">×</button><h2>{{editingUserId?'编辑用户':'新增用户'}}</h2><div class="form-stack"><label>用户名<input v-model="newUser.username" autocomplete="off" placeholder="至少 3 个字符" /></label><label>{{editingUserId?'新密码（留空则不修改）':'初始密码'}}<input v-model="newUser.password" type="password" autocomplete="new-password" placeholder="至少 8 个字符" /></label><label>角色<select v-model="newUser.role"><option value="admin">管理员</option><option value="data_manager">数据管理员</option><option value="annotator">标注员</option><option value="ml_engineer">算法工程师</option><option value="viewer">只读访客</option></select></label><label v-if="editingUserId">账号状态<select v-model="newUser.status"><option value="active">正常</option><option value="disabled">已停用</option></select></label></div><div class="dialog-actions"><button class="secondary" @click="userOpen=false">取消</button><button class="primary" @click="createUser">{{editingUserId?'保存修改':'创建用户'}}</button></div></section></div>
     <div v-if="mediaViewerOpen && viewerAsset" class="media-viewer" @click.self="closeMediaViewer"><div class="media-viewer-tools"><button aria-label="缩小" title="缩小" :disabled="mediaViewerZoom<=.25" @click="changeMediaViewerZoom(-.25)">−</button><b>{{Math.round(mediaViewerZoom*100)}}%</b><button aria-label="放大" title="放大" :disabled="mediaViewerZoom>=4" @click="changeMediaViewerZoom(.25)">＋</button><button v-if="viewerAsset.type==='图片' && !pickerPreviewAsset" class="annotation-toggle" :class="{active:mediaViewerAnnotations}" @click="mediaViewerAnnotations=!mediaViewerAnnotations">{{mediaViewerAnnotations?'隐藏标注':'显示标注'}}</button></div><button class="media-viewer-close" aria-label="关闭大图" @click="closeMediaViewer">×</button><div class="media-viewer-scroll"><div v-if="viewerAsset.type==='图片'" class="original-media" :style="originalMediaStyle"><img :src="viewerAsset.download_url||viewerAsset.preview_url" :alt="viewerAsset.name" /><svg v-if="!pickerPreviewAsset && mediaViewerAnnotations && activeAnnotationSource?.items?.length" class="annotation-layer" viewBox="0 0 100 100" preserveAspectRatio="none"><g v-for="item in activeAnnotationSource.items" :key="item.id"><polygon v-for="(polygon,index) in item.polygons || []" :key="`${item.id}-${index}`" :points="polygonPoints(polygon)" :fill="annotationColor(item.label)" fill-opacity=".18" :stroke="annotationColor(item.label)" vector-effect="non-scaling-stroke" /><rect :x="item.bbox.x*100" :y="item.bbox.y*100" :width="item.bbox.width*100" :height="item.bbox.height*100" fill="none" :stroke="annotationColor(item.label)" vector-effect="non-scaling-stroke" /><text :x="item.bbox.x*100" :y="Math.max(3,item.bbox.y*100)" :fill="annotationColor(item.label)" vector-effect="non-scaling-stroke">{{item.label}}</text></g></svg></div><video v-else :src="viewerAsset.download_url" :poster="viewerAsset.preview_url" :style="originalMediaStyle" controls autoplay>当前浏览器不支持播放此视频</video></div></div>
     <div v-if="formatOpen" class="modal-stage"><section class="upload-dialog compact-dialog tag-dialog"><button class="close" @click="formatOpen=false">×</button><h2>{{editingFormatType?'修改格式':'新增格式'}}</h2><div class="form-stack"><label>素材类型<select v-if="!editingFormatType" v-model="newFormatType"><option v-for="type in availableFormatTypes" :key="type" :value="type">{{assetTypeLabels[type]}}</option></select><input v-else :value="assetTypeLabels[editingFormatType]" disabled /></label><label>备注<input v-model="formatRemark" placeholder="请输入备注" /></label><div class="tag-values-editor"><div class="field-label"><span>文件格式</span><button class="add-value" type="button" @click="addFormatValue">＋ 新增</button></div><p v-if="!formatValueRows.length" class="value-empty">暂无文件格式，点击“新增”添加</p><div v-for="row in formatValueRows" :key="row.id" class="tag-value-row"><input v-model="row.value" :disabled="row.protected || !row.editing" placeholder="例如 .jpg" @keyup.enter="row.editing=false" /><template v-if="!row.protected"><button type="button" @click="toggleFormatValueEdit(row)">{{row.editing?'完成':'修改'}}</button><button class="remove-value" type="button" @click="removeFormatValue(row.id)">删除</button></template></div></div></div><div class="dialog-actions"><button class="secondary" @click="formatOpen=false">取消</button><button class="primary" @click="saveFormat">保存格式</button></div></section></div>
