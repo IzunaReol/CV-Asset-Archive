@@ -86,6 +86,25 @@ def test_large_upload_uses_chunks(monkeypatch):
     assert inserted["transfer_mode"] == "chunks"
 
 
+def test_upload_limit_message_does_not_claim_default_limit(monkeypatch):
+    monkeypatch.setattr(assets.settings, "max_upload_size_bytes", 123)
+    body = assets.UploadInitRequest(
+        filename="large.bin",
+        size=124,
+        mime_type="application/octet-stream",
+        asset_type="other",
+    )
+
+    try:
+        asyncio.run(assets.initialize_upload(body, {"id": "user"}))
+    except AppError as exc:
+        assert exc.code == "FILE_TOO_LARGE"
+        assert exc.message == "文件超过当前上传限制"
+        assert exc.details == {"limit": 123}
+    else:
+        raise AssertionError("超过配置上限的文件必须被拒绝")
+
+
 def test_upload_conflicts_are_grouped_by_asset_type(monkeypatch):
     async def matches(filename, asset_type):
         if filename.casefold() == "same.jpg" and asset_type == "image":
@@ -220,6 +239,7 @@ def test_upload_overwrite_keeps_original_asset_id(monkeypatch):
 
 def test_complete_overwrite_replaces_current_asset_and_preserves_metadata(monkeypatch):
     replaced = {}
+    inserted_job = {}
     session = {
         "id": "session-1",
         "asset_id": "temporary-id",
@@ -244,6 +264,7 @@ def test_complete_overwrite_replaces_current_asset_and_preserves_metadata(monkey
         "created_at": assets.now(),
         "tags": {"status": ["已标注"]},
         "remark": "保留备注",
+        "object_key": "projects/old/original",
         "archived_at": None,
     }
 
@@ -262,7 +283,10 @@ def test_complete_overwrite_replaces_current_asset_and_preserves_metadata(monkey
                 find_one=AsyncMock(return_value=session), update_one=AsyncMock()
             ),
             assets=AssetStore(),
-            jobs=SimpleNamespace(insert_one=AsyncMock(), update_one=AsyncMock()),
+            jobs=SimpleNamespace(
+                insert_one=AsyncMock(side_effect=lambda document: inserted_job.update(document)),
+                update_one=AsyncMock(),
+            ),
         ),
     )
     monkeypatch.setattr(assets, "record_audit", AsyncMock())
@@ -281,3 +305,4 @@ def test_complete_overwrite_replaces_current_asset_and_preserves_metadata(monkey
     assert replaced["object_key"] == "projects/new/original"
     assert replaced["tags"] == {"status": ["已标注"]}
     assert replaced["remark"] == "保留备注"
+    assert inserted_job["input"]["previous_object_key"] == "projects/old/original"

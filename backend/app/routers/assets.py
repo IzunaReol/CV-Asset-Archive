@@ -241,7 +241,7 @@ async def initialize_upload(body: UploadInitRequest, user: WriteUser) -> dict[st
         raise AppError(
             413,
             "FILE_TOO_LARGE",
-            "文件超过当前 10 GB 上传限制",
+            "文件超过当前上传限制",
             {"limit": settings.max_upload_size_bytes},
         )
     filename = safe_filename(body.filename)
@@ -402,6 +402,7 @@ async def complete_upload(
     timestamp = now()
     overwrite_asset_id = session.get("overwrite_asset_id")
     asset_id = overwrite_asset_id or session["asset_id"]
+    previous_object_key = None
     asset = {
         "id": asset_id,
         "name": session["filename"],
@@ -426,6 +427,7 @@ async def complete_upload(
         existing = await db.assets.find_one({"id": overwrite_asset_id, "archived_at": None})
         if existing is None:
             raise AppError(409, "OVERWRITE_TARGET_NOT_FOUND", "要覆盖的原文件已不存在")
+        previous_object_key = existing.get("object_key")
         asset["created_at"] = existing.get("created_at", timestamp)
         asset["tags"] = body.tags or existing.get("tags", {})
         asset["remark"] = existing.get("remark", "")
@@ -442,7 +444,10 @@ async def complete_upload(
         "state": "queued",
         "progress": 0,
         "owner_id": user["id"],
-        "input": {"asset_id": asset["id"]},
+        "input": {
+            "asset_id": asset["id"],
+            "previous_object_key": previous_object_key,
+        },
         "created_at": now(),
         "updated_at": now(),
     }

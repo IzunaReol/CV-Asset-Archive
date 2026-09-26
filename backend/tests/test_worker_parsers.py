@@ -3,6 +3,7 @@ import zipfile
 
 import pytest
 from worker.tasks import (
+    cleanup_replaced_object,
     annotation_metadata,
     cvat_yolo_pairs,
     download_object,
@@ -208,3 +209,57 @@ def test_asset_status_changes_to_failed_when_processing_stops(monkeypatch):
     assert updates[0][0] == {"id": "asset-1"}
     assert updates[0][1]["$set"]["status"] == "failed"
     assert updates[0][1]["$set"]["processing_error"]["code"] == "PROCESS_PERMISSION_DENIED"
+
+
+def test_cleanup_replaced_object_removes_unreferenced_object(monkeypatch):
+    removed = []
+
+    class Assets:
+        def find_one(self, query):
+            assert query == {
+                "id": {"$ne": "asset-1"},
+                "object_key": "projects/old/original",
+            }
+            return None
+
+    class Storage:
+        def remove_object(self, bucket, key):
+            removed.append((bucket, key))
+
+    monkeypatch.setattr("worker.tasks.database", type("Database", (), {"assets": Assets()})())
+    monkeypatch.setattr("worker.tasks.storage", Storage())
+
+    cleanup_replaced_object(
+        "asset-1", "projects/old/original", "projects/new/original"
+    )
+
+    assert removed == [("cv-assets", "projects/old/original")]
+
+
+def test_cleanup_replaced_object_keeps_shared_object(monkeypatch):
+    class Assets:
+        def find_one(self, query):
+            return {"id": "asset-2"}
+
+    class Storage:
+        def remove_object(self, bucket, key):
+            raise AssertionError("仍被其他素材引用的对象不能删除")
+
+    monkeypatch.setattr("worker.tasks.database", type("Database", (), {"assets": Assets()})())
+    monkeypatch.setattr("worker.tasks.storage", Storage())
+
+    cleanup_replaced_object(
+        "asset-1", "projects/old/original", "projects/new/original"
+    )
+
+
+def test_cleanup_replaced_object_does_not_fail_completed_processing(monkeypatch):
+    class Assets:
+        def find_one(self, query):
+            raise OSError("temporary database error")
+
+    monkeypatch.setattr("worker.tasks.database", type("Database", (), {"assets": Assets()})())
+
+    cleanup_replaced_object(
+        "asset-1", "projects/old/original", "projects/new/original"
+    )

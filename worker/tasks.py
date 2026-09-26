@@ -64,6 +64,29 @@ def fail_job(job_id: str, exc: Exception) -> None:
     )
 
 
+def cleanup_replaced_object(
+    asset_id: str,
+    previous_object_key: str | None,
+    current_object_key: str,
+) -> None:
+    if not previous_object_key or previous_object_key == current_object_key:
+        return
+    try:
+        shared = database.assets.find_one(
+            {"id": {"$ne": asset_id}, "object_key": previous_object_key}
+        )
+        if shared is not None:
+            return
+        storage.remove_object(MINIO_BUCKET, previous_object_key)
+    except Exception as exc:
+        logger.warning(
+            "Unable to remove replaced object %s for asset %s (%s)",
+            previous_object_key,
+            asset_id,
+            type(exc).__name__,
+        )
+
+
 def job_cancelled(job_id: str) -> bool:
     job = database.jobs.find_one({"id": job_id}, {"state": 1, "cancel_requested": 1})
     return bool(job and (job.get("state") == "cancelled" or job.get("cancel_requested")))
@@ -827,6 +850,12 @@ def process_asset(job_id: str, asset_id: str) -> None:
                     "processing_error": None,
                 }
             },
+        )
+        job = database.jobs.find_one({"id": job_id}) or {}
+        cleanup_replaced_object(
+            asset_id,
+            job.get("input", {}).get("previous_object_key"),
+            object_key,
         )
         database.jobs.update_one(
             {"id": job_id},

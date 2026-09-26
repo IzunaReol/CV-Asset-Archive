@@ -28,7 +28,6 @@ API 保存业务元数据并签发 MinIO 地址。浏览器直接传输大文件
 | 集合 | 关键字段 | 说明 |
 | --- | --- | --- |
 | `assets` | type, name, remark, object_key, sha256, size, mime_type, media, tags, status, archived_at | 文件元数据与处理状态 |
-| `asset_versions` | asset_id, version, object_key, sha256, source, note | 资产版本 |
 | `relations` | source_id, target_id, relation_type, status, provenance, revoke_reason | 有方向的资产关系 |
 | `datasets`、`dataset_memberships` | name, status, asset_id, updated_at | 当前数据集及成员 |
 | `dataset_versions`、`dataset_version_memberships` | version, member_count, content_digest, snapshot | 不可变版本与成员摘要 |
@@ -65,11 +64,13 @@ API 保存业务元数据并签发 MinIO 地址。浏览器直接传输大文件
 
 ## 关系
 
-关系类型包括 `annotates`、`contains`、`trained_on`、`produced_by` 和 `version_of`。源与目标不能相同；前端选择器禁用自身，后端进行最终校验。
+当前允许写入的关系类型只有 `annotates` 和 `trained_on`。`contains` 仅用于图谱中只读推导的数据集版本成员边；`produced_by`、`version_of` 只保留为历史数据的兼容展示，不再允许新建。关系源与目标不能相同；前端选择器禁用自身，后端进行最终校验。
 
 自动关联优先读取标注内容中的图片引用，没有引用时使用不区分大小写的文件基础名称。同名图片或同一图片被多个标注声明时列为冲突。提交前先预览，确认后批量创建。
 
 图片与标注使用 `annotates` 关系。图片进入当前数据集时带入有效标注；撤销图片与标注关系后，只调整未发布的当前数据集，历史版本保持不变。模型只通过 `trained_on` 关系关联已发布的数据集版本，不再直接关联图片、视频、标注或压缩文件。图谱中的版本成员路径为只读推导结果，不额外写入模型直连关系。关系软撤销后从有效图谱移除，但保留历史和审计。
+
+早期版本使用过 `asset_versions` 集合，当前版本已由不可变的 `dataset_versions` 和 `dataset_version_memberships` 承担版本快照；Worker 清理逻辑仍兼容删除遗留记录，但不再写入新数据。
 
 ## 删除与导出
 
