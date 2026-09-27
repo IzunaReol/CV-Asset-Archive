@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$RegistryPrefix = "auto",
     [switch]$SkipBuild
 )
@@ -7,12 +7,10 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $composeFile = Join-Path $projectRoot "deploy\docker-compose.yml"
 $envFile = Join-Path $projectRoot ".env"
-$envExample = Join-Path $projectRoot ".env.example"
 $dockerDesktop = "C:\Program Files\Docker\Docker\Docker Desktop.exe"
 
 if (-not (Test-Path -LiteralPath $envFile)) {
-    Copy-Item -LiteralPath $envExample -Destination $envFile
-    Write-Host "已创建 .env。首次正式部署前请修改其中的密钥。" -ForegroundColor Yellow
+    throw "未找到 .env。首次使用请运行 deploy-windows.cmd 完成部署。"
 }
 
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
@@ -34,12 +32,16 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 if ($RegistryPrefix -eq "auto") {
-    try {
-        Invoke-WebRequest -UseBasicParsing -Uri "https://auth.docker.io/token?scope=repository%3Alibrary%2Fredis%3Apull&service=registry.docker.io" -TimeoutSec 8 | Out-Null
+    if ($SkipBuild) {
         $RegistryPrefix = ""
-    } catch {
-        $RegistryPrefix = "docker.m.daocloud.io/"
-        Write-Host "Docker Hub 不可达，改用 DaoCloud 公共镜像代理。" -ForegroundColor Yellow
+    } else {
+        try {
+            Invoke-WebRequest -UseBasicParsing -Uri "https://auth.docker.io/token?scope=repository%3Alibrary%2Fredis%3Apull&service=registry.docker.io" -TimeoutSec 8 | Out-Null
+            $RegistryPrefix = ""
+        } catch {
+            $RegistryPrefix = "docker.m.daocloud.io/"
+            Write-Host "Docker Hub 不可达，改用 DaoCloud 公共镜像代理。" -ForegroundColor Yellow
+        }
     }
 }
 
@@ -59,10 +61,5 @@ if ($health.status -ne "ok") {
     throw "服务未在三分钟内通过健康检查。"
 }
 
-$body = @{ username = "admin"; password = "admin" } | ConvertTo-Json
-$login = Invoke-RestMethod -Method Post -Uri "http://localhost:8000/api/v1/auth/login" -ContentType "application/json" -Body $body
-if (-not $login.access_token) { throw "默认管理员登录验证失败。" }
-
-Write-Host "启动完成，登录验证通过。" -ForegroundColor Green
+Write-Host "启动完成，健康检查通过。" -ForegroundColor Green
 Write-Host "系统地址：http://localhost:8080"
-Write-Host "默认账号：admin / admin"

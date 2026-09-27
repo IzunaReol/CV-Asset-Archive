@@ -44,6 +44,46 @@ jobs:
       - run: npm run build
       - run: npm audit --omit=dev --audit-level=high
 
+  deployment-scripts:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Linux deployment scripts
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          bash -n deploy-linux.sh start-linux.sh scripts/deploy.sh scripts/start.sh
+          bash scripts/deploy.sh --prepare-only >/dev/null
+          ! grep -Eq '^(JWT_SECRET|INITIAL_ADMIN_PASSWORD|MINIO_ACCESS_KEY|MINIO_SECRET_KEY)=replace-' .env
+          before="$(sha256sum .env | cut -d ' ' -f 1)"
+          bash scripts/deploy.sh --prepare-only >/dev/null
+          test "$before" = "$(sha256sum .env | cut -d ' ' -f 1)"
+      - name: Validate Windows deployment scripts
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $errors = $null
+          $tokens = $null
+          foreach ($path in @('scripts/deploy.ps1', 'scripts/start.ps1')) {
+            [void][Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $path), [ref]$tokens, [ref]$errors
+            )
+            if ($errors.Count) { throw ($errors | Out-String) }
+          }
+          .\scripts\deploy.ps1 -PrepareOnly *> $null
+          $content = Get-Content .env -Raw
+          if ($content -match '(?m)^(JWT_SECRET|INITIAL_ADMIN_PASSWORD|MINIO_ACCESS_KEY|MINIO_SECRET_KEY)=replace-') {
+            throw 'Deployment credentials were not generated.'
+          }
+          $before = (Get-FileHash .env -Algorithm SHA256).Hash
+          .\scripts\deploy.ps1 -PrepareOnly *> $null
+          if ($before -ne (Get-FileHash .env -Algorithm SHA256).Hash) {
+            throw 'Existing .env was overwritten.'
+          }
+
   container-scan:
     runs-on: ubuntu-latest
     steps:

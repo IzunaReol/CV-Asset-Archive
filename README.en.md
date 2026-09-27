@@ -63,11 +63,28 @@ Open `http://localhost:5173` after startup. The initial username and password ar
 
 ## Docker Compose Deployment
 
-Linux with Docker Compose is recommended for server deployment. Copy the environment template and replace every default credential:
+Docker Compose v2 is required. The first deployment creates `.env` and generates random JWT, administrator, and MinIO credentials.
+
+On Windows, double-click or run:
+
+```powershell
+.\deploy-windows.cmd
+```
+
+On Linux, run:
 
 ```bash
-cp .env.example .env
-docker compose -f deploy/docker-compose.yml up --build -d
+bash deploy-linux.sh
+```
+
+For routine startup after deployment:
+
+```powershell
+.\start-windows.cmd
+```
+
+```bash
+bash start-linux.sh
 ```
 
 Default endpoints:
@@ -77,7 +94,7 @@ Default endpoints:
 - Readiness check: `http://localhost:8000/health/ready`
 - MinIO console: `http://localhost:9001`
 
-See the [deployment guide](deploy/README.md) for PowerShell scripts and offline image import/export.
+See the [deployment guide](deploy/README.md) for script options, stopping services, and offline image import/export.
 
 ## Configuration
 
@@ -115,7 +132,7 @@ The isolated API workflow test is available at `scripts/runtime-e2e.py`. See the
 
 Back up MongoDB, MinIO, and deployment configuration before upgrading from v1.3.3. Update the source and dependencies, rebuild the frontend, and verify duplicate detection, overwrite and rename uploads, relationship-preserving confirmation, and batch uploads. No manual data migration is required.
 
-See the [dataset guide](docs/datasets.md) and [v1.4.0 release notes](docs/releases/v1.4.0.md) for behavior, validation status, and known limitations.
+See the [dataset guide](docs/datasets.md) and [v1.4.0 release notes](docs/releases/v1.4.0.md) for added features and changes.
 
 ## Documentation
 

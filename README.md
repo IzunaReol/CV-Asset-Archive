@@ -63,11 +63,28 @@ powershell -ExecutionPolicy Bypass -File scripts/install-native.ps1 -FallbackPro
 
 ## Docker Compose 部署
 
-服务器建议使用 Linux 和 Docker Compose。复制配置文件并更换所有默认凭据：
+要求 Docker Compose v2。首次部署会自动创建 `.env` 并生成 JWT、管理员和 MinIO 随机凭据：
+
+Windows 双击或运行：
+
+```powershell
+.\deploy-windows.cmd
+```
+
+Linux 运行：
 
 ```bash
-cp .env.example .env
-docker compose -f deploy/docker-compose.yml up --build -d
+bash deploy-linux.sh
+```
+
+部署完成后的日常启动：
+
+```powershell
+.\start-windows.cmd
+```
+
+```bash
+bash start-linux.sh
 ```
 
 默认地址：
@@ -77,7 +94,7 @@ docker compose -f deploy/docker-compose.yml up --build -d
 - 就绪检查：`http://localhost:8000/health/ready`
 - MinIO 控制台：`http://localhost:9001`
 
-PowerShell 启停脚本和离线镜像导入、导出方法见[部署说明](deploy/README.md)。
+脚本参数、停止服务和离线镜像导入、导出方法见[部署说明](deploy/README.md)。
 
 ## 配置
 
@@ -115,7 +132,7 @@ npm run build
 
 从 v1.3.3 升级前备份 MongoDB、MinIO 和部署配置。更新代码与依赖并重新构建前端后，验证同名素材检查、覆盖与重命名上传、关系保留确认和批量上传。本版本无需手工迁移数据。
 
-变更范围、验证状态及已知限制见[v1.4.0 发布说明](docs/releases/v1.4.0.md)。
+新增功能和改动内容见 [v1.4.0 发布说明](docs/releases/v1.4.0.md)。
 
 ## 项目文档
 
