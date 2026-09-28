@@ -11,7 +11,7 @@ from ..database import db
 from ..dependencies import ReadUser, WriteUser
 from ..errors import AppError
 from ..schemas import ExportCreate
-from ..storage import presigned_get
+from ..storage import presigned_get, stat_object
 from ..utils import new_id, now, public_document
 from .assets import resolve_selection_ids
 
@@ -26,6 +26,46 @@ TASK_NAMES = {
     "trash_empty": "worker.tasks.empty_trash",
 }
 CANCELLABLE_JOB_TYPES = {"export", "dataset_export"}
+
+
+async def _backfill_export_size(job: dict[str, Any], semaphore: asyncio.Semaphore) -> bool:
+    result = job.get("result")
+    if (
+        job.get("state") != "succeeded"
+        or job.get("type") not in CANCELLABLE_JOB_TYPES
+        or not isinstance(result, dict)
+        or result.get("size") is not None
+        or not result.get("object_key")
+    ):
+        return False
+    async with semaphore:
+        try:
+            obj = await asyncio.to_thread(stat_object, result["object_key"])
+            size = int(obj.size)
+            updated = await db.jobs.update_one(
+                {"id": job["id"], "result.size": {"$exists": False}},
+                {"$set": {"result.size": size}},
+            )
+            return bool(updated.modified_count)
+        except Exception:  # noqa: BLE001 - one unavailable object must not stop the batch
+            return False
+
+
+async def backfill_export_sizes(limit: int = 100) -> int:
+    cursor = db.jobs.find(
+        {
+            "type": {"$in": sorted(CANCELLABLE_JOB_TYPES)},
+            "state": "succeeded",
+            "result.object_key": {"$exists": True},
+            "result.size": {"$exists": False},
+        }
+    ).sort([("created_at", -1)]).limit(limit)
+    pending = [item async for item in cursor]
+    if not pending:
+        return 0
+    semaphore = asyncio.Semaphore(8)
+    results = await asyncio.gather(*(_backfill_export_size(item, semaphore) for item in pending))
+    return sum(results)
 
 
 def _job_task_args(job: dict[str, Any]) -> list[str]:
@@ -163,10 +203,13 @@ async def list_jobs(
         if "admin" in user["roles"] or "data_manager" in user["roles"]
         else {"owner_id": user["id"]}
     )
+    visible_job_types = ["export", "dataset_export", "trash_empty"]
     if download_only:
         query["type"] = {"$in": ["export", "dataset_export"]}
     elif job_type:
-        query["type"] = job_type
+        query["type"] = job_type if job_type in visible_job_types else {"$in": []}
+    else:
+        query["type"] = {"$in": visible_job_types}
     if state:
         query["state"] = state
     if created_from and created_to and created_from > created_to:
@@ -181,8 +224,9 @@ async def list_jobs(
     cursor = (
         db.jobs.find(query).sort([("created_at", -1), ("id", -1)]).skip((page - 1) * page_size).limit(page_size)
     )
+    jobs = [item async for item in cursor]
     return {
-        "items": [public_document(item) async for item in cursor],
+        "items": [public_document(item) for item in jobs],
         "page": page,
         "page_size": page_size,
         "total": total,

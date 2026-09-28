@@ -106,22 +106,44 @@ def test_upload_limit_message_does_not_claim_default_limit(monkeypatch):
 
 
 def test_upload_conflicts_are_grouped_by_asset_type(monkeypatch):
-    async def matches(filename, asset_type):
-        if filename.casefold() == "same.jpg" and asset_type == "image":
-            return [{"id": "old-image", "name": "same.jpg", "type": "image"}]
-        if filename.casefold() == "labels.xml" and asset_type == "annotation":
-            return [{"id": "old-label", "name": "labels.xml", "type": "annotation"}]
-        return []
+    class Cursor:
+        def __init__(self, items):
+            self.items = items
 
-    monkeypatch.setattr(assets, "matching_name_assets", matches)
+        def sort(self, *args):
+            return self
+
+        async def to_list(self, **kwargs):
+            return self.items
+
+        def __aiter__(self):
+            self.iterator = iter(self.items)
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self.iterator)
+            except StopIteration:
+                raise StopAsyncIteration
+
+    class AssetCollection:
+        def find(self, *args, **kwargs):
+            return Cursor([
+                {"id": "old-image", "name": "same.jpg", "normalized_name": "same.jpg", "type": "image"},
+                {"id": "old-label", "name": "labels.xml", "normalized_name": "labels.xml", "type": "annotation"},
+            ])
+
+    class RelationCollection:
+        def find(self, *args, **kwargs):
+            return Cursor([
+                {"source_id": "old-image", "target_id": "other"},
+                {"source_id": "other", "target_id": "old-label"},
+            ])
+
     monkeypatch.setattr(
         assets,
         "db",
-        SimpleNamespace(
-            relations=SimpleNamespace(
-                distinct=AsyncMock(side_effect=[["old-image"], [], [], ["old-label"]])
-            )
-        ),
+        SimpleNamespace(assets=AssetCollection(), relations=RelationCollection()),
     )
     body = assets.UploadConflictCheckRequest(files=[
         {"filename": "SAME.jpg", "size": 10, "mime_type": "image/jpeg", "asset_type": "image"},

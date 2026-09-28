@@ -15,6 +15,116 @@ class AsyncRows:
     async def to_list(self, length=None):
         return self.rows
 
+    def sort(self, *args):
+        return self
+
+    def skip(self, *args):
+        return self
+
+    def limit(self, *args):
+        return self
+
+    def __aiter__(self):
+        self.iterator = iter(self.rows)
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self.iterator)
+        except StopIteration:
+            raise StopAsyncIteration
+
+
+def test_task_center_excludes_asset_processing_jobs(monkeypatch):
+    def find(*args, **kwargs):
+        return AsyncRows([])
+    database = SimpleNamespace(
+        jobs=SimpleNamespace(count_documents=AsyncMock(return_value=0), find=find)
+    )
+    monkeypatch.setattr(jobs, "db", database)
+
+    result = asyncio.run(jobs.list_jobs(
+        {"id": "admin", "roles": ["admin"]}, page=1, page_size=20,
+        job_type=None, state=None, created_from=None, created_to=None, download_only=False,
+    ))
+
+    query = database.jobs.count_documents.call_args.args[0]
+    assert query["type"] == {"$in": ["export", "dataset_export", "trash_empty"]}
+    assert result["items"] == []
+
+
+def test_task_center_backfills_export_file_size(monkeypatch):
+    job = {
+        "id": "job-1",
+        "type": "export",
+        "state": "succeeded",
+        "result": {"object_key": "exports/job-1/archive.zip"},
+    }
+    update_one = AsyncMock(return_value=SimpleNamespace(modified_count=1))
+    database = SimpleNamespace(
+        jobs=SimpleNamespace(
+            find=lambda *args, **kwargs: AsyncRows([job]),
+            update_one=update_one,
+        )
+    )
+    monkeypatch.setattr(jobs, "db", database)
+    monkeypatch.setattr(jobs, "stat_object", lambda object_key: SimpleNamespace(size=3145728))
+
+    result = asyncio.run(jobs.backfill_export_sizes())
+
+    assert result == 1
+    update_one.assert_awaited_once_with(
+        {"id": "job-1", "result.size": {"$exists": False}},
+        {"$set": {"result.size": 3145728}},
+    )
+
+
+def test_task_center_backfill_continues_when_write_fails(monkeypatch):
+    job = {
+        "id": "job-1",
+        "type": "export",
+        "state": "succeeded",
+        "result": {"object_key": "exports/job-1/archive.zip"},
+    }
+    database = SimpleNamespace(
+        jobs=SimpleNamespace(
+            find=lambda *args, **kwargs: AsyncRows([job]),
+            update_one=AsyncMock(side_effect=RuntimeError("database unavailable")),
+        )
+    )
+    monkeypatch.setattr(jobs, "db", database)
+    monkeypatch.setattr(jobs, "stat_object", lambda object_key: SimpleNamespace(size=1024))
+
+    result = asyncio.run(jobs.backfill_export_sizes())
+
+    assert result == 0
+
+
+def test_task_center_listing_does_not_read_object_storage(monkeypatch):
+    job = {
+        "id": "job-1",
+        "type": "export",
+        "state": "succeeded",
+        "result": {"object_key": "exports/job-1/archive.zip"},
+    }
+    database = SimpleNamespace(
+        jobs=SimpleNamespace(
+            count_documents=AsyncMock(return_value=1),
+            find=lambda *args, **kwargs: AsyncRows([job]),
+        )
+    )
+    monkeypatch.setattr(jobs, "db", database)
+    monkeypatch.setattr(
+        jobs, "stat_object", lambda object_key: (_ for _ in ()).throw(AssertionError())
+    )
+
+    result = asyncio.run(jobs.list_jobs(
+        {"id": "admin", "roles": ["admin"]}, page=1, page_size=20,
+        job_type=None, state=None, created_from=None, created_to=None, download_only=False,
+    ))
+
+    assert "size" not in result["items"][0]["result"]
+
 
 def test_cancel_export_is_scoped_to_owner_and_audited(monkeypatch):
     update = AsyncMock(return_value=SimpleNamespace(modified_count=1))

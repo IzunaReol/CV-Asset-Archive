@@ -30,6 +30,7 @@ from ..schemas import (
 from ..storage import (
     compose_chunks,
     delete_chunks,
+    delete_orphan_chunks,
     presigned_get,
     presigned_put,
     read_object,
@@ -163,7 +164,7 @@ def safe_filename(filename: str) -> str:
 async def matching_name_assets(filename: str, asset_type: str) -> list[dict[str, Any]]:
     return await db.assets.find(
         {
-            "name": {"$regex": f"^{re.escape(filename)}$", "$options": "i"},
+            "normalized_name": filename.casefold(),
             "type": asset_type,
             "archived_at": None,
         },
@@ -187,21 +188,40 @@ async def matching_name_assets(filename: str, asset_type: str) -> list[dict[str,
 async def check_upload_conflicts(
     body: UploadConflictCheckRequest, user: WriteUser
 ) -> dict[str, Any]:
+    requested = [(index, safe_filename(item.filename), item.asset_type.value) for index, item in enumerate(body.files)]
+    names_by_type: dict[str, set[str]] = {}
+    for _, filename, asset_type in requested:
+        names_by_type.setdefault(asset_type, set()).add(filename.casefold())
+    clauses = [
+        {"type": asset_type, "normalized_name": {"$in": sorted(names)}}
+        for asset_type, names in names_by_type.items()
+    ]
+    documents = await db.assets.find(
+        {"archived_at": None, "$or": clauses},
+        {"id": 1, "name": 1, "normalized_name": 1, "type": 1, "size": 1, "mime_type": 1,
+         "status": 1, "tags": 1, "media": 1, "remark": 1, "created_at": 1, "modified_at": 1},
+    ).sort("created_at", DESCENDING).to_list(length=None) if clauses else []
+    matches_by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for document in documents:
+        key = (document["type"], document.get("normalized_name") or document.get("name", "").casefold())
+        matches_by_key.setdefault(key, []).append(document)
+    asset_ids = [document["id"] for document in documents]
+    related_ids: set[str] = set()
+    if asset_ids:
+        async for relation in db.relations.find(
+            {"status": "active", "$or": [{"source_id": {"$in": asset_ids}}, {"target_id": {"$in": asset_ids}}]},
+            {"source_id": 1, "target_id": 1},
+        ):
+            if relation.get("source_id") in asset_ids:
+                related_ids.add(relation["source_id"])
+            if relation.get("target_id") in asset_ids:
+                related_ids.add(relation["target_id"])
     conflicts = []
     counts: dict[str, int] = {}
-    for index, item in enumerate(body.files):
-        filename = safe_filename(item.filename)
-        matches = await matching_name_assets(filename, item.asset_type.value)
+    for index, filename, asset_type in requested:
+        matches = matches_by_key.get((asset_type, filename.casefold()), [])
         if not matches:
             continue
-        asset_ids = [match["id"] for match in matches]
-        related_source_ids = set(await db.relations.distinct(
-            "source_id", {"source_id": {"$in": asset_ids}, "status": "active"}
-        ))
-        related_target_ids = set(await db.relations.distinct(
-            "target_id", {"target_id": {"$in": asset_ids}, "status": "active"}
-        ))
-        related_ids = related_source_ids | related_target_ids
         conflict_items = [
             {**public_document(match), "has_active_relations": match["id"] in related_ids}
             for match in matches
@@ -209,13 +229,13 @@ async def check_upload_conflicts(
         conflicts.append({
             "index": index,
             "filename": filename,
-            "asset_type": item.asset_type.value,
+            "asset_type": asset_type,
             "existing_count": len(matches),
             "existing_asset_id": matches[0]["id"],
-            "has_active_relations": bool(related_ids),
+            "has_active_relations": any(match["id"] in related_ids for match in matches),
             "items": conflict_items,
         })
-        counts[item.asset_type.value] = counts.get(item.asset_type.value, 0) + 1
+        counts[asset_type] = counts.get(asset_type, 0) + 1
     return {
         "total": len(conflicts),
         "groups": [
@@ -309,6 +329,13 @@ async def initialize_upload(body: UploadInitRequest, user: WriteUser) -> dict[st
 
 def chunk_prefix(session_id: str) -> str:
     return f"uploads/{session_id}/"
+
+
+async def cleanup_expired_upload_chunks() -> int:
+    active_session_ids = set(await db.upload_sessions.distinct("id", {"expires_at": {"$gt": now()}}))
+    return await asyncio.to_thread(
+        delete_orphan_chunks, active_session_ids, now() - timedelta(hours=24)
+    )
 
 
 @router.get("/upload-sessions/{session_id}")
@@ -406,6 +433,7 @@ async def complete_upload(
     asset = {
         "id": asset_id,
         "name": session["filename"],
+        "normalized_name": session["filename"].casefold(),
         "type": session["asset_type"],
         "object_key": session["object_key"],
         "sha256": session.get("sha256"),

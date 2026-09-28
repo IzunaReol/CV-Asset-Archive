@@ -7,6 +7,7 @@ const job = {
   state: 'succeeded',
   progress: 100,
   input: { asset_count: 3 },
+  result: { size: 5242880 },
   created_at: '2026-09-25T01:00:00Z',
 }
 
@@ -58,7 +59,20 @@ async function mockApi(page: Page) {
     }
     if (path.endsWith('/assets/old-image')) return json(route, { id: 'old-image', name: 'same.jpg', type: 'image', size: 1024, tags: {}, media: {}, status: 'ready', created_at: '2026-09-26T01:00:00Z' })
     if (path.endsWith('/jobs')) return json(route, { items: [job], total: 1 })
-    if (path.endsWith('/assets')) return json(route, { items: [], total: 0, next_cursor: null })
+    if (path.endsWith('/datasets/options')) {
+      const pageNumber = Number(new URL(request.url()).searchParams.get('page') || 1)
+      const items = pageNumber === 1
+        ? Array.from({ length: 50 }, (_, index) => ({ id: `dataset-${index + 1}`, name: `数据集 ${index + 1}`, current_version_id: `version-${index + 1}` }))
+        : [{ id: 'dataset-51', name: '数据集 51', current_version_id: 'version-51' }]
+      return json(route, { items, page: pageNumber, page_size: 50, total: 51 })
+    }
+    if (/\/datasets\/[^/]+\/versions$/.test(path)) return json(route, { items: [{ id: 'version-1', version: 'v1', member_count: 3 }] })
+    if (path.endsWith('/relations')) return json(route, { items: [], total: 0 })
+    if (path.endsWith('/assets')) {
+      const params = new URL(request.url()).searchParams
+      if (params.getAll('asset_type').includes('model')) return json(route, { items: [{ id: 'model-1', name: 'model.pt', type: 'model', extension: '.pt', tags: {} }], total: 1, next_cursor: null })
+      return json(route, { items: [], total: 0, next_cursor: null })
+    }
     return json(route, {})
   })
 }
@@ -79,6 +93,8 @@ test('未登录不能关闭登录层，退出后清空任务数据', async ({ pa
   }))).toEqual({ local: null, session: expect.any(String) })
   await page.getByRole('button', { name: /任务中心/ }).click()
   await expect(page.getByText('自动化导出任务')).toBeVisible()
+  await expect(page.getByText('5.00 MB')).toBeVisible()
+  await expect(page.getByRole('option', { name: '素材处理' })).toHaveCount(0)
 
   await page.getByRole('button', { name: '退出', exact: true }).click()
   await expect(page.getByRole('heading', { name: '登录', exact: true })).toBeVisible()
@@ -93,11 +109,40 @@ test('手机宽度下任务状态和操作按钮保持在视口内', async ({ pa
   await page.getByRole('button', { name: /任务中心/ }).click()
 
   const download = page.getByRole('button', { name: '下载', exact: true })
-  await expect(page.locator('.download-table .table-row:not(.head)>:nth-child(6)')).toHaveText('已完成')
+  await expect(page.locator('.download-table .table-row:not(.head)>:nth-child(7)')).toHaveText('已完成')
   await expect(download).toBeVisible()
   const box = await download.boundingBox()
   expect(box).not.toBeNull()
   expect((box?.x || 0) + (box?.width || 0)).toBeLessThanOrEqual(390)
+})
+
+test('关联关系支持数据集分页加载和独立重置', async ({ page }) => {
+  await mockApi(page)
+  await page.addInitScript(value => localStorage.setItem('cv-archive-session', JSON.stringify(value)), tokens)
+  await page.goto('/')
+  await page.getByRole('button', { name: /关联关系/ }).click()
+  await page.getByRole('button', { name: '数据集与模型', exact: true }).click()
+
+  await expect(page.getByPlaceholder('搜索已发布数据集')).toHaveCount(0)
+  const steps = page.locator('.relation-builder>article')
+  const [firstStep, secondStep] = await Promise.all([steps.nth(0).boundingBox(), steps.nth(1).boundingBox()])
+  expect(Math.abs((firstStep?.y || 0) - (secondStep?.y || 0))).toBeLessThan(3)
+
+  await page.getByRole('button', { name: '数据集', exact: true }).click()
+  const options = page.locator('.relation-select-options').first()
+  await options.evaluate(element => { element.scrollTop = element.scrollHeight; element.dispatchEvent(new Event('scroll')) })
+  await expect(page.getByRole('button', { name: '数据集 51', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '数据集 51', exact: true }).click()
+  await expect(steps.nth(1).getByRole('button', { name: '重置', exact: true })).toBeVisible()
+  await steps.nth(1).getByRole('button', { name: '重置', exact: true }).click()
+  await expect(page.getByRole('button', { name: '数据集', exact: true })).toHaveText(/选择数据集/)
+
+  await page.getByRole('button', { name: '选择模型', exact: true }).click()
+  await page.getByRole('button', { name: /model\.pt/ }).click()
+  await page.getByRole('button', { name: '完成选择', exact: true }).click()
+  await expect(steps.nth(0).getByRole('button', { name: '重置', exact: true })).toBeVisible()
+  await steps.nth(0).getByRole('button', { name: '重置', exact: true }).click()
+  await expect(page.getByText('尚未选择模型')).toBeVisible()
 })
 
 test('上传同名文件时按类型展示覆盖和重命名选择', async ({ page }) => {
@@ -133,7 +178,7 @@ test('上传同名文件时按类型展示覆盖和重命名选择', async ({ pa
     overflowY: getComputedStyle(element).overflowY,
     overscroll: getComputedStyle(element).overscrollBehaviorY,
   }))).toEqual({ overflowY: 'auto', overscroll: 'contain' })
-  await page.locator('.detail-sheet .close').click()
+  await page.locator('.detail-sheet-stage').click({ position: { x: 20, y: 20 } })
   await expect(page.locator('.detail-sheet')).toHaveCount(0)
   await expect(page.getByRole('button', { name: '覆盖原文件' })).toBeVisible()
   await expect(page.getByRole('button', { name: '重命名并上传' })).toBeVisible()

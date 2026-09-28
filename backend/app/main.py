@@ -40,10 +40,40 @@ async def lifespan(_: FastAPI):
     recovered = await jobs.reconcile_stale_jobs()
     if recovered:
         logger.warning({"event": "stale_jobs_recovered", "count": recovered})
-    yield
+    async def cleanup_upload_chunks() -> None:
+        while True:
+            try:
+                removed = await assets.cleanup_expired_upload_chunks()
+                if removed:
+                    logger.info({"event": "orphan_upload_chunks_removed", "count": removed})
+            except Exception as exc:
+                logger.warning({"event": "upload_chunk_cleanup_failed", "error": type(exc).__name__})
+            await asyncio.sleep(3600)
+
+    async def backfill_export_sizes() -> None:
+        while True:
+            try:
+                updated = await jobs.backfill_export_sizes()
+                if updated:
+                    logger.info({"event": "export_sizes_backfilled", "count": updated})
+            except Exception as exc:
+                logger.warning({"event": "export_size_backfill_failed", "error": type(exc).__name__})
+            await asyncio.sleep(3600)
+
+    cleanup_task = asyncio.create_task(cleanup_upload_chunks())
+    export_size_task = asyncio.create_task(backfill_export_sizes())
+    try:
+        yield
+    finally:
+        cleanup_task.cancel()
+        export_size_task.cancel()
+        try:
+            await asyncio.gather(cleanup_task, export_size_task)
+        except asyncio.CancelledError:
+            pass
 
 
-app = FastAPI(title="CV Archive API", version="1.4.0", lifespan=lifespan)
+app = FastAPI(title="CV Archive API", version="1.5.0", lifespan=lifespan)
 app.add_exception_handler(AppError, app_error_handler)
 app.add_middleware(
     CORSMiddleware,

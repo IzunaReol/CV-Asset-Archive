@@ -27,8 +27,8 @@ from ..schemas import (
     DatasetUpdate,
 )
 from ..storage import presigned_get
-from .assets import asset_filter_clause
 from ..utils import new_id, now, public_document
+from .assets import asset_filter_clause, resolve_selection_ids
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 settings = get_settings()
@@ -392,7 +392,7 @@ async def delete_dataset(dataset_id: str, request: Request, user: WriteUser) -> 
 
 
 @router.get("/{dataset_id}/members")
-async def list_members(dataset_id: str, user: ReadUser, page: int = Query(1, ge=1), page_size: int = Query(50, ge=0, le=200), q: str = "", asset_type: list[str] = Query(default=[]), tag: list[str] = Query(default=[]), match: str = Query("all", pattern="^(all|any)$"), no_tags: bool = False, ids_only: bool = False) -> dict[str, Any]:
+async def list_members(dataset_id: str, user: ReadUser, page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200), q: str = "", asset_type: list[str] = Query(default=[]), tag: list[str] = Query(default=[]), match: str = Query("all", pattern="^(all|any)$"), no_tags: bool = False, ids_only: bool = False) -> dict[str, Any]:
     await _get_dataset(dataset_id)
     clauses = [{"archived_at": None}, {"type": {"$ne": "annotation"}}]
     if q:
@@ -422,8 +422,7 @@ async def list_members(dataset_id: str, user: ReadUser, page: int = Query(1, ge=
     count_cursor = await db.dataset_memberships.aggregate([*pipeline, {"$count": "count"}])
     counts = await count_cursor.to_list(length=1)
     total = counts[0]["count"] if counts else 0
-    if page_size:
-        pipeline.extend([{ "$skip": (page - 1) * page_size}, {"$limit": page_size}])
+    pipeline.extend([{ "$skip": (page - 1) * page_size}, {"$limit": page_size}])
     cursor = await db.dataset_memberships.aggregate(pipeline)
     asset_documents = await cursor.to_list(length=None)
     if ids_only:
@@ -462,7 +461,7 @@ async def member_status(dataset_id: str, body: DatasetMembersRequest, user: Read
 @serialize_dataset_write
 async def add_members(dataset_id: str, body: DatasetMembersRequest, request: Request, user: WriteUser) -> dict[str, Any]:
     await _get_dataset(dataset_id)
-    ids = list(dict.fromkeys(body.asset_ids))
+    ids = await resolve_selection_ids(user, body.asset_ids, body.selection_id, body.excluded_ids)
     assets = await db.assets.find({"id": {"$in": ids}, "archived_at": None}).to_list(length=len(ids))
     valid = [item for item in assets if item.get("type") not in {"model", "annotation"}]
     invalid_ids = sorted(set(ids) - {item["id"] for item in valid})
@@ -494,7 +493,7 @@ async def add_members(dataset_id: str, body: DatasetMembersRequest, request: Req
 @router.post("/{dataset_id}/members/preview")
 async def preview_members(dataset_id: str, body: DatasetMembersRequest, user: ReadUser, action: str = Query("add", pattern="^(add|remove)$")) -> dict[str, Any]:
     await _get_dataset(dataset_id)
-    requested = set(body.asset_ids)
+    requested = set(await resolve_selection_ids(user, body.asset_ids, body.selection_id, body.excluded_ids))
     assets = await db.assets.find({"id": {"$in": list(requested)}, "archived_at": None}).to_list(length=None)
     valid = {item["id"] for item in assets if item.get("type") not in {"model", "annotation"}}
     current = set(await db.dataset_memberships.distinct("asset_id", {"dataset_id": dataset_id}))
@@ -515,7 +514,7 @@ async def preview_members(dataset_id: str, body: DatasetMembersRequest, user: Re
 @serialize_dataset_write
 async def remove_members(dataset_id: str, body: DatasetMembersRequest, request: Request, user: WriteUser) -> dict[str, Any]:
     await _get_dataset(dataset_id)
-    ids = list(set(body.asset_ids))
+    ids = await resolve_selection_ids(user, body.asset_ids, body.selection_id, body.excluded_ids)
     if await db.assets.find_one({"id": {"$in": ids}, "type": "annotation"}):
         raise AppError(422, "ANNOTATION_MEMBERSHIP_DERIVED", "标注由图片关联关系决定，不能单独移出")
     removed_rows = await db.dataset_memberships.find({"dataset_id": dataset_id, "asset_id": {"$in": ids}}).to_list(length=None)

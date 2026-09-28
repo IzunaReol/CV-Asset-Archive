@@ -100,6 +100,17 @@ def test_dataset_members_cannot_be_empty():
         DatasetMembersRequest(asset_ids=[])
 
 
+def test_dataset_members_accept_server_selection():
+    request = DatasetMembersRequest(selection_id="selection-1", excluded_ids=["asset-2"])
+    assert request.selection_id == "selection-1"
+    assert request.excluded_ids == ["asset-2"]
+
+
+def test_dataset_members_reject_two_selection_modes():
+    with pytest.raises(ValidationError):
+        DatasetMembersRequest(asset_ids=["asset-1"], selection_id="selection-1")
+
+
 def test_model_can_target_dataset_version():
     assert relation_type_error(
         {"type": "model"}, {"kind": "dataset_version"}, "trained_on"

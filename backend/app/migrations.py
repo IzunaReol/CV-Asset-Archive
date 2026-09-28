@@ -116,11 +116,19 @@ async def migration_004_collections_to_datasets() -> None:
         )
 
 
+async def migration_005_normalize_asset_names() -> None:
+    await db.assets.update_many(
+        {},
+        [{"$set": {"normalized_name": {"$toLower": {"$ifNull": ["$name", ""]}}}}],
+    )
+
+
 MIGRATIONS: list[Migration] = [
     (1, "asset and relation defaults", migration_001_asset_defaults),
     (2, "normalize relation creator names", migration_002_relation_creator_names),
     (3, "separate archive and image annotation formats", migration_003_archive_format_types),
     (4, "migrate collections to dataset memberships", migration_004_collections_to_datasets),
+    (5, "normalize asset names", migration_005_normalize_asset_names),
 ]
 
 

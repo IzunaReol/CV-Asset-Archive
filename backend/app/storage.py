@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
 from urllib.parse import quote
 
 from minio import Minio
@@ -53,6 +53,20 @@ def compose_chunks(object_key: str, chunk_keys: list[str]) -> None:
 def delete_chunks(prefix: str) -> None:
     for item in storage.list_objects(settings.minio_bucket, prefix=prefix, recursive=True):
         storage.remove_object(settings.minio_bucket, item.object_name)
+
+
+def delete_orphan_chunks(active_session_ids: set[str], older_than: datetime) -> int:
+    removed = 0
+    for item in storage.list_objects(settings.minio_bucket, prefix="uploads/", recursive=True):
+        parts = item.object_name.split("/", 2)
+        if len(parts) < 3 or parts[1] in active_session_ids:
+            continue
+        modified = item.last_modified
+        if modified is None or modified > older_than:
+            continue
+        storage.remove_object(settings.minio_bucket, item.object_name)
+        removed += 1
+    return removed
 
 
 def presigned_get(object_key: str, hours: int = 1, download_name: str | None = None) -> str:

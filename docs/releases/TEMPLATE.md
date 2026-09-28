@@ -1,4 +1,4 @@
-# vX.Y.Z
+# vX.Y.Z（YYYY-MM-DD）
 
 ## 新增
 

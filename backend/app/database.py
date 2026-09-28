@@ -16,7 +16,7 @@ async def ensure_indexes() -> None:
     await db.assets.create_index([("sha256", ASCENDING), ("size", ASCENDING)])
     await db.assets.create_index([("archived_at", ASCENDING), ("created_at", DESCENDING)])
     await db.assets.create_index([("archived_at", ASCENDING), ("type", ASCENDING), ("created_at", DESCENDING), ("id", ASCENDING)])
-    await db.assets.create_index([("type", ASCENDING), ("name", ASCENDING), ("archived_at", ASCENDING), ("created_at", DESCENDING)])
+    await db.assets.create_index([("type", ASCENDING), ("normalized_name", ASCENDING), ("archived_at", ASCENDING), ("created_at", DESCENDING)])
     await db.assets.create_index([("name", "text"), ("project", "text")])
     await db.relations.create_index(
         [

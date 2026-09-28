@@ -107,7 +107,10 @@ const relationPickerOriginPage = ref<Page>('relations')
 const selectedModel = ref<any>(null)
 const modelTargets = ref<any[]>([])
 const relationDatasets = ref<any[]>([])
-const relationDatasetQuery = ref('')
+const relationDatasetPage = ref(1)
+const relationDatasetTotal = ref(0)
+const relationDatasetLoading = ref(false)
+const relationDatasetPageSize = 50
 const relationVersions = ref<any[]>([])
 const relationDatasetId = ref('')
 const relationVersionId = ref('')
@@ -196,7 +199,7 @@ const manageableFormatTypes = ['image','video','annotation','model','archive','i
 const availableFormatTypes = computed(() => manageableFormatTypes.filter(type => !formatRows.value.some(row => row.asset_type === type)))
 const relationTypeLabels: Record<string,string> = { annotates:'对应标注', contains:'属于数据集', trained_on:'用于训练', produced_by:'由训练产生', version_of:'版本关系' }
 const historyRelationTypeLabels: Record<string,string> = {annotates:'对应标注',trained_on:'用于训练'}
-const jobTypeLabels: Record<string,string> = { export:'素材导出', dataset_export:'数据集导出', process_asset:'素材处理', trash_empty:'清空回收站' }
+const jobTypeLabels: Record<string,string> = { export:'素材导出', dataset_export:'数据集导出', trash_empty:'清空回收站' }
 const jobStateLabels: Record<string,string> = { queued:'等待处理', running:'处理中', succeeded:'已完成', failed:'失败', cancelled:'已取消' }
 const roleLabels: Record<string,string> = { admin:'管理员', data_manager:'数据管理员', annotator:'标注员', ml_engineer:'算法工程师', viewer:'只读访客' }
 const userStatusLabels: Record<string,string> = { active:'正常', disabled:'已停用' }
@@ -1207,9 +1210,59 @@ function openLineageEdge(edge:any) {
   void openRelationDetail(edge)
 }
 
-async function loadRelationDatasets() {
-  try { relationDatasets.value=(await api.datasetOptions(relationDatasetQuery.value.trim())).items }
+async function loadRelationDatasets(reset=true) {
+  if (relationDatasetLoading.value) return
+  if (reset) {
+    relationDatasetPage.value=1
+    relationDatasets.value=[]
+    relationDatasetTotal.value=0
+  }
+  relationDatasetLoading.value=true
+  try {
+    const result=await api.datasetOptions(relationDatasetPage.value,relationDatasetPageSize)
+    const existing=new Set(relationDatasets.value.map((item:any)=>String(item.id)))
+    relationDatasets.value=[...relationDatasets.value,...result.items.filter(item=>!existing.has(String(item.id)))]
+    relationDatasetTotal.value=result.total
+  }
   catch(error){ notifyError(error instanceof Error?error.message:'数据集加载失败') }
+  finally{ relationDatasetLoading.value=false }
+}
+
+async function loadMoreRelationDatasets() {
+  if(relationDatasetLoading.value||relationDatasets.value.length>=relationDatasetTotal.value)return
+  relationDatasetPage.value+=1
+  await loadRelationDatasets(false)
+}
+
+function loadMoreRelationDatasetsOnScroll(event:Event) {
+  const element=event.currentTarget as HTMLElement
+  if(element.scrollHeight-element.scrollTop-element.clientHeight<32)void loadMoreRelationDatasets()
+}
+
+function resetRelationModel() {
+  selectedModel.value=null
+  relationPreview.value=null
+  relationPreviewOpen.value=false
+}
+
+function resetRelationDataset() {
+  relationDatasetId.value=''
+  relationVersionId.value=''
+  relationVersions.value=[]
+  relationSelectOpen.value=''
+  relationPreview.value=null
+  relationPreviewOpen.value=false
+}
+
+function closeAssetDetail() {
+  mediaViewerOpen.value=false
+  detailId.value=null
+  detailAsset.value=null
+}
+
+function closeRelationDetail() {
+  relationDetailId.value=null
+  relationDetailData.value=null
 }
 
 async function changeRelationDataset() {
@@ -1502,6 +1555,10 @@ function processingStatusText(status:string) {
 
 function jobTypeText(type:string) { return jobTypeLabels[type] || type }
 function jobNameText(job:any) { return job.name || `${jobTypeText(job.type)}任务` }
+function jobSizeText(job:any) {
+  const size=Number(job.result?.size || 0)
+  return size>0 ? `${(size/1024/1024).toFixed(2)} MB` : '—'
+}
 function jobErrorText(message:string) {
   if (message === 'ZIP does not contain YOLO label files') return '压缩包中没有 YOLO 标注文件'
   const invalid = message.match(/^YOLO package contains (\d+) invalid label rows$/)
@@ -1739,10 +1796,9 @@ async function revokeActiveRelation() {
         <div class="relation-workflow-tabs"><button :class="{active:relationWorkflow==='auto'}" @click="relationWorkflow='auto'">图片与标注</button><button :class="{active:relationWorkflow==='model'}" @click="relationWorkflow='model'">数据集与模型</button></div>
         <section v-if="relationWorkflow==='auto'" class="auto-relation-guide"><div><h2>创建图片与标注关联关系</h2><p>根据名称相同自动关联的规则去匹配系统内未存在关联关系的图片与标注</p></div><button class="primary" @click="previewAutoRelations">自动关联</button></section>
         <section v-else-if="relationWorkflow==='model'" class="relation-builder">
-          <article><span>第 1 步</span><h2>选择模型</h2><div class="drop-zone"><b>{{selectedModel?.name||'尚未选择模型'}}</b><small v-if="!selectedModel">只展示模型类型素材</small><button @click="openAdvancedRelationPicker('model')">{{selectedModel?'更换模型':'选择模型'}}</button></div></article>
+          <article><div class="relation-step-head"><div><span>第 1 步</span><h2>选择模型</h2></div><button v-if="selectedModel" type="button" @click="resetRelationModel">重置</button></div><div class="drop-zone"><b>{{selectedModel?.name||'尚未选择模型'}}</b><small v-if="!selectedModel">只展示模型类型素材</small><button @click="openAdvancedRelationPicker('model')">{{selectedModel?'更换模型':'选择模型'}}</button></div></article>
           <div class="relation-arrow"><b>数据集版本</b><span>→</span></div>
-          <div class="relation-history-filters"><input v-model="relationDatasetQuery" placeholder="搜索已发布数据集" @keyup.enter="loadRelationDatasets" /><button type="button" @click="loadRelationDatasets">搜索</button></div>
-          <article><span>第 2 步</span><h2>选择已发布版本</h2><div class="drop-zone target"><div class="relation-select"><button type="button" class="relation-select-trigger" aria-label="数据集" :aria-expanded="relationSelectOpen==='dataset'" @click="relationSelectOpen=relationSelectOpen==='dataset'?'':'dataset'">{{relationDatasets.find((item:any)=>item.id===relationDatasetId)?.name||'选择数据集'}}<span>⌄</span></button><div v-if="relationSelectOpen==='dataset'" class="relation-select-options"><button v-for="dataset in relationDatasets" :key="dataset.id" type="button" :class="{active:relationDatasetId===dataset.id}" @click="relationDatasetId=dataset.id;relationSelectOpen='';changeRelationDataset()">{{dataset.name}}</button></div></div><div class="relation-select"><button type="button" class="relation-select-trigger" aria-label="数据集版本" :aria-expanded="relationSelectOpen==='version'" :disabled="!relationDatasetId" @click="relationSelectOpen=relationSelectOpen==='version'?'':'version'">{{relationVersions.find((item:any)=>item.id===relationVersionId)?.version||'选择版本'}}<span>⌄</span></button><div v-if="relationSelectOpen==='version'" class="relation-select-options"><button v-for="version in relationVersions" :key="version.id" type="button" :class="{active:relationVersionId===version.id}" @click="relationVersionId=version.id;relationSelectOpen=''">{{version.version}} · {{version.member_count}} 项素材</button></div></div></div></article>
+          <article><div class="relation-step-head"><div><span>第 2 步</span><h2>选择已发布版本</h2></div><button v-if="relationDatasetId||relationVersionId" type="button" @click="resetRelationDataset">重置</button></div><div class="drop-zone target"><div class="relation-select"><button type="button" class="relation-select-trigger" aria-label="数据集" :aria-expanded="relationSelectOpen==='dataset'" @click="relationSelectOpen=relationSelectOpen==='dataset'?'':'dataset'">{{relationDatasets.find((item:any)=>item.id===relationDatasetId)?.name||'选择数据集'}}<span>⌄</span></button><div v-if="relationSelectOpen==='dataset'" class="relation-select-options" @scroll.passive="loadMoreRelationDatasetsOnScroll"><button v-for="dataset in relationDatasets" :key="dataset.id" type="button" :class="{active:relationDatasetId===dataset.id}" @click="relationDatasetId=dataset.id;relationSelectOpen='';changeRelationDataset()">{{dataset.name}}</button><small v-if="relationDatasetLoading">正在加载更多数据集…</small><small v-else-if="relationDatasets.length<relationDatasetTotal">继续向下滚动加载（{{relationDatasets.length}} / {{relationDatasetTotal}}）</small></div></div><div class="relation-select"><button type="button" class="relation-select-trigger" aria-label="数据集版本" :aria-expanded="relationSelectOpen==='version'" :disabled="!relationDatasetId" @click="relationSelectOpen=relationSelectOpen==='version'?'':'version'">{{relationVersions.find((item:any)=>item.id===relationVersionId)?.version||'选择版本'}}<span>⌄</span></button><div v-if="relationSelectOpen==='version'" class="relation-select-options"><button v-for="version in relationVersions" :key="version.id" type="button" :class="{active:relationVersionId===version.id}" @click="relationVersionId=version.id;relationSelectOpen=''">{{version.version}} · {{version.member_count}} 项素材</button></div></div></div></article>
         </section>
         <section v-if="relationWorkflow==='model'" class="validation"><span>第 3 步</span><b>关系预览</b><div><span>{{selectedModel?.name||'未选择模型'}} → {{relationVersions.find((item:any)=>item.id===relationVersionId)?.version||'未选择版本'}}</span></div><button class="primary" @click="previewModelRelations">确认关系</button></section>
         <section class="relation-history">
@@ -1761,11 +1817,11 @@ async function revokeActiveRelation() {
       </template>
 
       <template v-else-if="page === 'downloads'">
-        <section class="page-head"><div><h1>任务中心</h1><p>查看素材处理、导出和系统清理任务。</p></div></section>
+        <section class="page-head"><div><h1>任务中心</h1><p>查看导出和系统清理任务。</p></div></section>
         <section class="job-toolbar"><div class="job-count">当前页 <b>{{jobRows.length}}</b> 项 <span>· 全部 {{jobTotal}} 项</span></div><div class="job-filters"><select v-model="jobTypeFilter"><option value="">全部类型</option><option v-for="(label,key) in jobTypeLabels" :key="key" :value="key">{{label}}</option></select><select v-model="jobStateFilter"><option value="">全部状态</option><option v-for="(label,key) in jobStateLabels" :key="key" :value="key">{{label}}</option></select><label>开始时间<input v-model="jobCreatedFrom" type="datetime-local" step="1" /></label><label>结束时间<input v-model="jobCreatedTo" type="datetime-local" step="1" :min="jobCreatedFrom" /></label><button @click="resetJobFilters">重置</button><button @click="applyJobFilters">筛选</button></div></section>
-        <section v-if="jobRows.length" class="data-table download-table"><div class="table-row head"><span>任务</span><span>任务创建时间</span><span>内容</span><span>进度</span><span>类型</span><span>状态</span><span>操作</span></div><div v-for="job in jobRows" :key="job.id" class="table-row"><span class="job-name"><b :title="jobNameText(job)">{{jobNameText(job)}}</b><small v-if="job.error?.message" :title="jobErrorText(job.error.message)">{{jobErrorText(job.error.message)}}</small></span><span>{{job.created_at ? new Date(job.created_at).toLocaleString('zh-CN') : '时间未知'}}</span><span>{{job.input?.asset_count ?? job.input?.asset_ids?.length ?? (job.input?.asset_id ? 1 : 0)}} 项</span><span class="progress"><i :style="{width:`${job.progress}%`}"></i><small>{{job.progress}}%</small></span><span>{{jobTypeText(job.type)}}</span><span :class="job.state==='failed'?'failed':job.state==='succeeded'?'done':job.state==='cancelled'?'cancelled':''">{{jobStateText(job.state)}}</span><button v-if="jobAction(job)==='download'" class="primary" @click="downloadExport(job.id)">下载</button><button v-else-if="jobAction(job)==='retry'" @click="retryJob(job.id)">重试</button><button v-else-if="jobAction(job)==='cancel'" class="danger-inline" @click="cancelJob(job)">取消</button></div></section>
+        <section v-if="jobRows.length" class="data-table download-table"><div class="table-row head"><span>任务</span><span>任务创建时间</span><span>内容</span><span>大小</span><span>进度</span><span>类型</span><span>状态</span><span>操作</span></div><div v-for="job in jobRows" :key="job.id" class="table-row"><span class="job-name"><b :title="jobNameText(job)">{{jobNameText(job)}}</b><small v-if="job.error?.message" :title="jobErrorText(job.error.message)">{{jobErrorText(job.error.message)}}</small></span><span>{{job.created_at ? new Date(job.created_at).toLocaleString('zh-CN') : '时间未知'}}</span><span>{{job.input?.asset_count ?? job.input?.asset_ids?.length ?? 0}} 项</span><span>{{jobSizeText(job)}}</span><span class="progress"><i :style="{width:`${job.progress}%`}"></i><small>{{job.progress}}%</small></span><span>{{jobTypeText(job.type)}}</span><span :class="job.state==='failed'?'failed':job.state==='succeeded'?'done':job.state==='cancelled'?'cancelled':''">{{jobStateText(job.state)}}</span><button v-if="jobAction(job)==='download'" class="primary" @click="downloadExport(job.id)">下载</button><button v-else-if="jobAction(job)==='retry'" @click="retryJob(job.id)">重试</button><button v-else-if="jobAction(job)==='cancel'" class="danger-inline" @click="cancelJob(job)">取消</button></div></section>
         <div v-if="jobTotal" class="pagination"><span>第 {{jobPage}} / {{jobPages}} 页</span><label>每页 <select v-model="jobPageSize" @change="jobPage=1;loadJobs()"><option :value="20">20</option><option :value="50">50</option><option :value="100">100</option></select> 项</label><button :disabled="jobPage===1" @click="jobPage--;loadJobs()">‹</button><button :disabled="jobPage===jobPages" @click="jobPage++;loadJobs()">›</button></div>
-        <section v-if="!jobTotal" class="empty"><b>暂无符合条件的任务</b><p>上传、导出和系统清理任务会显示在这里。</p><button v-if="jobTypeFilter||jobStateFilter||jobCreatedFrom||jobCreatedTo" @click="resetJobFilters">清除筛选</button><button v-else @click="setPage('library')">返回素材库</button></section>
+        <section v-if="!jobTotal" class="empty"><b>暂无符合条件的任务</b><p>导出和系统清理任务会显示在这里。</p><button v-if="jobTypeFilter||jobStateFilter||jobCreatedFrom||jobCreatedTo" @click="resetJobFilters">清除筛选</button><button v-else @click="setPage('library')">返回素材库</button></section>
       </template>
 
       <template v-else-if="page === 'trash'">
@@ -1798,8 +1854,9 @@ async function revokeActiveRelation() {
       </template>
     </main>
 
-    <aside v-if="activeAsset" class="detail-sheet" :class="{'is-scrolling':detailSheetScrolling,'upload-conflict-detail':uploadOpen&&uploadConflictResult}" @scroll.passive="showDetailScrollbar">
-      <button class="close" @click="mediaViewerOpen=false;detailId=null;detailAsset=null">×</button>
+    <div v-if="activeAsset" class="detail-sheet-stage" :class="{'upload-conflict-stage':uploadOpen&&uploadConflictResult}" @click.self="closeAssetDetail">
+    <aside class="detail-sheet" :class="{'is-scrolling':detailSheetScrolling,'upload-conflict-detail':uploadOpen&&uploadConflictResult}" @scroll.passive="showDetailScrollbar">
+      <button class="close" @click="closeAssetDetail">×</button>
       <button v-if="activeAsset.type==='图片'||activeAsset.type==='视频'" class="media-nav previous" :disabled="!hasPreviousMedia" aria-label="上一个图片或视频" @click="openAdjacentMedia(-1)">‹</button>
       <button v-if="activeAsset.type==='图片'||activeAsset.type==='视频'" class="media-nav next" :disabled="!hasNextMedia" aria-label="下一个图片或视频" @click="openAdjacentMedia(1)">›</button>
       <div class="detail-preview annotation-preview" :class="{'media-detail':activeAsset.type==='图片'||activeAsset.type==='视频'}" :style="[{background:activeAsset.tone},detailMediaStyle]"><img v-if="activeAsset.type==='图片' && (activeAsset.download_url||activeAsset.preview_url)" :src="activeAsset.download_url||activeAsset.preview_url" :alt="activeAsset.name" title="点击查看原图" @click="openMediaViewer" /><video v-else-if="activeAsset.type==='视频' && activeAsset.download_url" :src="activeAsset.download_url" :poster="activeAsset.preview_url" preload="metadata" title="点击查看原视频" @click="openMediaViewer">当前浏览器不支持播放此视频</video><svg v-if="activeAsset.type==='图片' && activeAnnotationSource?.items?.length" class="annotation-layer" viewBox="0 0 100 100" preserveAspectRatio="none"><g v-for="item in activeAnnotationSource.items" :key="item.id"><polygon v-for="(polygon,index) in item.polygons || []" :key="`${item.id}-${index}`" :points="polygonPoints(polygon)" :fill="annotationColor(item.label)" fill-opacity=".18" :stroke="annotationColor(item.label)" vector-effect="non-scaling-stroke" /><rect :x="item.bbox.x*100" :y="item.bbox.y*100" :width="item.bbox.width*100" :height="item.bbox.height*100" fill="none" :stroke="annotationColor(item.label)" vector-effect="non-scaling-stroke" /><text :x="item.bbox.x*100" :y="Math.max(3,item.bbox.y*100)" :fill="annotationColor(item.label)" vector-effect="non-scaling-stroke">{{item.label}}{{item.confidence!=null?` ${(item.confidence*100).toFixed(0)}%`:''}}</text></g></svg><b v-if="activeAsset.type!=='图片'&&activeAsset.type!=='视频'">{{activeAsset.type}}</b><span>{{activeAsset.mark}}</span></div>
@@ -1815,14 +1872,17 @@ async function revokeActiveRelation() {
         <a v-if="activeAsset.download_url" class="primary full button-link" :href="activeAsset.download_url" :download="activeAsset.name">下载原文件</a>
       </div>
     </aside>
+    </div>
 
-    <aside v-if="activeRelation" class="detail-sheet relation-detail" :class="{'is-scrolling':detailSheetScrolling}" @scroll.passive="showDetailScrollbar">
-      <button class="close" @click="relationDetailId=null;relationDetailData=null">×</button>
+    <div v-if="activeRelation" class="detail-sheet-stage" @click.self="closeRelationDetail">
+    <aside class="detail-sheet relation-detail" :class="{'is-scrolling':detailSheetScrolling}" @scroll.passive="showDetailScrollbar">
+      <button class="close" @click="closeRelationDetail">×</button>
       <h2>{{activeRelation.relation}}</h2>
       <div class="relation-route"><div><button v-if="activeRelation.sourceAsset&&['image','video'].includes(activeRelation.sourceAsset.type)" class="relation-media-thumb" @click="openRelationMedia(activeRelation.sourceAsset)"><img v-if="activeRelation.sourceAsset.preview_url" :src="activeRelation.sourceAsset.preview_url" :alt="activeRelation.source" /><span v-else>{{activeRelation.sourceType}}</span></button><small>源资产 · {{activeRelation.sourceType}}</small><b :title="activeRelation.source">{{activeRelation.source}}</b></div><span>→</span><div><button v-if="activeRelation.targetAsset&&['image','video'].includes(activeRelation.targetAsset.type)" class="relation-media-thumb" @click="openRelationMedia(activeRelation.targetAsset)"><img v-if="activeRelation.targetAsset.preview_url" :src="activeRelation.targetAsset.preview_url" :alt="activeRelation.target" /><span v-else>{{activeRelation.targetType}}</span></button><small>目标资产 · {{activeRelation.targetType}}</small><b :title="activeRelation.target">{{activeRelation.target}}</b></div></div>
       <dl><dt>当前状态</dt><dd><span :class="activeRelation.status==='生效中'?'ok':'failed'">{{activeRelation.status}}</span></dd><dt>创建人</dt><dd>{{activeRelation.operator}}</dd><dt>创建时间</dt><dd>{{activeRelation.createdAt}}</dd><dt>来源</dt><dd>{{activeRelation.origin}}</dd><template v-if="activeRelation.status==='已撤销'"><dt>撤销原因</dt><dd>{{activeRelation.revokeReason || '未填写'}}</dd></template></dl>
       <section v-if="activeRelation.status==='生效中'" class="revoke-preview"><b>撤销关联关系</b><textarea v-model="revokeReason" placeholder="撤销原因（选填）" rows="3"></textarea><button @click="revokeActiveRelation">确认撤销关系</button></section>
     </aside>
+    </div>
 
     <div v-if="toast" class="toast" :class="`toast-${toastKind}`"><template v-if="toastKind==='success'">✓ </template>{{ toast }}</div>
     <div v-if="showLogin" class="login-stage">

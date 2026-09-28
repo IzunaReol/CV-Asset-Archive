@@ -2,7 +2,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class Role(StrEnum):
@@ -156,7 +156,17 @@ class DatasetUpdate(BaseModel):
 
 
 class DatasetMembersRequest(BaseModel):
-    asset_ids: list[str] = Field(min_length=1, max_length=100000)
+    asset_ids: list[str] = Field(default_factory=list, max_length=100000)
+    selection_id: str | None = None
+    excluded_ids: list[str] = Field(default_factory=list, max_length=5000)
+
+    @model_validator(mode="after")
+    def validate_selection(self):
+        if bool(self.asset_ids) == bool(self.selection_id):
+            raise ValueError("必须且只能使用素材 ID 或服务端选择集")
+        if self.excluded_ids and not self.selection_id:
+            raise ValueError("排除项只能与服务端选择集一起使用")
+        return self
 
 
 class DatasetPublishRequest(BaseModel):

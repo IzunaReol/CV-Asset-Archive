@@ -392,6 +392,7 @@ def import_cvat_yolo_bundle(path: Path, bundle: dict) -> dict:
                 image_asset = {
                     "id": image_id,
                     "name": image_name,
+                    "normalized_name": image_name.casefold(),
                     "type": "image",
                     "object_key": object_key,
                     "sha256": hashlib.sha256(image_bytes).hexdigest(),
@@ -439,6 +440,7 @@ def import_cvat_yolo_bundle(path: Path, bundle: dict) -> dict:
                 annotation_asset = {
                     "id": annotation_id,
                     "name": annotation_name,
+                    "normalized_name": annotation_name.casefold(),
                     "type": "annotation",
                     "object_key": object_key,
                     "sha256": hashlib.sha256(label_bytes).hexdigest(),
@@ -612,6 +614,7 @@ def import_cvat_annotation_bundle(path: Path, bundle: dict) -> dict:
                 asset = {
                     "id": image_id,
                     "name": image_name,
+                    "normalized_name": image_name.casefold(),
                     "type": "image",
                     "object_key": object_key,
                     "sha256": hashlib.sha256(image_bytes).hexdigest(),
@@ -660,6 +663,7 @@ def import_cvat_annotation_bundle(path: Path, bundle: dict) -> dict:
                 annotation_asset = {
                     "id": annotation_id,
                     "name": annotation_name,
+                    "normalized_name": annotation_name.casefold(),
                     "type": "annotation",
                     "object_key": object_key,
                     "sha256": hashlib.sha256(content).hexdigest(),
@@ -943,6 +947,7 @@ def build_export(job_id: str) -> None:
             export_name = str(job.get("name") or job_id).replace("/", "_").replace("\\", "_")
             object_key = f"exports/{job_id}/{export_name}.zip"
             content_type = mimetypes.guess_type(zip_path.name)[0] or "application/zip"
+            result_size = zip_path.stat().st_size
             storage.fput_object(MINIO_BUCKET, object_key, str(zip_path), content_type=content_type)
         if job_cancelled(job_id):
             storage.remove_object(MINIO_BUCKET, object_key)
@@ -953,7 +958,7 @@ def build_export(job_id: str) -> None:
                 "$set": {
                     "state": "succeeded",
                     "progress": 100,
-                    "result": {"object_key": object_key, "asset_count": asset_count},
+                    "result": {"object_key": object_key, "asset_count": asset_count, "size": result_size},
                     "updated_at": utcnow(),
                 }
             },
