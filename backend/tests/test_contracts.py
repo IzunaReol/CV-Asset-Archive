@@ -8,12 +8,15 @@ from app.schemas import (
     DatasetMembersRequest,
     DatasetModelLinkRequest,
     DatasetPublishRequest,
+    JobState,
+    RelationFilterType,
     RelationCreate,
     RevokeRelationRequest,
     SavedViewUpdate,
     TagDefinitionCreate,
     TagDefinitionUpdate,
     UploadInitRequest,
+    VisibleJobType,
 )
 from app.utils import public_document
 from app.routers.relations import filename_stem, relation_type_error
@@ -40,6 +43,15 @@ def test_upload_rejects_empty_files():
 def test_archive_upload_types_are_supported():
     assert AssetType("archive") is AssetType.ARCHIVE
     assert AssetType("image_annotation") is AssetType.IMAGE_ANNOTATION
+
+
+def test_filter_enums_reject_unknown_values():
+    assert VisibleJobType("export") is VisibleJobType.EXPORT
+    assert JobState("failed") is JobState.FAILED
+    assert RelationFilterType("trained_on") is RelationFilterType.TRAINED_ON
+    for enum_type, value in ((VisibleJobType, "process_asset"), (JobState, "done"), (RelationFilterType, "contains")):
+        with pytest.raises(ValueError):
+            enum_type(value)
 
 
 def test_relation_revoke_reason_is_optional_and_unlimited():

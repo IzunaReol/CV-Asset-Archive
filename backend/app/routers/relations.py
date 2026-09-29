@@ -14,6 +14,8 @@ from ..schemas import (
     AnnotationMatchPreviewRequest,
     RelationBatchRequest,
     RelationCreate,
+    RelationFilterType,
+    RelationStatus,
     RevokeRelationRequest,
 )
 from ..utils import new_id, now, public_document
@@ -399,9 +401,9 @@ async def preview_annotation_matches(
 async def list_relations(
     user: ReadUser,
     q: str = "",
-    relation_type: str | None = None,
+    relation_type: RelationFilterType | None = None,
     created_by: str = "",
-    status: str | None = Query(None, pattern="^(active|revoked)$"),
+    status: RelationStatus | None = Query(None),
     created_from: str | None = None,
     created_to: str | None = None,
     page: int = Query(1, ge=1),
@@ -413,9 +415,9 @@ async def list_relations(
         {"relation_type": "trained_on", "target_id": {"$in": version_ids}},
     ]}]
     if status:
-        clauses.append({"status": status})
+        clauses.append({"status": getattr(status, "value", status)})
     if relation_type:
-        clauses.append({"relation_type": relation_type})
+        clauses.append({"relation_type": getattr(relation_type, "value", relation_type)})
     if created_by.strip():
         clauses.append(
             {"created_by_name": {"$regex": re.escape(created_by.strip()), "$options": "i"}}

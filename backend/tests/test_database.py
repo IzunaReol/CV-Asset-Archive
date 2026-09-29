@@ -14,6 +14,7 @@ async def test_ensure_indexes_creates_all_required_indexes(monkeypatch):
             "users", "refresh_sessions", "assets", "relations", "collections", "datasets",
             "dataset_memberships", "dataset_versions", "dataset_version_memberships", "jobs",
             "asset_selection_sets", "upload_sessions", "tag_definitions", "audit_logs",
+            "maintenance_runs",
         )
     }
     monkeypatch.setattr(database, "db", SimpleNamespace(**collections))
@@ -24,6 +25,7 @@ async def test_ensure_indexes_creates_all_required_indexes(monkeypatch):
     assert collections["assets"].create_index.await_count == 5
     assert collections["relations"].create_index.await_count == 3
     assert collections["jobs"].create_index.await_count == 5
+    assert collections["maintenance_runs"].create_index.await_count == 1
     normalized_index = collections["assets"].create_index.await_args_list[3].args[0]
     assert ("normalized_name", 1) in normalized_index
     assert collections["relations"].create_index.await_args_list[0].kwargs == {"unique": True}

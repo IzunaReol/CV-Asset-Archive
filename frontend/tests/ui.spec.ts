@@ -116,6 +116,20 @@ test('手机宽度下任务状态和操作按钮保持在视口内', async ({ pa
   expect((box?.x || 0) + (box?.width || 0)).toBeLessThanOrEqual(390)
 })
 
+test('弹窗支持标准语义、自动聚焦、Esc 关闭并归还焦点', async ({ page }) => {
+  await mockApi(page)
+  await page.addInitScript(value => localStorage.setItem('cv-archive-session', JSON.stringify(value)), tokens)
+  await page.goto('/')
+  const trigger = page.getByRole('button', { name: '＋ 上传素材' })
+  await trigger.click()
+  const dialog = page.getByRole('dialog', { name: '上传素材' })
+  await expect(dialog).toBeVisible()
+  await expect.poll(() => dialog.evaluate(element => element.contains(document.activeElement))).toBe(true)
+  await page.keyboard.press('Escape')
+  await expect(dialog).toHaveCount(0)
+  await expect(trigger).toBeFocused()
+})
+
 test('关联关系支持数据集分页加载和独立重置', async ({ page }) => {
   await mockApi(page)
   await page.addInitScript(value => localStorage.setItem('cv-archive-session', JSON.stringify(value)), tokens)

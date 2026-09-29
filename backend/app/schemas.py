@@ -31,6 +31,37 @@ class RelationType(StrEnum):
     VERSION_OF = "version_of"
 
 
+class RelationFilterType(StrEnum):
+    ANNOTATES = "annotates"
+    TRAINED_ON = "trained_on"
+
+
+class RelationStatus(StrEnum):
+    ACTIVE = "active"
+    REVOKED = "revoked"
+
+
+class JobType(StrEnum):
+    PROCESS_ASSET = "process_asset"
+    EXPORT = "export"
+    DATASET_EXPORT = "dataset_export"
+    TRASH_EMPTY = "trash_empty"
+
+
+class VisibleJobType(StrEnum):
+    EXPORT = "export"
+    DATASET_EXPORT = "dataset_export"
+    TRASH_EMPTY = "trash_empty"
+
+
+class JobState(StrEnum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
 class LoginRequest(BaseModel):
     username: str
     password: str

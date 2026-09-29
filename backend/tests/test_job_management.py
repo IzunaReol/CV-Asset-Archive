@@ -72,7 +72,8 @@ def test_task_center_backfills_export_file_size(monkeypatch):
 
     result = asyncio.run(jobs.backfill_export_sizes())
 
-    assert result == 1
+    assert result["succeeded"] == 1
+    assert result["failed"] == 0
     update_one.assert_awaited_once_with(
         {"id": "job-1", "result.size": {"$exists": False}},
         {"$set": {"result.size": 3145728}},
@@ -97,7 +98,62 @@ def test_task_center_backfill_continues_when_write_fails(monkeypatch):
 
     result = asyncio.run(jobs.backfill_export_sizes())
 
-    assert result == 0
+    assert result["succeeded"] == 0
+    assert result["failed"] == 1
+    assert result["failures"][0]["job_id"] == "job-1"
+
+
+def test_task_center_backfill_recovers_after_object_storage_returns(monkeypatch):
+    job = {"id": "job-1", "type": "export", "state": "succeeded", "result": {"object_key": "exports/job-1/archive.zip"}}
+    update_one = AsyncMock(return_value=SimpleNamespace(modified_count=1))
+    database = SimpleNamespace(jobs=SimpleNamespace(find=lambda *args, **kwargs: AsyncRows([job]), update_one=update_one))
+    attempts = iter([RuntimeError("storage unavailable"), SimpleNamespace(size=2048)])
+    monkeypatch.setattr(jobs, "db", database)
+    monkeypatch.setattr(jobs, "stat_object", lambda object_key: (_ for _ in ()).throw(value) if isinstance((value := next(attempts)), Exception) else value)
+
+    first = asyncio.run(jobs.backfill_export_sizes())
+    second = asyncio.run(jobs.backfill_export_sizes())
+
+    assert first["failed"] == 1
+    assert second["succeeded"] == 1
+
+
+def test_task_center_backfill_recovers_after_database_returns(monkeypatch):
+    job = {"id": "job-1", "type": "export", "state": "succeeded", "result": {"object_key": "exports/job-1/archive.zip"}}
+    calls = 0
+    def find(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("database unavailable")
+        return AsyncRows([job])
+    database = SimpleNamespace(jobs=SimpleNamespace(find=find, update_one=AsyncMock(return_value=SimpleNamespace(modified_count=1))))
+    monkeypatch.setattr(jobs, "db", database)
+    monkeypatch.setattr(jobs, "stat_object", lambda object_key: SimpleNamespace(size=4096))
+
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        asyncio.run(jobs.backfill_export_sizes())
+    recovered = asyncio.run(jobs.backfill_export_sizes())
+
+    assert recovered["succeeded"] == 1
+
+
+def test_task_center_backfill_does_not_block_valid_job_after_corrupted_object(monkeypatch):
+    broken = {"id": "broken", "type": "export", "state": "succeeded", "result": {"object_key": "exports/broken.zip"}}
+    valid = {"id": "valid", "type": "export", "state": "succeeded", "result": {"object_key": "exports/valid.zip"}}
+    database = SimpleNamespace(jobs=SimpleNamespace(find=lambda *args, **kwargs: AsyncRows([broken, valid]), update_one=AsyncMock(return_value=SimpleNamespace(modified_count=1))))
+    monkeypatch.setattr(jobs, "db", database)
+    def stat(object_key):
+        if "broken" in object_key:
+            raise RuntimeError("corrupted object")
+        return SimpleNamespace(size=8192)
+    monkeypatch.setattr(jobs, "stat_object", stat)
+
+    result = asyncio.run(jobs.backfill_export_sizes())
+
+    assert result["processed"] == 2
+    assert result["succeeded"] == 1
+    assert result["failed"] == 1
 
 
 def test_task_center_listing_does_not_read_object_storage(monkeypatch):

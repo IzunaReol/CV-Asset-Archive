@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { api } from './api'
+import { useDialogAccessibility } from './dialogAccessibility'
 
 type DemoState = 'normal' | 'loading' | 'empty' | 'error' | 'forbidden'
 type DatasetTab = 'overview' | 'members' | 'versions' | 'models'
@@ -152,6 +153,18 @@ function removeModelRelation(model:any){ask(`确定删除“${model.name}”与�
 async function loadVersionCompare(){if(!compareOpen.value||!compareFrom.value||!compareTo.value||compareFrom.value===compareTo.value)return;try{const result=await api.compareDatasetVersions(activeDataset.value.id,compareFrom.value,compareTo.value);diffStats.value=result.counts;const grouped:Record<string,any>={};const add=(type:string,action:string,name:string)=>{const label=typeLabels[type]||'其他';const group=grouped[label]||={type:label,count:0,added:0,removed:0,changed:0,items:[]};group.count+=1;if(action==='新增')group.added+=1;else if(action==='移除')group.removed+=1;else group.changed+=1;group.items.push([action,name])};result.added.forEach((item:any)=>add(item.snapshot.type,'新增',item.snapshot.name));result.removed.forEach((item:any)=>add(item.snapshot.type,'移除',item.snapshot.name));result.changed.forEach((item:any)=>add(item.after.type,'信息变化',item.after.name));diffGroups.value=Object.values(grouped);expandedDiffGroup.value=diffGroups.value[0]?.type||''}catch(error){emit('notify',error instanceof Error?error.message:'版本对比加载失败','error')}}
 function restoreVersion(version:any) { ask(`确定将 ${version.version} 的数据恢复到当前数据集吗？`,async()=>{await api.restoreDatasetVersion(activeDataset.value.id,version.id);activeTab.value='members';await refreshActiveDataset();emit('notify',`${version.version} 已恢复到数据集`)}) }
 function exportDataset() { ask('将按照当前数据集进行导出，确定要导出吗？',async()=>{await api.exportDataset(activeDataset.value.id);emit('export',{name:activeDataset.value.name,members:activeDataset.value.members});emit('notify','数据集导出任务已加入任务中心')}) }
+const openDialogCount = computed(() => [createOpen.value,editOpen.value,publishOpen.value,compareOpen.value,copyTarget.value,addMembersOpen.value,modelOpen.value,versionDetail.value,confirmOpen.value].filter(Boolean).length)
+function closeTopDialog(){
+  if(confirmOpen.value&&!operationBusy.value){confirmOpen.value=false;confirmAction.value=null;return}
+  if(versionDetail.value){versionDetail.value=null;return}
+  if(modelOpen.value&&!operationBusy.value){modelOpen.value=false;return}
+  if(addMembersOpen.value&&!candidateLoading.value){addMembersOpen.value=false;return}
+  if(copyTarget.value&&!copyBusy.value){copyTarget.value=null;return}
+  if(compareOpen.value){compareOpen.value=false;return}
+  if(publishOpen.value&&!operationBusy.value){publishOpen.value=false;return}
+  if((createOpen.value||editOpen.value)&&!operationBusy.value){createOpen.value=false;editOpen.value=false}
+}
+useDialogAccessibility(openDialogCount,closeTopDialog)
 watch([query,statusFilter,creatorFilter,updatedFilter,pageSize],()=>{page.value=1;if(view.value==='list')void loadDatasets()})
 watch(page,()=>{if(view.value==='list')void loadDatasets()})
 watch(memberPage,()=>void loadMembers())

@@ -53,9 +53,8 @@ async def lifespan(_: FastAPI):
     async def backfill_export_sizes() -> None:
         while True:
             try:
-                updated = await jobs.backfill_export_sizes()
-                if updated:
-                    logger.info({"event": "export_sizes_backfilled", "count": updated})
+                result = await jobs.backfill_export_sizes()
+                logger.info({"event": "export_sizes_backfilled", **result})
             except Exception as exc:
                 logger.warning({"event": "export_size_backfill_failed", "error": type(exc).__name__})
             await asyncio.sleep(3600)
@@ -73,7 +72,7 @@ async def lifespan(_: FastAPI):
             pass
 
 
-app = FastAPI(title="CV Archive API", version="1.5.0", lifespan=lifespan)
+app = FastAPI(title="CV Archive API", version="1.5.1", lifespan=lifespan)
 app.add_exception_handler(AppError, app_error_handler)
 app.add_middleware(
     CORSMiddleware,

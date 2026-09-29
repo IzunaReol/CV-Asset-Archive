@@ -126,13 +126,13 @@ npm run test:ui
 npm run build
 ```
 
-The isolated API workflow test is available at `scripts/runtime-e2e.py`. See the [testing guide](docs/testing.md) and [v1.5.0 release checklist](docs/release-checklist.md) for the full scope.
+The isolated API workflow test is available at `scripts/runtime-e2e.py`. See the [testing guide](docs/testing.md) and [v1.5.1 release checklist](docs/release-checklist.md) for the full scope.
 
-## Preparing to upgrade to v1.5.0
+## Preparing to upgrade to v1.5.1
 
-Back up MongoDB, MinIO, and deployment configuration before upgrading from v1.4.0. Update the source and dependencies, rebuild the frontend, and verify large batch uploads, duplicate handling, dataset bulk selection, relationship resets, task file sizes, and right-side detail panels. Data migrations run automatically when the service starts.
+Back up MongoDB, MinIO, and deployment configuration before upgrading from v1.5.0. Update the source and dependencies, rebuild the frontend, and verify dialog keyboard behavior, relationship pagination, invalid filter handling, and historical export-size backfill. The new maintenance-run index is created automatically at startup.
 
-See the [dataset guide](docs/datasets.md) and [v1.5.0 release notes](docs/releases/v1.5.0.md) for added features and changes.
+See the [dataset guide](docs/datasets.md) and [v1.5.1 release notes](docs/releases/v1.5.1.md) for added features and changes.
 
 ## Documentation
 

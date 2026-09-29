@@ -53,6 +53,7 @@ async def ensure_indexes() -> None:
     )
     await db.jobs.create_index([("state", ASCENDING), ("updated_at", ASCENDING)])
     await db.jobs.create_index("expires_at", expireAfterSeconds=0)
+    await db.maintenance_runs.create_index([("type", ASCENDING), ("last_run_at", DESCENDING)])
     await db.asset_selection_sets.create_index("id", unique=True)
     await db.asset_selection_sets.create_index("expires_at", expireAfterSeconds=0)
     await db.upload_sessions.create_index("expires_at", expireAfterSeconds=0)

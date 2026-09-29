@@ -187,3 +187,12 @@ html.is-scrolling::-webkit-scrollbar-thumb { background:color-mix(in srgb,#71809
 .relation-select-options{position:absolute;top:calc(100% + 5px);left:0;right:0;z-index:30;max-height:240px;overflow-y:auto;padding:5px;border:1px solid var(--line);border-radius:8px;background:var(--panel);box-shadow:0 10px 28px #0003}
 .relation-select-options button{display:block;width:100%;padding:9px 10px;border:0;border-radius:5px;background:transparent;color:var(--ink);text-align:left;font:inherit}
 .relation-select-options button:hover,.relation-select-options button.active{background:var(--accent-soft);color:var(--accent)}
+
+.upload-dialog,.detail-sheet,.media-viewer { overflow-wrap:anywhere; }
+.dialog-actions,.pagination,.picker-pagination { flex-wrap:wrap; }
+.pagination-ellipsis { min-width:20px;text-align:center;color:var(--muted); }
+@media (max-width:760px) {
+  .modal-stage { padding:12px; }
+  .modal-stage>.upload-dialog { width:calc(100vw - 24px);max-width:none;max-height:calc(100vh - 24px);box-sizing:border-box; }
+  .dialog-actions>button { flex:1 1 120px; }
+}

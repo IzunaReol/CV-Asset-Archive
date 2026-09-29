@@ -1,10 +1,11 @@
-.state-panel { min-height:420px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:9px; color:var(--muted); text-align:center; }
+.state-panel,.empty,.picker-empty { min-height:220px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:9px; color:var(--muted); text-align:center; }
 .state-panel>b { color:var(--ink); font-size:18px; }
 .state-panel p { margin:0 0 8px; }
 .state-panel>span { width:42px; height:42px; border:1px solid var(--line); border-radius:50%; display:grid; place-items:center; font-size:20px; color:var(--accent); }
 .state-panel button { border:1px solid var(--line); border-radius:7px; background:var(--panel); color:var(--ink); padding:9px 14px; }
 .spinner { width:34px; height:34px; border:3px solid var(--line); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; }
 .error-state>span { color:#b6453c; }
+.state-panel:focus-visible,.empty:focus-visible { outline:2px solid var(--accent); outline-offset:-4px; }
 @keyframes spin { to { transform:rotate(360deg); } }
 
 .login-stage { position:fixed; z-index:100; inset:0; background:linear-gradient(135deg,#0d1718eF,#243437eF); display:grid; place-items:center; padding:20px; }

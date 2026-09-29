@@ -35,7 +35,7 @@
 - 关系详情：`GET /relations/{id}`、`GET /relations/{id}/revoke-preview`、`POST /relations/{id}/revoke`、`GET /relations/graph/{asset_id}`
 - 数据集：`GET|POST /datasets`、`GET /datasets/options`、`GET /datasets/{id}`、`GET|POST|DELETE /datasets/{id}/members`、`POST /datasets/{id}/members/preview`、`POST /datasets/{id}/members/status`、`GET /datasets/{id}/tag-distribution`、`POST /datasets/{id}/versions`、`GET /datasets/{id}/versions/{version_id}`、`GET /datasets/{id}/compare`、`POST /datasets/{id}/restore`、`GET|POST /datasets/{id}/models`、`POST /datasets/{id}/export`
 - 集合与视图：`GET|POST /collections`、`POST /collections/{id}/freeze`、`GET|POST /saved-views`
-- 任务与下载：`POST /exports`、`GET /jobs`、`GET /jobs/{id}`、`POST /jobs/{id}/retry`、`POST /jobs/{id}/cancel`、`GET /exports/{id}/download-url`
+- 任务与下载：`POST /exports`、`GET /jobs`、`GET /jobs/{id}`、`GET /jobs/maintenance/export-size-backfill`、`POST /jobs/{id}/retry`、`POST /jobs/{id}/cancel`、`GET /exports/{id}/download-url`
 - 管理：`/tag-definitions`、`/format-definitions`、`/users`、`/roles`、`/audit-logs`
 
 CVAT 在线任务和 MLflow 接口尚未实现。

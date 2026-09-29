@@ -5,6 +5,7 @@ import DatasetView from './DatasetView.vue'
 import { canDeleteTag, jobAction } from './uiPolicy'
 import { UploadPauseController } from './uploadPause'
 import { jobPollDelay } from './sessionPolicy'
+import { useDialogAccessibility } from './dialogAccessibility'
 
 type Page = 'library' | 'datasets' | 'relations' | 'lineage' | 'downloads' | 'trash' | 'tags' | 'formats' | 'admin'
 type Skin = 'light' | 'command'
@@ -229,7 +230,9 @@ const hasPreviousMedia = computed(() => activeMediaIndex.value > 0)
 const hasNextMedia = computed(() => activeMediaIndex.value >= 0 && activeMediaIndex.value < mediaPageAssets.value.length - 1)
 const pagedRelations = computed(() => relationHistory.value)
 const relationPages = computed(() => Math.max(1, Math.ceil(relationTotal.value / relationPageSize.value)))
+const visibleRelationPages = computed(() => Array.from({length:relationPages.value},(_,index)=>index+1).filter(num => num===1 || num===relationPages.value || Math.abs(num-relationPage.value)<=1))
 const activeRelation = computed(() => relationDetailData.value || relationHistory.value.find((item) => item.id === relationDetailId.value) || lineageEdges.value.find((item:any) => item.id === relationDetailId.value))
+const openDialogCount = computed(() => [activeAsset.value,activeRelation.value,uploadOpen.value,batchTagOpen.value,collectionOpen.value,savedViewOpen.value,tagOpen.value,confirmOpen.value,userOpen.value,mediaViewerOpen.value&&viewerAsset.value,formatOpen.value,relationPickerOpen.value,relationPreviewOpen.value].filter(Boolean).length)
 const selectedCount = computed(() => selectedSetId.value ? selectedSetTotal.value - selectedSetExcluded.value.length : selected.value.length)
 const allCurrentSelected = computed(() => Boolean(filtered.value.length) && filtered.value.every(asset => isAssetSelected(asset.id)))
 const relationPickerSelectedIds = computed(() => relationPickerSelection.value.map(item => String(item.id)))
@@ -1265,6 +1268,24 @@ function closeRelationDetail() {
   relationDetailData.value=null
 }
 
+function closeTopDialog() {
+  if (mediaViewerOpen.value) return closeMediaViewer()
+  if (activeAsset.value) return closeAssetDetail()
+  if (activeRelation.value) return closeRelationDetail()
+  if (relationPreviewOpen.value && !relationSubmitting.value) { relationPreviewOpen.value=false; return }
+  if (relationPickerOpen.value) { relationPickerOpen.value=false; return }
+  if (formatOpen.value) { formatOpen.value=false; return }
+  if (userOpen.value) { userOpen.value=false; return }
+  if (confirmOpen.value && !confirmBusy.value) return cancelConfirmation()
+  if (tagOpen.value) { tagOpen.value=false; return }
+  if (savedViewOpen.value) { savedViewOpen.value=false; return }
+  if (collectionOpen.value) { collectionOpen.value=false; return }
+  if (batchTagOpen.value) { batchTagOpen.value=false; return }
+  if (uploadOpen.value && !uploadBusy.value) uploadOpen.value=false
+}
+
+useDialogAccessibility(openDialogCount, closeTopDialog)
+
 async function changeRelationDataset() {
   relationVersionId.value=''
   relationVersions.value=[]
@@ -1805,7 +1826,7 @@ async function revokeActiveRelation() {
           <div class="section-title"><div><h2>历史关联关系</h2></div><label>每页 <select v-model="relationPageSize" @change="relationPage=1;loadRelations()"><option :value="10">10 条</option><option :value="20">20 条</option><option :value="50">50 条</option></select></label></div>
           <div class="relation-history-filters"><input v-model="relationHistoryQuery" placeholder="搜索素材名称或备注" @keyup.enter="relationPage=1;loadRelations()" /><select v-model="relationHistoryType"><option value="">全部关系</option><option v-for="(label,key) in historyRelationTypeLabels" :key="key" :value="key">{{label}}</option></select><select v-model="relationHistoryStatus"><option value="">全部状态</option><option value="active">生效中</option><option value="revoked">已撤销</option></select><input v-model="relationHistoryCreator" placeholder="创建人" /><label>开始时间<input v-model="relationHistoryFrom" type="datetime-local" step="1" /></label><label>结束时间<input v-model="relationHistoryTo" type="datetime-local" step="1" :min="relationHistoryFrom" /></label><button @click="resetRelationHistoryFilters">重置</button><button @click="relationPage=1;loadRelations()">筛选</button></div>
           <div class="relation-table"><div class="relation-row head"><span>源资产</span><span>关系</span><span>目标资产</span><span>创建人</span><span>创建时间</span><span>状态</span><span></span></div><button v-for="item in pagedRelations" :key="item.id" class="relation-row" @click="openRelationDetail(item)"><span><i>{{item.sourceType}}</i><b>{{item.source}}</b></span><strong>{{item.relation}}</strong><span><i>{{item.targetType}}</i><b>{{item.target}}</b></span><span>{{item.operator}}</span><span>{{item.createdAt}}</span><em :class="item.status==='生效中'?'active':'revoked'">{{item.status}}</em><u>详情 ›</u></button></div>
-          <div class="pagination"><span>共 {{relationTotal}} 条</span><button :disabled="relationPage===1" @click="relationPage--;loadRelations()">‹</button><button v-for="num in relationPages" :key="num" :class="{active:relationPage===num}" @click="relationPage=num;loadRelations()">{{num}}</button><button :disabled="relationPage===relationPages" @click="relationPage++;loadRelations()">›</button></div>
+          <div class="pagination"><span>共 {{relationTotal}} 条</span><button :disabled="relationPage===1" @click="relationPage--;loadRelations()">‹</button><template v-for="(num,index) in visibleRelationPages" :key="num"><span v-if="index>0&&num-visibleRelationPages[index-1]>1" class="pagination-ellipsis">…</span><button :class="{active:relationPage===num}" @click="relationPage=num;loadRelations()">{{num}}</button></template><button :disabled="relationPage===relationPages" @click="relationPage++;loadRelations()">›</button></div>
         </section>
       </template>
 
@@ -1886,10 +1907,10 @@ async function revokeActiveRelation() {
 
     <div v-if="toast" class="toast" :class="`toast-${toastKind}`"><template v-if="toastKind==='success'">✓ </template>{{ toast }}</div>
     <div v-if="showLogin" class="login-stage">
-      <section class="login-card">
+      <section class="login-card" role="dialog" aria-modal="true" aria-labelledby="login-title">
         <div class="login-brand"><span class="brand-mark">VA</span><b>视觉资产库</b></div>
-        <h1>登录</h1>
-        <label>用户名<input v-model="loginUsername" autocomplete="username" @keyup.enter="login" /></label><label>密码<input v-model="loginPassword" type="password" autocomplete="current-password" @keyup.enter="login" /></label>
+        <h1 id="login-title">登录</h1>
+        <label>用户名<input v-model="loginUsername" autofocus autocomplete="username" @keyup.enter="login" /></label><label>密码<input v-model="loginPassword" type="password" autocomplete="current-password" @keyup.enter="login" /></label>
         <div class="login-option"><label><input v-model="loginRemember" type="checkbox" /> 保持登录</label></div>
         <p v-if="loginError" class="form-error">{{loginError}}</p>
         <button class="primary full" :disabled="loginBusy" @click="login">{{loginBusy?'正在登录…':'登录'}}</button>

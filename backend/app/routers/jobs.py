@@ -8,9 +8,9 @@ from fastapi import APIRouter, Query, Request
 from ..audit import record_audit
 from ..config import get_settings
 from ..database import db
-from ..dependencies import ReadUser, WriteUser
+from ..dependencies import ManageUser, ReadUser, WriteUser
 from ..errors import AppError
-from ..schemas import ExportCreate
+from ..schemas import ExportCreate, JobState, VisibleJobType
 from ..storage import presigned_get, stat_object
 from ..utils import new_id, now, public_document
 from .assets import resolve_selection_ids
@@ -28,7 +28,7 @@ TASK_NAMES = {
 CANCELLABLE_JOB_TYPES = {"export", "dataset_export"}
 
 
-async def _backfill_export_size(job: dict[str, Any], semaphore: asyncio.Semaphore) -> bool:
+async def _backfill_export_size(job: dict[str, Any], semaphore: asyncio.Semaphore) -> dict[str, Any]:
     result = job.get("result")
     if (
         job.get("state") != "succeeded"
@@ -37,21 +37,34 @@ async def _backfill_export_size(job: dict[str, Any], semaphore: asyncio.Semaphor
         or result.get("size") is not None
         or not result.get("object_key")
     ):
-        return False
+        return {"job_id": job.get("id"), "succeeded": False, "skipped": True}
     async with semaphore:
         try:
             obj = await asyncio.to_thread(stat_object, result["object_key"])
             size = int(obj.size)
+            if size < 0:
+                raise ValueError("对象大小无效")
             updated = await db.jobs.update_one(
                 {"id": job["id"], "result.size": {"$exists": False}},
                 {"$set": {"result.size": size}},
             )
-            return bool(updated.modified_count)
-        except Exception:  # noqa: BLE001 - one unavailable object must not stop the batch
-            return False
+            return {"job_id": job["id"], "succeeded": True, "updated": bool(updated.modified_count), "size": size}
+        except Exception as exc:  # noqa: BLE001 - one unavailable object must not stop the batch
+            try:
+                await db.jobs.update_one(
+                    {"id": job.get("id")},
+                    {"$set": {
+                        "result.size_backfill_checked_at": now(),
+                        "result.size_backfill_last_error": f"{type(exc).__name__}: {str(exc)[:300]}",
+                    }},
+                )
+            except Exception:  # noqa: BLE001 - report the original failure and retry next cycle
+                pass
+            return {"job_id": job.get("id"), "succeeded": False, "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
 
 
-async def backfill_export_sizes(limit: int = 100) -> int:
+async def backfill_export_sizes(limit: int = 100) -> dict[str, Any]:
+    started_at = now()
     cursor = db.jobs.find(
         {
             "type": {"$in": sorted(CANCELLABLE_JOB_TYPES)},
@@ -59,13 +72,30 @@ async def backfill_export_sizes(limit: int = 100) -> int:
             "result.object_key": {"$exists": True},
             "result.size": {"$exists": False},
         }
-    ).sort([("created_at", -1)]).limit(limit)
+    ).sort([("result.size_backfill_checked_at", 1), ("created_at", 1)]).limit(limit)
     pending = [item async for item in cursor]
-    if not pending:
-        return 0
     semaphore = asyncio.Semaphore(8)
     results = await asyncio.gather(*(_backfill_export_size(item, semaphore) for item in pending))
-    return sum(results)
+    failures = [
+        {"job_id": item.get("job_id"), "error": item["error"]}
+        for item in results if item.get("error")
+    ]
+    summary = {
+        "type": "export_size_backfill",
+        "processed": len(pending),
+        "succeeded": sum(1 for item in results if item.get("succeeded")),
+        "failed": len(failures),
+        "started_at": started_at,
+        "last_run_at": now(),
+        "failures": failures[:100],
+    }
+    maintenance_runs = getattr(db, "maintenance_runs", None)
+    if maintenance_runs is not None:
+        try:
+            await maintenance_runs.insert_one(dict(summary))
+        except Exception:  # noqa: BLE001 - status persistence must not discard completed repairs
+            pass
+    return summary
 
 
 def _job_task_args(job: dict[str, Any]) -> list[str]:
@@ -192,8 +222,8 @@ async def list_jobs(
     user: ReadUser,
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
-    job_type: str | None = Query(None, alias="type"),
-    state: str | None = Query(None),
+    job_type: VisibleJobType | None = Query(None, alias="type"),
+    state: JobState | None = Query(None),
     created_from: datetime | None = Query(None),
     created_to: datetime | None = Query(None),
     download_only: bool = Query(False),
@@ -207,11 +237,11 @@ async def list_jobs(
     if download_only:
         query["type"] = {"$in": ["export", "dataset_export"]}
     elif job_type:
-        query["type"] = job_type if job_type in visible_job_types else {"$in": []}
+        query["type"] = getattr(job_type, "value", job_type)
     else:
         query["type"] = {"$in": visible_job_types}
     if state:
-        query["state"] = state
+        query["state"] = getattr(state, "value", state)
     if created_from and created_to and created_from > created_to:
         raise AppError(400, "INVALID_TIME_RANGE", "开始时间不能晚于结束时间")
     if created_from or created_to:
@@ -231,6 +261,17 @@ async def list_jobs(
         "page_size": page_size,
         "total": total,
     }
+
+
+@router.get("/jobs/maintenance/export-size-backfill")
+async def export_size_backfill_status(user: ManageUser) -> dict[str, Any]:
+    run = await db.maintenance_runs.find_one(
+        {"type": "export_size_backfill"},
+        sort=[("last_run_at", -1)],
+    )
+    if run is None:
+        return {"processed": 0, "succeeded": 0, "failed": 0, "last_run_at": None, "failures": []}
+    return public_document(run) or {}
 
 
 @router.get("/jobs/{job_id}")

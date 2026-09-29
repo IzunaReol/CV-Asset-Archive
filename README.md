@@ -126,13 +126,13 @@ npm run test:ui
 npm run build
 ```
 
-隔离数据库的 API 流程测试使用 `scripts/runtime-e2e.py`。完整范围见[测试说明](docs/testing.md)和 [v1.5.0 发布检查单](docs/release-checklist.md)。
+隔离数据库的 API 流程测试使用 `scripts/runtime-e2e.py`。完整范围见[测试说明](docs/testing.md)和 [v1.5.1 发布检查单](docs/release-checklist.md)。
 
-## v1.5.0 升级准备
+## v1.5.1 升级准备
 
-从 v1.4.0 升级前备份 MongoDB、MinIO 和部署配置。更新代码与依赖并重新构建前端后，验证大批量上传、重名素材处理、数据集批量选择、关联关系重置、任务文件大小和右侧详情面板。本版本的数据迁移由服务启动时自动执行，无需手工操作。
+从 v1.5.0 升级前备份 MongoDB、MinIO 和部署配置。更新代码与依赖并重新构建前端后，重点验证弹窗键盘操作、关联关系分页、非法筛选参数和历史导出大小补齐。本版本会新增维护任务运行记录索引，无需手工执行数据迁移。
 
-新增功能和改动内容见 [v1.5.0 发布说明](docs/releases/v1.5.0.md)。
+新增功能和改动内容见 [v1.5.1 发布说明](docs/releases/v1.5.1.md)。
 
 ## 项目文档
 
