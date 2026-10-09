@@ -5,4 +5,5 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -r
 COPY worker/pyproject.toml ./
 COPY worker ./worker
 RUN pip install --no-cache-dir .
+COPY backend ./backend
 CMD ["celery", "-A", "worker.tasks:app", "worker", "--loglevel=INFO"]

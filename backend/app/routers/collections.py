@@ -4,7 +4,7 @@ from fastapi import APIRouter, Request
 
 from ..audit import record_audit
 from ..database import db
-from ..dependencies import ReadUser, WriteUser
+from ..dependencies import AssetReadUser, DatasetCreateEditUser, SavedViewManageUser
 from ..errors import AppError
 from ..schemas import CollectionCreate, SavedViewCreate, SavedViewUpdate
 from ..utils import new_id, now, public_document
@@ -15,7 +15,7 @@ router = APIRouter(tags=["collections"])
 
 @router.post("/collections", status_code=201)
 async def create_collection(
-    body: CollectionCreate, request: Request, user: WriteUser
+    body: CollectionCreate, request: Request, user: DatasetCreateEditUser
 ) -> dict[str, Any]:
     asset_ids = await resolve_selection_ids(user, body.asset_ids, body.selection_id, body.excluded_ids)
     if not asset_ids:
@@ -49,7 +49,7 @@ async def create_collection(
 
 @router.post("/collections/{collection_id}/freeze")
 async def freeze_collection(
-    collection_id: str, request: Request, user: WriteUser
+    collection_id: str, request: Request, user: DatasetCreateEditUser
 ) -> dict[str, Any]:
     result = await db.collections.update_one(
         {"id": collection_id, "frozen_at": None},
@@ -70,7 +70,7 @@ async def freeze_collection(
 
 
 @router.get("/collections")
-async def list_collections(user: ReadUser) -> dict[str, Any]:
+async def list_collections(user: AssetReadUser) -> dict[str, Any]:
     return {
         "items": [
             public_document(item)
@@ -81,11 +81,14 @@ async def list_collections(user: ReadUser) -> dict[str, Any]:
 
 @router.post("/saved-views", status_code=201)
 async def create_saved_view(
-    body: SavedViewCreate, request: Request, user: WriteUser
+    body: SavedViewCreate, request: Request, user: SavedViewManageUser
 ) -> dict[str, Any]:
+    shared_scope = "team" if body.shared is True else body.shared_scope
     view = {
         "id": new_id(),
         **body.model_dump(),
+        "shared_scope": shared_scope,
+        "shared": shared_scope == "team",
         "owner_id": user["id"],
         "created_at": now(),
         "updated_at": now(),
@@ -102,8 +105,8 @@ async def create_saved_view(
 
 
 @router.get("/saved-views")
-async def list_saved_views(user: ReadUser) -> dict[str, Any]:
-    query = {"$or": [{"owner_id": user["id"]}, {"shared": True}]}
+async def list_saved_views(user: AssetReadUser) -> dict[str, Any]:
+    query = {"$or": [{"owner_id": user["id"]}, {"shared_scope": "team"}, {"shared": True}]}
     return {
         "items": [
             public_document(item)
@@ -114,24 +117,27 @@ async def list_saved_views(user: ReadUser) -> dict[str, Any]:
 
 @router.patch("/saved-views/{view_id}")
 async def update_saved_view(
-    view_id: str, body: SavedViewUpdate, request: Request, user: WriteUser
+    view_id: str, body: SavedViewUpdate, request: Request, user: SavedViewManageUser
 ) -> dict[str, Any]:
+    changes: dict[str, Any] = {"name": body.name, "updated_at": now()}
+    if body.shared_scope is not None:
+        changes.update({"shared_scope": body.shared_scope, "shared": body.shared_scope == "team"})
     result = await db.saved_views.update_one(
         {"id": view_id, "owner_id": user["id"]},
-        {"$set": {"name": body.name, "updated_at": now()}},
+        {"$set": changes},
     )
     if not result.matched_count:
         raise AppError(404, "SAVED_VIEW_NOT_FOUND", "保存视图不存在或无权修改")
     await record_audit(
         actor=user, action="saved_view.updated", object_type="saved_view",
         object_id=view_id, request_id=request.state.request_id,
-        changes={"name": body.name},
+        changes={key: value for key, value in changes.items() if key != "updated_at"},
     )
     return public_document(await db.saved_views.find_one({"id": view_id})) or {}
 
 
 @router.delete("/saved-views/{view_id}", status_code=204)
-async def delete_saved_view(view_id: str, request: Request, user: WriteUser) -> None:
+async def delete_saved_view(view_id: str, request: Request, user: SavedViewManageUser) -> None:
     result = await db.saved_views.delete_one({"id": view_id, "owner_id": user["id"]})
     if not result.deleted_count:
         raise AppError(404, "SAVED_VIEW_NOT_FOUND", "保存视图不存在或无权删除")

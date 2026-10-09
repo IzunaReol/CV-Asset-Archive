@@ -765,10 +765,12 @@ def yolo_preview(path: Path, asset_id: str) -> str | None:
 def process_asset(job_id: str, asset_id: str) -> None:
     try:
         WORKER_TEMP_DIR.mkdir(parents=True, exist_ok=True)
-        database.jobs.update_one(
-            {"id": job_id},
+        claimed = database.jobs.update_one(
+            {"id": job_id, "state": {"$in": ["queued", "failed"]}},
             {"$set": {"state": "running", "progress": 10, "updated_at": utcnow()}},
         )
+        if not claimed.modified_count:
+            return
         asset = database.assets.find_one({"id": asset_id})
         if asset is None:
             raise ValueError("素材不存在")

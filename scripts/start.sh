@@ -22,6 +22,15 @@ docker info >/dev/null 2>&1 || { echo "Docker 引擎未运行或当前用户无�
 command -v curl >/dev/null 2>&1 || { echo "未找到 curl，无法执行服务健康检查。" >&2; exit 1; }
 [[ -f "$env_file" ]] || { echo "未找到 .env，首次使用请运行 ./deploy-linux.sh。" >&2; exit 1; }
 
+mongo_container_id="$(docker compose --env-file "$env_file" -f "$compose_file" ps -q mongodb 2>/dev/null || true)"
+if [[ -n "$mongo_container_id" ]]; then
+  mongo_health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$mongo_container_id" 2>/dev/null || true)"
+  if [[ "$mongo_health" == "unhealthy" ]]; then
+    echo "检测到 MongoDB 容器健康检查异常，正在保留数据卷并重新创建容器。"
+    docker compose --env-file "$env_file" -f "$compose_file" up -d --no-deps --force-recreate mongodb
+  fi
+fi
+
 compose_args=(compose --env-file "$env_file" -f "$compose_file" up -d)
 if [[ "$build" == true ]]; then
   compose_args+=(--build)

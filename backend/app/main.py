@@ -40,6 +40,9 @@ async def lifespan(_: FastAPI):
     recovered = await jobs.reconcile_stale_jobs()
     if recovered:
         logger.warning({"event": "stale_jobs_recovered", "count": recovered})
+    dispatched = await jobs.dispatch_pending_process_jobs()
+    if dispatched:
+        logger.warning({"event": "pending_process_jobs_dispatched", "count": dispatched})
     async def cleanup_upload_chunks() -> None:
         while True:
             try:
@@ -59,20 +62,32 @@ async def lifespan(_: FastAPI):
                 logger.warning({"event": "export_size_backfill_failed", "error": type(exc).__name__})
             await asyncio.sleep(3600)
 
+    async def dispatch_pending_upload_jobs() -> None:
+        while True:
+            try:
+                dispatched_count = await jobs.dispatch_pending_process_jobs()
+                if dispatched_count:
+                    logger.info({"event": "pending_process_jobs_dispatched", "count": dispatched_count})
+            except Exception as exc:
+                logger.warning({"event": "pending_process_job_dispatch_failed", "error": type(exc).__name__})
+            await asyncio.sleep(60)
+
     cleanup_task = asyncio.create_task(cleanup_upload_chunks())
     export_size_task = asyncio.create_task(backfill_export_sizes())
+    pending_job_task = asyncio.create_task(dispatch_pending_upload_jobs())
     try:
         yield
     finally:
         cleanup_task.cancel()
         export_size_task.cancel()
+        pending_job_task.cancel()
         try:
-            await asyncio.gather(cleanup_task, export_size_task)
+            await asyncio.gather(cleanup_task, export_size_task, pending_job_task)
         except asyncio.CancelledError:
             pass
 
 
-app = FastAPI(title="CV Archive API", version="1.5.1", lifespan=lifespan)
+app = FastAPI(title="CV Archive API", version="1.6.0", lifespan=lifespan)
 app.add_exception_handler(AppError, app_error_handler)
 app.add_middleware(
     CORSMiddleware,

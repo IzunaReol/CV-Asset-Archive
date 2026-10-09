@@ -44,6 +44,8 @@ async def ensure_indexes() -> None:
         [("version_id", ASCENDING), ("asset_id", ASCENDING)], unique=True
     )
     await db.dataset_version_memberships.create_index("asset_id")
+    await db.dataset_restore_backups.create_index([("restore_id", ASCENDING), ("created_at", ASCENDING)])
+    await db.dataset_restore_backups.create_index("expires_at", expireAfterSeconds=0)
     await db.jobs.create_index([("owner_id", ASCENDING), ("created_at", DESCENDING)])
     await db.jobs.create_index(
         [("owner_id", ASCENDING), ("type", ASCENDING), ("state", ASCENDING), ("created_at", DESCENDING), ("id", DESCENDING)]
@@ -52,13 +54,22 @@ async def ensure_indexes() -> None:
         [("type", ASCENDING), ("state", ASCENDING), ("created_at", DESCENDING), ("id", DESCENDING)]
     )
     await db.jobs.create_index([("state", ASCENDING), ("updated_at", ASCENDING)])
+    await db.jobs.create_index(
+        [("type", ASCENDING), ("state", ASCENDING), ("dispatched_at", ASCENDING)]
+    )
     await db.jobs.create_index("expires_at", expireAfterSeconds=0)
     await db.maintenance_runs.create_index([("type", ASCENDING), ("last_run_at", DESCENDING)])
+    await db.maintenance_runs.create_index("expires_at", expireAfterSeconds=0)
     await db.asset_selection_sets.create_index("id", unique=True)
     await db.asset_selection_sets.create_index("expires_at", expireAfterSeconds=0)
     await db.upload_sessions.create_index("expires_at", expireAfterSeconds=0)
     await db.tag_definitions.create_index("key", unique=True)
     await db.audit_logs.create_index([("created_at", DESCENDING)])
+    await db.audit_logs.create_index(
+        [("object_type", ASCENDING), ("object_id", ASCENDING), ("created_at", DESCENDING)]
+    )
+    await db.saved_views.create_index([("owner_id", ASCENDING), ("updated_at", DESCENDING)])
+    await db.saved_views.create_index([("shared_scope", ASCENDING), ("updated_at", DESCENDING)])
 
 
 async def ping_database() -> bool:

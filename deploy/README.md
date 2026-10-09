@@ -15,6 +15,7 @@
 ```
 
 脚本会检查 Docker，必要时启动 Docker Desktop；首次创建 `.env` 时自动生成 JWT、管理员密码和 MinIO 凭据，然后构建镜像、启动服务并完成健康检查。已有 `.env` 时保留有效配置，仅替换缺失或明显不安全的默认凭据。
+日常启动检测到 MongoDB 健康检查异常时，会保留现有数据卷并自动重新创建 MongoDB 容器，然后继续启动其他服务。
 
 部署完成后的日常启动不重新构建镜像：
 
@@ -37,6 +38,7 @@ bash deploy-linux.sh
 ```
 
 脚本会检查 Docker Engine、Docker Compose v2、Bash、curl 和 `od`；首次创建 `.env` 时自动生成 JWT、管理员密码和 MinIO 凭据，并把配置权限设为仅当前用户可读写。已有 `.env` 时保留有效配置，仅替换缺失或明显不安全的默认凭据。
+日常启动检测到 MongoDB 健康检查异常时，会保留现有数据卷并自动重新创建 MongoDB 容器。
 
 部署完成后的日常启动不重新构建镜像：
 
@@ -58,7 +60,7 @@ docker compose --env-file .env -f deploy/docker-compose.yml down
 
 默认地址：
 
-- Web：`http://localhost:8080`
+- Web：`http://localhost:8080`（可通过 `.env` 中的 `FRONTEND_PORT` 调整）
 - API：`http://localhost:8000`
 - API 文档：`http://localhost:8000/docs`
 - 就绪检查：`http://localhost:8000/health/ready`

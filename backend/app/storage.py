@@ -13,12 +13,14 @@ storage = Minio(
     access_key=settings.minio_access_key,
     secret_key=settings.minio_secret_key,
     secure=settings.minio_secure,
+    region=settings.minio_region,
 )
 public_storage = Minio(
     settings.minio_public_endpoint,
     access_key=settings.minio_access_key,
     secret_key=settings.minio_secret_key,
     secure=settings.minio_public_secure if settings.minio_public_secure is not None else settings.minio_secure,
+    region=settings.minio_region,
 )
 
 

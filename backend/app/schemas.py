@@ -11,6 +11,7 @@ class Role(StrEnum):
     ANNOTATOR = "annotator"
     ML_ENGINEER = "ml_engineer"
     VIEWER = "viewer"
+    CUSTOM = "custom"
 
 
 class AssetType(StrEnum):
@@ -224,11 +225,13 @@ class SavedViewCreate(BaseModel):
     query: dict[str, Any]
     sort: list[dict[str, Literal["asc", "desc"]]] = Field(default_factory=list)
     fields: list[str] = Field(default_factory=list)
-    shared: bool = False
+    shared_scope: Literal["private", "team"] = "private"
+    shared: bool | None = None
 
 
 class SavedViewUpdate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
+    shared_scope: Literal["private", "team"] | None = None
 
 
 class ExportCreate(BaseModel):

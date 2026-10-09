@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import logging
 import re
 import shutil
 from datetime import UTC, datetime, timedelta
@@ -14,7 +15,15 @@ from ..annotation_overlay import parse_annotation_overlay
 from ..audit import record_audit
 from ..config import get_settings
 from ..database import db
-from ..dependencies import ReadUser, WriteUser
+from ..dependencies import (
+    AssetDeleteUser,
+    AssetReadUser,
+    AssetEditUser,
+    AssetUploadUser,
+    TrashManageUser,
+    TrashReadUser,
+    ensure_action_access,
+)
 from ..errors import AppError
 from ..schemas import (
     AssetSelectionCreate,
@@ -47,6 +56,8 @@ TAG_KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]{1,49}$")
 SYSTEM_FILTER_FIELDS = {"remark", "created_at", "updated_at"}
 CHUNK_SIZE = 64 * 1024 * 1024
 CHUNK_THRESHOLD = 64 * 1024 * 1024
+UPLOAD_BATCH_WINDOW = 12
+logger = logging.getLogger("cv-archive.assets")
 
 
 def parse_filter_datetime(value: str) -> datetime:
@@ -129,7 +140,7 @@ def updated_asset_tags(
 
 
 @router.get("/stats")
-async def asset_stats(user: ReadUser) -> dict[str, Any]:
+async def asset_stats(user: AssetReadUser) -> dict[str, Any]:
     active = {"archived_at": None}
     pipeline = [
         {"$match": active},
@@ -186,7 +197,7 @@ async def matching_name_assets(filename: str, asset_type: str) -> list[dict[str,
 
 @router.post("/upload-conflicts")
 async def check_upload_conflicts(
-    body: UploadConflictCheckRequest, user: WriteUser
+    body: UploadConflictCheckRequest, user: AssetUploadUser
 ) -> dict[str, Any]:
     requested = [(index, safe_filename(item.filename), item.asset_type.value) for index, item in enumerate(body.files)]
     names_by_type: dict[str, set[str]] = {}
@@ -256,7 +267,7 @@ async def check_upload_conflicts(
 
 
 @router.post("/upload-sessions", status_code=201)
-async def initialize_upload(body: UploadInitRequest, user: WriteUser) -> dict[str, Any]:
+async def initialize_upload(body: UploadInitRequest, user: AssetUploadUser) -> dict[str, Any]:
     if body.size > settings.max_upload_size_bytes:
         raise AppError(
             413,
@@ -267,6 +278,8 @@ async def initialize_upload(body: UploadInitRequest, user: WriteUser) -> dict[st
     filename = safe_filename(body.filename)
     name_matches = await matching_name_assets(filename, body.asset_type.value)
     overwrite_asset = name_matches[0] if name_matches and body.name_conflict == "overwrite" else None
+    if body.name_conflict == "overwrite":
+        ensure_action_access(user, "asset_delete")
     if name_matches and body.name_conflict == "reject":
         raise AppError(409, "ASSET_NAME_CONFLICT", "素材库中已存在同名同类型文件")
     if name_matches and body.name_conflict == "rename":
@@ -304,6 +317,7 @@ async def initialize_upload(body: UploadInitRequest, user: WriteUser) -> dict[st
         "object_key": object_key,
         "duplicate_asset_id": duplicate["id"] if duplicate else None,
         "overwrite_asset_id": overwrite_asset["id"] if overwrite_asset else None,
+        "processing_job_id": new_id(),
         "owner_id": user["id"],
         "state": "reused" if duplicate else "pending",
         "transfer_mode": "chunks" if chunked else "single",
@@ -312,12 +326,17 @@ async def initialize_upload(body: UploadInitRequest, user: WriteUser) -> dict[st
         "created_at": now(),
         "expires_at": now() + timedelta(hours=24),
     }
+    upload_url = (
+        None
+        if duplicate or chunked
+        else await asyncio.to_thread(presigned_put, object_key)
+    )
     await db.upload_sessions.insert_one(document)
     return {
         "upload_session_id": session_id,
         "asset_id": asset_id,
         "upload_required": duplicate is None,
-        "upload_url": None if duplicate or chunked else await asyncio.to_thread(presigned_put, object_key),
+        "upload_url": upload_url,
         "transfer_mode": document["transfer_mode"],
         "chunk_size": document["chunk_size"],
         "chunk_count": document["chunk_count"],
@@ -339,7 +358,7 @@ async def cleanup_expired_upload_chunks() -> int:
 
 
 @router.get("/upload-sessions/{session_id}")
-async def upload_session_status(session_id: str, user: WriteUser) -> dict[str, Any]:
+async def upload_session_status(session_id: str, user: AssetUploadUser) -> dict[str, Any]:
     session = await db.upload_sessions.find_one({"id": session_id, "owner_id": user["id"]})
     if session is None or session["expires_at"] <= now() or session["state"] not in {"pending", "reused"}:
         raise AppError(404, "UPLOAD_SESSION_NOT_FOUND", "上传会话不存在或已过期")
@@ -367,7 +386,7 @@ async def upload_session_status(session_id: str, user: WriteUser) -> dict[str, A
 
 
 @router.delete("/upload-sessions/{session_id}", status_code=204)
-async def cancel_upload_session(session_id: str, user: WriteUser) -> None:
+async def cancel_upload_session(session_id: str, user: AssetUploadUser) -> None:
     session = await db.upload_sessions.find_one({"id": session_id, "owner_id": user["id"]})
     if session is None or session["state"] == "completed":
         raise AppError(404, "UPLOAD_SESSION_NOT_FOUND", "上传会话不存在或已完成")
@@ -377,34 +396,34 @@ async def cancel_upload_session(session_id: str, user: WriteUser) -> None:
 
 
 @router.post("/upload-sessions/batch", status_code=201)
-async def initialize_upload_batch(body: UploadBatchInitRequest, user: WriteUser) -> dict[str, Any]:
-    semaphore = asyncio.Semaphore(12)
-
+async def initialize_upload_batch(body: UploadBatchInitRequest, user: AssetUploadUser) -> dict[str, Any]:
     async def initialize_one(index: int, item: UploadInitRequest) -> dict[str, Any]:
-        async with semaphore:
-            try:
-                return {"index": index, "session": await initialize_upload(item, user)}
-            except AppError as exc:
-                return {"index": index, "error": {"code": exc.code, "message": exc.message}}
-            except Exception:
-                return {"index": index, "error": {"code": "UPLOAD_INIT_FAILED", "message": "创建上传任务失败"}}
+        try:
+            return {"index": index, "session": await initialize_upload(item, user)}
+        except AppError as exc:
+            return {"index": index, "error": {"code": exc.code, "message": exc.message}}
+        except Exception:
+            logger.exception("upload batch initialization failed", extra={"upload_index": index})
+            return {"index": index, "error": {"code": "UPLOAD_INIT_FAILED", "message": "创建上传任务失败"}}
 
-    return {"items": await asyncio.gather(*(
-        initialize_one(index, item) for index, item in enumerate(body.files)
-    ))}
+    return {"items": await run_upload_windows(body.files, initialize_one)}
 
 
 @router.post("/upload-sessions/complete", status_code=201)
 async def complete_upload(
-    body: UploadCompleteRequest, request: Request, user: WriteUser
+    body: UploadCompleteRequest, request: Request, user: AssetUploadUser
 ) -> dict[str, Any]:
     session = await db.upload_sessions.find_one(
         {"id": body.upload_session_id, "owner_id": user["id"]}
     )
     if session is None or session["expires_at"] <= now():
         raise AppError(404, "UPLOAD_SESSION_NOT_FOUND", "上传会话不存在或已过期")
+    if session.get("overwrite_asset_id"):
+        ensure_action_access(user, "asset_delete")
     if session["state"] == "completed":
-        asset = await db.assets.find_one({"id": session["asset_id"]})
+        asset = await db.assets.find_one(
+            {"id": session.get("overwrite_asset_id") or session["asset_id"]}
+        )
         return public_document(asset) or {}
     if session["state"] != "reused":
         if session.get("transfer_mode") == "chunks":
@@ -429,7 +448,7 @@ async def complete_upload(
     timestamp = now()
     overwrite_asset_id = session.get("overwrite_asset_id")
     asset_id = overwrite_asset_id or session["asset_id"]
-    previous_object_key = None
+    previous_object_key = session.get("previous_object_key")
     asset = {
         "id": asset_id,
         "name": session["filename"],
@@ -455,18 +474,21 @@ async def complete_upload(
         existing = await db.assets.find_one({"id": overwrite_asset_id, "archived_at": None})
         if existing is None:
             raise AppError(409, "OVERWRITE_TARGET_NOT_FOUND", "要覆盖的原文件已不存在")
-        previous_object_key = existing.get("object_key")
+        if previous_object_key is None:
+            previous_object_key = existing.get("object_key")
+            await db.upload_sessions.update_one(
+                {"id": session["id"]},
+                {"$set": {"previous_object_key": previous_object_key}},
+            )
         asset["created_at"] = existing.get("created_at", timestamp)
         asset["tags"] = body.tags or existing.get("tags", {})
         asset["remark"] = existing.get("remark", "")
         await db.assets.replace_one({"id": overwrite_asset_id}, asset)
     else:
-        await db.assets.insert_one(asset)
-    await db.upload_sessions.update_one({"id": session["id"]}, {"$set": {"state": "completed"}})
-    if session.get("transfer_mode") == "chunks":
-        await asyncio.to_thread(delete_chunks, chunk_prefix(session["id"]))
+        await db.assets.replace_one({"id": asset_id}, asset, upsert=True)
+    job_id = session.get("processing_job_id") or f"upload-{session['id']}"
     job = {
-        "id": new_id(),
+        "id": job_id,
         "type": "process_asset",
         "name": f"素材处理：{asset['name']}",
         "state": "queued",
@@ -479,57 +501,103 @@ async def complete_upload(
         "created_at": now(),
         "updated_at": now(),
     }
-    await db.jobs.insert_one(job)
+    await db.jobs.update_one({"id": job_id}, {"$setOnInsert": job}, upsert=True)
+    await db.upload_sessions.update_one(
+        {"id": session["id"]},
+        {"$set": {"state": "completed", "processing_job_id": job_id}},
+    )
     try:
         await asyncio.to_thread(
             celery_client.send_task,
             "worker.tasks.process_asset",
             args=[job["id"], asset["id"]],
         )
+        try:
+            await db.jobs.update_one(
+                {"id": job_id},
+                {"$set": {"dispatched_at": now(), "updated_at": now()}},
+            )
+        except Exception:
+            logger.warning("upload job dispatch marker update failed", extra={"job_id": job_id})
     except Exception as exc:
         await db.jobs.update_one(
             {"id": job["id"]},
             {
                 "$set": {
-                    "state": "failed",
-                    "error": {"code": "TASK_DISPATCH_FAILED", "message": str(exc)[:500]},
+                    "dispatch_error": f"{type(exc).__name__}: {str(exc)[:300]}",
                     "updated_at": now(),
                 }
             },
         )
+    if session.get("transfer_mode") == "chunks":
+        try:
+            await asyncio.to_thread(delete_chunks, chunk_prefix(session["id"]))
+        except Exception:
+            logger.warning(
+                "completed upload chunk cleanup failed",
+                extra={"upload_session_id": session["id"]},
+            )
     await record_audit(
         actor=user,
         action="asset.overwritten" if overwrite_asset_id else "asset.created",
         object_type="asset",
         object_id=asset["id"],
         request_id=request.state.request_id,
+        changes={
+            "upload_session_id": session["id"],
+            "filename": asset["name"],
+            "size": asset["size"],
+            "mime_type": asset["mime_type"],
+            "previous_object_key": previous_object_key,
+            "new_object_key": asset["object_key"],
+            "relations_preserved": bool(overwrite_asset_id),
+        },
     )
     return public_document(asset) or {}
 
 
+@router.get("/{asset_id}/history")
+async def asset_operation_history(asset_id: str, user: AssetReadUser) -> dict[str, Any]:
+    if await db.assets.find_one({"id": asset_id}, {"id": 1}) is None:
+        raise AppError(404, "ASSET_NOT_FOUND", "素材不存在")
+    cursor = db.audit_logs.find({"object_type": "asset", "object_id": asset_id}).sort(
+        "created_at", DESCENDING
+    ).limit(100)
+    return {"items": [public_document(item) async for item in cursor]}
+
+
+async def run_upload_windows(items: list[Any], worker: Any) -> list[dict[str, Any]]:
+    """Run only one small upload window at a time while preserving response order."""
+    results: list[dict[str, Any]] = []
+    for start in range(0, len(items), UPLOAD_BATCH_WINDOW):
+        window = items[start : start + UPLOAD_BATCH_WINDOW]
+        results.extend(
+            await asyncio.gather(*(
+                worker(start + offset, item) for offset, item in enumerate(window)
+            ))
+        )
+    return results
+
+
 @router.post("/upload-sessions/complete-batch", status_code=201)
 async def complete_upload_batch(
-    body: UploadBatchCompleteRequest, request: Request, user: WriteUser
+    body: UploadBatchCompleteRequest, request: Request, user: AssetUploadUser
 ) -> dict[str, Any]:
-    semaphore = asyncio.Semaphore(12)
-
     async def complete_one(index: int, session_id: str) -> dict[str, Any]:
-        async with semaphore:
-            try:
-                asset = await complete_upload(
-                    UploadCompleteRequest(upload_session_id=session_id, tags=body.tags),
-                    request,
-                    user,
-                )
-                return {"index": index, "asset": asset}
-            except AppError as exc:
-                return {"index": index, "error": {"code": exc.code, "message": exc.message}}
-            except Exception:
-                return {"index": index, "error": {"code": "UPLOAD_COMPLETE_FAILED", "message": "完成上传失败，请稍后重试"}}
+        try:
+            asset = await complete_upload(
+                UploadCompleteRequest(upload_session_id=session_id, tags=body.tags),
+                request,
+                user,
+            )
+            return {"index": index, "asset": asset}
+        except AppError as exc:
+            return {"index": index, "error": {"code": exc.code, "message": exc.message}}
+        except Exception:
+            logger.exception("upload batch completion failed", extra={"upload_index": index})
+            return {"index": index, "error": {"code": "UPLOAD_COMPLETE_FAILED", "message": "完成上传失败，请稍后重试"}}
 
-    return {"items": await asyncio.gather(*(
-        complete_one(index, session_id) for index, session_id in enumerate(body.upload_session_ids)
-    ))}
+    return {"items": await run_upload_windows(body.upload_session_ids, complete_one)}
 
 
 async def asset_query(q: str, no_tags: bool, asset_type: list[str], match: str, tag: list[str]) -> dict[str, Any]:
@@ -592,7 +660,7 @@ async def asset_query(q: str, no_tags: bool, asset_type: list[str], match: str, 
 
 
 @router.post("/selection-sets", status_code=201)
-async def create_asset_selection(body: AssetSelectionCreate, user: ReadUser) -> dict[str, Any]:
+async def create_asset_selection(body: AssetSelectionCreate, user: AssetReadUser) -> dict[str, Any]:
     query = await asset_query(body.q, body.no_tags, [item.value for item in body.asset_type], body.match, body.tag)
     ids = [item["id"] async for item in db.assets.find(query, {"id": 1}).limit(100001)]
     if len(ids) > 100000:
@@ -625,7 +693,7 @@ async def resolve_selection_ids(
 
 @router.get("")
 async def list_assets(
-    user: ReadUser,
+    user: AssetReadUser,
     q: str = "",
     no_tags: bool = False,
     asset_type: list[str] = Query(default=[]),
@@ -673,7 +741,7 @@ async def list_assets(
 
 
 @router.get("/{asset_id}")
-async def get_asset(asset_id: str, user: ReadUser) -> dict[str, Any]:
+async def get_asset(asset_id: str, user: AssetReadUser) -> dict[str, Any]:
     asset = await db.assets.find_one({"id": asset_id, "archived_at": None})
     if asset is None:
         raise AppError(404, "ASSET_NOT_FOUND", "素材不存在或已归档")
@@ -741,7 +809,7 @@ async def get_asset(asset_id: str, user: ReadUser) -> dict[str, Any]:
 
 @router.patch("/{asset_id}/remark")
 async def update_asset_remark(
-    asset_id: str, body: AssetRemarkUpdate, request: Request, user: WriteUser
+    asset_id: str, body: AssetRemarkUpdate, request: Request, user: AssetEditUser
 ) -> dict[str, Any]:
     remark = body.remark.strip()
     result = await db.assets.update_one(
@@ -763,7 +831,7 @@ async def update_asset_remark(
 
 
 @router.get("/{asset_id}/annotation-overlays")
-async def annotation_overlays(asset_id: str, user: ReadUser) -> dict[str, Any]:
+async def annotation_overlays(asset_id: str, user: AssetReadUser) -> dict[str, Any]:
     image = await db.assets.find_one({"id": asset_id, "type": "image", "archived_at": None})
     if image is None:
         raise AppError(404, "IMAGE_ASSET_NOT_FOUND", "图片素材不存在或已归档")
@@ -809,22 +877,24 @@ async def annotation_overlays(asset_id: str, user: ReadUser) -> dict[str, Any]:
 
 
 @router.post("/batch-tags")
-async def batch_tags(body: BatchTagRequest, request: Request, user: WriteUser) -> dict[str, Any]:
+async def batch_tags(body: BatchTagRequest, request: Request, user: AssetEditUser) -> dict[str, Any]:
     ids = await resolve_selection_ids(user, body.asset_ids, body.selection_id, body.excluded_ids)
     if not ids:
         raise AppError(400, "SELECTION_EMPTY", "没有可操作的素材")
-    succeeded, failed = [], []
+    succeeded, failed, details = [], [], []
     timestamp = now()
     for offset in range(0, len(ids), 1000):
         chunk = ids[offset:offset + 1000]
         assets = {item["id"]: item async for item in db.assets.find(
-            {"id": {"$in": chunk}, "archived_at": None}, {"id": 1, "tags": 1}
+            {"id": {"$in": chunk}, "archived_at": None}, {"id": 1, "name": 1, "tags": 1}
         )}
         operations = []
         for asset_id in chunk:
             asset = assets.get(asset_id)
             if asset is None:
                 failed.append({"id": asset_id, "code": "ASSET_NOT_FOUND"})
+                if len(details) < 1000:
+                    details.append({"id": asset_id, "name": asset_id, "status": "failed", "message": "素材不存在"})
                 continue
             tags = updated_asset_tags(asset.get("tags") or {}, body.set_tags, body.remove_tags, body.remove_tag_values)
             operations.append(UpdateOne(
@@ -832,6 +902,8 @@ async def batch_tags(body: BatchTagRequest, request: Request, user: WriteUser) -
                 {"$set": {"tags": tags, "updated_at": timestamp, "modified_at": timestamp}},
             ))
             succeeded.append(asset_id)
+            if len(details) < 1000:
+                details.append({"id": asset_id, "name": asset.get("name", asset_id), "status": "succeeded", "message": "标签已更新"})
         if operations:
             await db.assets.bulk_write(operations, ordered=False)
     await record_audit(
@@ -843,12 +915,13 @@ async def batch_tags(body: BatchTagRequest, request: Request, user: WriteUser) -
         changes={"asset_ids": succeeded[:1000], "count": len(succeeded), "selection_id": body.selection_id},
     )
     return {"succeeded": succeeded if not body.selection_id else [],
-            "succeeded_count": len(succeeded), "failed": failed[:100], "failed_count": len(failed)}
+            "succeeded_count": len(succeeded), "failed": failed[:100], "failed_count": len(failed),
+            "details": details, "details_truncated": len(succeeded) + len(failed) > len(details)}
 
 
 @router.post("/batch-delete")
 async def batch_delete(
-    body: BatchAssetDeleteRequest, request: Request, user: WriteUser
+    body: BatchAssetDeleteRequest, request: Request, user: AssetDeleteUser
 ) -> dict[str, Any]:
     requested_ids = await resolve_selection_ids(user, body.asset_ids, body.selection_id, body.excluded_ids)
     if not requested_ids:
@@ -856,6 +929,8 @@ async def batch_delete(
     if len(requested_ids) > 5000:
         succeeded_count = failed_count = 0
         failures: list[dict[str, str]] = []
+        details: list[dict[str, str]] = []
+        details_truncated = False
         for offset in range(0, len(requested_ids), 5000):
             result = await batch_delete(
                 BatchAssetDeleteRequest(asset_ids=requested_ids[offset:offset + 5000]), request, user
@@ -863,8 +938,11 @@ async def batch_delete(
             succeeded_count += len(result["succeeded"])
             failed_count += len(result["failed"])
             failures.extend(result["failed"][:max(0, 100 - len(failures))])
+            details.extend(result.get("details", [])[:max(0, 1000 - len(details))])
+            details_truncated = details_truncated or result.get("details_truncated", False)
         return {"succeeded": [], "succeeded_count": succeeded_count,
-                "failed": failures, "failed_count": failed_count}
+                "failed": failures, "failed_count": failed_count, "details": details,
+                "details_truncated": details_truncated or succeeded_count + failed_count > len(details)}
     current_member_ids = set(
         await db.dataset_memberships.distinct("asset_id", {"asset_id": {"$in": requested_ids}})
     )
@@ -882,6 +960,9 @@ async def batch_delete(
     protected_version_rows = await protected_version_cursor.to_list(length=len(requested_ids))
     version_member_ids = {item["asset_id"] for item in protected_version_rows}
     protected_ids = current_member_ids | version_member_ids
+    asset_names = {item["id"]: item.get("name", item["id"]) async for item in db.assets.find(
+        {"id": {"$in": requested_ids}}, {"id": 1, "name": 1}
+    )}
     deletable_ids = [asset_id for asset_id in requested_ids if asset_id not in protected_ids]
     timestamp = now()
     result = await db.assets.update_many(
@@ -909,14 +990,23 @@ async def batch_delete(
         request_id=request.state.request_id,
         changes={"asset_ids": succeeded, "count": result.modified_count},
     )
+    details = [
+        {"id": asset_id, "name": asset_names.get(asset_id, asset_id), "status": "succeeded", "message": "已移入回收站"}
+        for asset_id in succeeded
+    ] + [
+        {"id": item["id"], "name": asset_names.get(item["id"], item["id"]), "status": "failed", "message": item["message"]}
+        for item in failed
+    ]
+    details = details[:1000]
     return {"succeeded": succeeded if not body.selection_id else [],
             "succeeded_count": len(succeeded),
             "failed": failed if not body.selection_id else failed[:100],
-            "failed_count": len(failed)}
+            "failed_count": len(failed), "details": details,
+            "details_truncated": len(succeeded) + len(failed) > len(details)}
 
 
 @router.post("/{asset_id}/archive")
-async def archive_asset(asset_id: str, request: Request, user: WriteUser) -> dict[str, str]:
+async def archive_asset(asset_id: str, request: Request, user: AssetDeleteUser) -> dict[str, str]:
     result = await batch_delete(BatchAssetDeleteRequest(asset_ids=[asset_id]), request, user)
     if result["failed"]:
         failure = result["failed"][0]
@@ -927,7 +1017,7 @@ async def archive_asset(asset_id: str, request: Request, user: WriteUser) -> dic
 
 @router.get("/trash/items")
 async def list_trash(
-    user: ReadUser,
+    user: TrashReadUser,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
 ) -> dict[str, Any]:
@@ -952,8 +1042,11 @@ async def list_trash(
 
 @router.post("/trash/restore")
 async def restore_trash(
-    body: BatchAssetDeleteRequest, request: Request, user: WriteUser
+    body: BatchAssetDeleteRequest, request: Request, user: TrashManageUser
 ) -> dict[str, Any]:
+    asset_names = {item["id"]: item.get("name", item["id"]) async for item in db.assets.find(
+        {"id": {"$in": body.asset_ids}}, {"id": 1, "name": 1}
+    )}
     result = await db.assets.update_many(
         {"id": {"$in": body.asset_ids}, "archived_at": {"$ne": None}},
         {"$set": {"archived_at": None, "updated_at": now()}},
@@ -975,11 +1068,24 @@ async def restore_trash(
         request_id=request.state.request_id,
         changes={"asset_ids": succeeded, "count": result.modified_count},
     )
-    return {"succeeded": succeeded, "failed": failed}
+    return {
+        "succeeded": succeeded,
+        "succeeded_count": len(succeeded),
+        "failed": failed,
+        "failed_count": len(failed),
+        "details": [
+            {"id": asset_id, "name": asset_names.get(asset_id, asset_id), "status": "succeeded", "message": "还原成功"}
+            for asset_id in succeeded
+        ] + [
+            {"id": item["id"], "name": asset_names.get(item["id"], item["id"]), "status": "failed", "message": "素材不存在或已被还原"}
+            for item in failed
+        ],
+        "details_truncated": False,
+    }
 
 
 @router.post("/trash/empty", status_code=202)
-async def empty_trash(request: Request, user: WriteUser) -> dict[str, Any]:
+async def empty_trash(request: Request, user: TrashManageUser) -> dict[str, Any]:
     existing = await db.jobs.find_one(
         {"type": "trash_empty", "state": {"$in": ["queued", "running"]}}
     )

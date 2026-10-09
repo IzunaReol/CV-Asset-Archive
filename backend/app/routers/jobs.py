@@ -8,7 +8,7 @@ from fastapi import APIRouter, Query, Request
 from ..audit import record_audit
 from ..config import get_settings
 from ..database import db
-from ..dependencies import ManageUser, ReadUser, WriteUser
+from ..dependencies import AssetExportUser, ExportWriteUser, JobReadUser, UserManageUser
 from ..errors import AppError
 from ..schemas import ExportCreate, JobState, VisibleJobType
 from ..storage import presigned_get, stat_object
@@ -87,6 +87,7 @@ async def backfill_export_sizes(limit: int = 100) -> dict[str, Any]:
         "failed": len(failures),
         "started_at": started_at,
         "last_run_at": now(),
+        "expires_at": now() + timedelta(days=settings.maintenance_run_retention_days),
         "failures": failures[:100],
     }
     maintenance_runs = getattr(db, "maintenance_runs", None)
@@ -109,6 +110,40 @@ async def _dispatch_job(job: dict[str, Any]) -> None:
     if task_name is None:
         raise AppError(409, "JOB_TYPE_NOT_RETRYABLE", "该任务类型不支持重新提交")
     await asyncio.to_thread(celery_client.send_task, task_name, args=_job_task_args(job))
+
+
+async def dispatch_pending_process_jobs(limit: int = 100) -> int:
+    pending = [
+        item
+        async for item in db.jobs.find(
+            {
+                "type": "process_asset",
+                "state": "queued",
+                "dispatched_at": {"$exists": False},
+            }
+        ).sort("created_at", 1).limit(limit)
+    ]
+    dispatched = 0
+    for job in pending:
+        try:
+            await _dispatch_job(job)
+            await db.jobs.update_one(
+                {"id": job["id"], "state": "queued"},
+                {
+                    "$set": {"dispatched_at": now(), "updated_at": now()},
+                    "$unset": {"dispatch_error": ""},
+                },
+            )
+            dispatched += 1
+        except Exception as exc:  # noqa: BLE001 - keep the outbox item for the next pass
+            await db.jobs.update_one(
+                {"id": job["id"], "state": "queued"},
+                {"$set": {
+                    "dispatch_error": f"{type(exc).__name__}: {str(exc)[:300]}",
+                    "updated_at": now(),
+                }},
+            )
+    return dispatched
 
 
 async def reconcile_stale_jobs() -> int:
@@ -157,7 +192,7 @@ async def reconcile_stale_jobs() -> int:
 
 
 @router.post("/exports", status_code=202)
-async def create_export(body: ExportCreate, request: Request, user: WriteUser) -> dict[str, Any]:
+async def create_export(body: ExportCreate, request: Request, user: AssetExportUser) -> dict[str, Any]:
     asset_ids = await resolve_selection_ids(user, body.asset_ids, body.selection_id, body.excluded_ids)
     if not asset_ids:
         raise AppError(400, "EXPORT_EMPTY", "筛选结果中没有可导出的素材")
@@ -219,7 +254,7 @@ async def create_export(body: ExportCreate, request: Request, user: WriteUser) -
 
 @router.get("/jobs")
 async def list_jobs(
-    user: ReadUser,
+    user: JobReadUser,
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     job_type: VisibleJobType | None = Query(None, alias="type"),
@@ -264,7 +299,7 @@ async def list_jobs(
 
 
 @router.get("/jobs/maintenance/export-size-backfill")
-async def export_size_backfill_status(user: ManageUser) -> dict[str, Any]:
+async def export_size_backfill_status(user: UserManageUser) -> dict[str, Any]:
     run = await db.maintenance_runs.find_one(
         {"type": "export_size_backfill"},
         sort=[("last_run_at", -1)],
@@ -275,7 +310,7 @@ async def export_size_backfill_status(user: ManageUser) -> dict[str, Any]:
 
 
 @router.get("/jobs/{job_id}")
-async def get_job(job_id: str, user: ReadUser) -> dict[str, Any]:
+async def get_job(job_id: str, user: JobReadUser) -> dict[str, Any]:
     query: dict[str, Any] = {"id": job_id}
     if not ({"admin", "data_manager"} & set(user["roles"])):
         query["owner_id"] = user["id"]
@@ -286,7 +321,7 @@ async def get_job(job_id: str, user: ReadUser) -> dict[str, Any]:
 
 
 @router.get("/exports/{job_id}/download-url")
-async def export_download_url(job_id: str, user: ReadUser) -> dict[str, Any]:
+async def export_download_url(job_id: str, user: JobReadUser) -> dict[str, Any]:
     query: dict[str, Any] = {"id": job_id, "type": {"$in": ["export", "dataset_export"]}}
     if not ({"admin", "data_manager"} & set(user["roles"])):
         query["owner_id"] = user["id"]
@@ -304,7 +339,7 @@ async def export_download_url(job_id: str, user: ReadUser) -> dict[str, Any]:
 
 
 @router.post("/jobs/{job_id}/retry", status_code=202)
-async def retry_job(job_id: str, user: WriteUser) -> dict[str, Any]:
+async def retry_job(job_id: str, user: ExportWriteUser) -> dict[str, Any]:
     query: dict[str, Any] = {"id": job_id, "state": "failed"}
     if not ({"admin", "data_manager"} & set(user["roles"])):
         query["owner_id"] = user["id"]
@@ -358,7 +393,7 @@ async def retry_job(job_id: str, user: WriteUser) -> dict[str, Any]:
 
 
 @router.post("/jobs/{job_id}/cancel", status_code=202)
-async def cancel_job(job_id: str, request: Request, user: WriteUser) -> dict[str, Any]:
+async def cancel_job(job_id: str, request: Request, user: ExportWriteUser) -> dict[str, Any]:
     query: dict[str, Any] = {
         "id": job_id,
         "type": {"$in": sorted(CANCELLABLE_JOB_TYPES)},

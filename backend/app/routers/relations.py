@@ -8,7 +8,7 @@ from pymongo import ASCENDING, DESCENDING
 
 from ..audit import record_audit
 from ..database import db
-from ..dependencies import ManageUser, ReadUser, WriteUser
+from ..dependencies import RelationReadUser, RelationRevokeUser, RelationWriteUser
 from ..errors import AppError
 from ..schemas import (
     AnnotationMatchPreviewRequest,
@@ -157,7 +157,7 @@ async def validate_relation(body: RelationCreate) -> None:
 
 @router.post("", status_code=201)
 async def create_relation(
-    body: RelationCreate, request: Request, user: WriteUser
+    body: RelationCreate, request: Request, user: RelationWriteUser
 ) -> dict[str, Any]:
     await validate_relation(body)
     previous = await db.relations.find_one(
@@ -202,7 +202,7 @@ async def create_relation(
 
 @router.post("/batch")
 async def create_relations(
-    body: RelationBatchRequest, request: Request, user: WriteUser
+    body: RelationBatchRequest, request: Request, user: RelationWriteUser
 ) -> dict[str, Any]:
     succeeded, failed = [], []
     for item in body.relations:
@@ -222,7 +222,7 @@ async def create_relations(
 
 
 @router.post("/preview")
-async def preview_relations(body: RelationBatchRequest, user: ReadUser) -> dict[str, Any]:
+async def preview_relations(body: RelationBatchRequest, user: RelationReadUser) -> dict[str, Any]:
     groups: dict[str, list[dict[str, Any]]] = {"ready": [], "existing": [], "invalid": []}
     for item in body.relations:
         result = await preview_relation_item(item)
@@ -237,7 +237,7 @@ async def preview_relations(body: RelationBatchRequest, user: ReadUser) -> dict[
 
 @router.post("/annotation-match-preview")
 async def preview_annotation_matches(
-    body: AnnotationMatchPreviewRequest, user: ReadUser
+    body: AnnotationMatchPreviewRequest, user: RelationReadUser
 ) -> dict[str, Any]:
     requested_image_ids = list(dict.fromkeys(body.image_ids))
     requested_annotation_ids = list(dict.fromkeys(body.annotation_ids))
@@ -399,7 +399,7 @@ async def preview_annotation_matches(
 
 @router.get("")
 async def list_relations(
-    user: ReadUser,
+    user: RelationReadUser,
     q: str = "",
     relation_type: RelationFilterType | None = None,
     created_by: str = "",
@@ -409,10 +409,9 @@ async def list_relations(
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=100),
 ) -> dict[str, Any]:
-    version_ids = await db.dataset_versions.distinct("id")
     clauses: list[dict[str, Any]] = [{"$or": [
         {"relation_type": "annotates"},
-        {"relation_type": "trained_on", "target_id": {"$in": version_ids}},
+        {"relation_type": "trained_on"},
     ]}]
     if status:
         clauses.append({"status": getattr(status, "value", status)})
@@ -465,18 +464,37 @@ async def list_relations(
         .skip((page - 1) * page_size)
         .limit(page_size)
     )
+    rows = [relation async for relation in cursor]
+    source_ids = list({relation["source_id"] for relation in rows})
+    target_ids = list({relation["target_id"] for relation in rows})
+    asset_ids = list({*source_ids, *target_ids})
+    assets = {
+        item["id"]: item
+        async for item in db.assets.find(
+            {"id": {"$in": asset_ids}}, {"id": 1, "name": 1, "type": 1, "tags": 1}
+        )
+    } if asset_ids else {}
+    missing_target_ids = [target_id for target_id in target_ids if target_id not in assets]
+    versions = {
+        item["id"]: item
+        async for item in db.dataset_versions.find(
+            {"id": {"$in": missing_target_ids}},
+            {"id": 1, "name": 1, "kind": 1, "version": 1},
+        )
+    } if missing_target_ids else {}
+    unresolved_ids = [target_id for target_id in missing_target_ids if target_id not in versions]
+    collections = {
+        item["id"]: item
+        async for item in db.collections.find(
+            {"id": {"$in": unresolved_ids}}, {"id": 1, "name": 1, "kind": 1}
+        )
+    } if unresolved_ids else {}
     items = []
-    async for relation in cursor:
-        source = await db.assets.find_one(
-            {"id": relation["source_id"]}, {"id": 1, "name": 1, "type": 1, "tags": 1}
-        )
-        target = await db.assets.find_one(
-            {"id": relation["target_id"]}, {"id": 1, "name": 1, "type": 1, "tags": 1}
-        ) or await db.dataset_versions.find_one(
-            {"id": relation["target_id"]}, {"id": 1, "name": 1, "kind": 1, "version": 1}
-        ) or await db.collections.find_one(
-            {"id": relation["target_id"]}, {"id": 1, "name": 1, "kind": 1}
-        )
+    for relation in rows:
+        source = assets.get(relation["source_id"])
+        target = assets.get(relation["target_id"]) or versions.get(
+            relation["target_id"]
+        ) or collections.get(relation["target_id"])
         item = public_document(relation) or {}
         item.update(
             {
@@ -498,7 +516,7 @@ async def list_relations(
 
 
 @router.get("/{relation_id}")
-async def get_relation(relation_id: str, user: ReadUser) -> dict[str, Any]:
+async def get_relation(relation_id: str, user: RelationReadUser) -> dict[str, Any]:
     relation = await db.relations.find_one({"id": relation_id})
     if relation is None:
         raise AppError(404, "RELATION_NOT_FOUND", "关联关系不存在")
@@ -518,7 +536,7 @@ async def get_relation(relation_id: str, user: ReadUser) -> dict[str, Any]:
 
 @router.post("/{relation_id}/revoke")
 async def revoke_relation(
-    relation_id: str, body: RevokeRelationRequest, request: Request, user: ManageUser
+    relation_id: str, body: RevokeRelationRequest, request: Request, user: RelationRevokeUser
 ) -> dict[str, Any]:
     relation = await db.relations.find_one({"id": relation_id})
     if relation is None:
@@ -561,7 +579,7 @@ async def revoke_relation(
 
 
 @router.get("/{relation_id}/revoke-preview")
-async def preview_revoke_relation(relation_id: str, user: ReadUser) -> dict[str, Any]:
+async def preview_revoke_relation(relation_id: str, user: RelationReadUser) -> dict[str, Any]:
     relation = await db.relations.find_one({"id": relation_id, "status": "active"})
     if relation is None:
         raise AppError(404, "RELATION_NOT_FOUND", "关联关系不存在或已撤销")
@@ -572,7 +590,7 @@ async def preview_revoke_relation(relation_id: str, user: ReadUser) -> dict[str,
 @router.get("/graph/{asset_id}")
 async def relation_graph(
     asset_id: str,
-    user: ReadUser,
+    user: RelationReadUser,
     depth: int = Query(2, ge=1, le=4),
     member_limit: int = Query(500, ge=0, le=500),
 ) -> dict[str, Any]:

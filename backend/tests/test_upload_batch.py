@@ -27,6 +27,30 @@ def test_batch_upload_returns_per_file_results(monkeypatch):
     assert result["items"][2]["session"]["upload_session_id"] == "two.jpg"
 
 
+def test_batch_upload_runs_in_bounded_windows(monkeypatch):
+    active = 0
+    peak = 0
+
+    async def initialize(item, user):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0)
+        active -= 1
+        return {"upload_session_id": item.filename}
+
+    monkeypatch.setattr(assets, "initialize_upload", initialize)
+    body = UploadBatchInitRequest(files=[
+        {"filename": f"{index}.jpg", "size": 1, "mime_type": "image/jpeg", "asset_type": "image"}
+        for index in range(37)
+    ])
+
+    result = asyncio.run(assets.initialize_upload_batch(body, {"id": "user"}))
+
+    assert peak == assets.UPLOAD_BATCH_WINDOW
+    assert [item["index"] for item in result["items"]] == list(range(37))
+
+
 def test_batch_completion_keeps_successes_when_one_session_fails(monkeypatch):
     async def complete(item, request, user):
         if item.upload_session_id == "bad":
@@ -84,6 +108,37 @@ def test_large_upload_uses_chunks(monkeypatch):
     assert result["chunk_count"] == 1
     assert result["upload_url"] is None
     assert inserted["transfer_mode"] == "chunks"
+
+
+def test_upload_session_is_not_saved_when_presign_fails(monkeypatch):
+    insert_one = AsyncMock()
+
+    monkeypatch.setattr(assets, "matching_name_assets", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        assets,
+        "db",
+        SimpleNamespace(
+            assets=SimpleNamespace(find_one=AsyncMock(return_value=None)),
+            upload_sessions=SimpleNamespace(insert_one=insert_one),
+        ),
+    )
+    monkeypatch.setattr(
+        assets,
+        "presigned_put",
+        lambda key: (_ for _ in ()).throw(RuntimeError("storage unavailable")),
+    )
+    body = assets.UploadInitRequest(
+        filename="failed.jpg", size=10, mime_type="image/jpeg", asset_type="image"
+    )
+
+    try:
+        asyncio.run(assets.initialize_upload(body, {"id": "user"}))
+    except RuntimeError as exc:
+        assert str(exc) == "storage unavailable"
+    else:
+        raise AssertionError("生成上传地址失败时必须终止任务创建")
+
+    insert_one.assert_not_awaited()
 
 
 def test_upload_limit_message_does_not_claim_default_limit(monkeypatch):
@@ -219,7 +274,7 @@ def test_upload_rename_selects_first_available_suffix(monkeypatch):
         name_conflict="rename",
     )
 
-    result = asyncio.run(assets.initialize_upload(body, {"id": "user"}))
+    result = asyncio.run(assets.initialize_upload(body, {"id": "user", "roles": ["data_manager"]}))
 
     assert inserted["filename"] == "same (2).jpg"
     assert result["overwrite_asset_id"] is None
@@ -253,7 +308,9 @@ def test_upload_overwrite_keeps_original_asset_id(monkeypatch):
         name_conflict="overwrite",
     )
 
-    result = asyncio.run(assets.initialize_upload(body, {"id": "user"}))
+    result = asyncio.run(
+        assets.initialize_upload(body, {"id": "user", "roles": ["data_manager"]})
+    )
 
     assert inserted["overwrite_asset_id"] == "original-asset"
     assert result["overwrite_asset_id"] == "original-asset"
@@ -297,6 +354,11 @@ def test_complete_overwrite_replaces_current_asset_and_preserves_metadata(monkey
         async def replace_one(self, query, document):
             replaced.update(document)
 
+    async def update_job(query, update, **kwargs):
+        if "$setOnInsert" in update:
+            inserted_job.update(update["$setOnInsert"])
+        return SimpleNamespace(modified_count=1)
+
     monkeypatch.setattr(
         assets,
         "db",
@@ -306,8 +368,7 @@ def test_complete_overwrite_replaces_current_asset_and_preserves_metadata(monkey
             ),
             assets=AssetStore(),
             jobs=SimpleNamespace(
-                insert_one=AsyncMock(side_effect=lambda document: inserted_job.update(document)),
-                update_one=AsyncMock(),
+                update_one=AsyncMock(side_effect=update_job),
             ),
         ),
     )
@@ -319,7 +380,7 @@ def test_complete_overwrite_replaces_current_asset_and_preserves_metadata(monkey
         assets.complete_upload(
             assets.UploadCompleteRequest(upload_session_id="session-1"),
             request,
-            {"id": "user", "username": "测试用户"},
+            {"id": "user", "username": "测试用户", "roles": ["admin"]},
         )
     )
 
@@ -328,3 +389,83 @@ def test_complete_overwrite_replaces_current_asset_and_preserves_metadata(monkey
     assert replaced["tags"] == {"status": ["已标注"]}
     assert replaced["remark"] == "保留备注"
     assert inserted_job["input"]["previous_object_key"] == "projects/old/original"
+    audit_call = assets.record_audit.await_args.kwargs
+    assert audit_call["action"] == "asset.overwritten"
+    assert audit_call["changes"]["previous_object_key"] == "projects/old/original"
+    assert audit_call["changes"]["new_object_key"] == "projects/new/original"
+    assert audit_call["changes"]["relations_preserved"] is True
+
+
+def test_upload_overwrite_requires_data_management_role(monkeypatch):
+    monkeypatch.setattr(
+        assets,
+        "matching_name_assets",
+        AsyncMock(return_value=[{"id": "original", "name": "same.jpg", "type": "image"}]),
+    )
+    body = assets.UploadInitRequest(
+        filename="same.jpg",
+        size=10,
+        mime_type="image/jpeg",
+        asset_type="image",
+        name_conflict="overwrite",
+    )
+
+    try:
+        asyncio.run(assets.initialize_upload(body, {"id": "user", "roles": ["annotator"]}))
+    except AppError as exc:
+        assert exc.status_code == 403
+        assert exc.code == "PERMISSION_DENIED"
+    else:
+        raise AssertionError("标注员不能覆盖原文件")
+
+
+def test_job_persistence_failure_keeps_upload_session_retryable(monkeypatch):
+    session_update = AsyncMock()
+
+    class AssetStore:
+        async def replace_one(self, query, document, **kwargs):
+            assert kwargs == {"upsert": True}
+
+    monkeypatch.setattr(
+        assets,
+        "db",
+        SimpleNamespace(
+            upload_sessions=SimpleNamespace(
+                find_one=AsyncMock(return_value={
+                    "id": "session-1",
+                    "asset_id": "asset-1",
+                    "filename": "new.jpg",
+                    "declared_size": 10,
+                    "mime_type": "image/jpeg",
+                    "asset_type": "image",
+                    "project": "未分类",
+                    "sha256": "digest",
+                    "object_key": "projects/new/original",
+                    "duplicate_asset_id": "shared-asset",
+                    "overwrite_asset_id": None,
+                    "processing_job_id": "job-1",
+                    "owner_id": "user",
+                    "state": "reused",
+                    "transfer_mode": "single",
+                    "expires_at": assets.now() + assets.timedelta(hours=1),
+                }),
+                update_one=session_update,
+            ),
+            assets=AssetStore(),
+            jobs=SimpleNamespace(update_one=AsyncMock(side_effect=RuntimeError("database down"))),
+        ),
+    )
+    request = SimpleNamespace(state=SimpleNamespace(request_id="test"))
+
+    try:
+        asyncio.run(assets.complete_upload(
+            assets.UploadCompleteRequest(upload_session_id="session-1"),
+            request,
+            {"id": "user", "username": "测试用户"},
+        ))
+    except RuntimeError as exc:
+        assert str(exc) == "database down"
+    else:
+        raise AssertionError("处理任务无法持久化时必须让完成请求失败")
+
+    session_update.assert_not_awaited()

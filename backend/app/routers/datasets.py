@@ -2,9 +2,9 @@ import asyncio
 import hashlib
 import json
 import re
+from contextlib import suppress
 from functools import wraps
 from datetime import timedelta
-from contextlib import suppress
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -15,7 +15,16 @@ from pymongo import ASCENDING, DESCENDING, UpdateOne
 from ..audit import record_audit
 from ..config import get_settings
 from ..database import db
-from ..dependencies import ReadUser, WriteUser
+from ..dataset_versioning import (
+    DATASET_COMPARE_DETAIL_LIMIT,
+    compare_version_memberships,
+    cursor_batches,
+)
+from ..dependencies import (
+    DatasetCreateEditUser, DatasetDeleteUser, DatasetExportUser, DatasetMembersUser,
+    DatasetModelUser, DatasetReadUser, DatasetVersionPublishUser,
+    DatasetVersionRestoreUser,
+)
 from ..errors import AppError
 from ..schemas import (
     DatasetCreate,
@@ -74,23 +83,56 @@ def serialize_dataset_write(function):
 
 
 async def _restore_memberships_from_version(dataset_id: str, version_id: str, actor_id: str) -> int:
-    members = await db.dataset_version_memberships.find({"version_id": version_id}).to_list(length=None)
-    workset_members = [
-        {"id": new_id(), "dataset_id": dataset_id, "asset_id": item["asset_id"],
-         "created_by": actor_id, "created_at": now()}
-        for item in members if item["snapshot"].get("type") != "annotation"
-    ]
     await db.dataset_memberships.delete_many({"dataset_id": dataset_id})
-    if workset_members:
-        await db.dataset_memberships.insert_many(workset_members)
+    restored = 0
+    cursor = db.dataset_version_memberships.find({"version_id": version_id}).sort(
+        "asset_id", ASCENDING
+    )
+    async for members in cursor_batches(cursor):
+        workset_members = [
+            {
+                "id": new_id(), "dataset_id": dataset_id, "asset_id": item["asset_id"],
+                "created_by": actor_id, "created_at": now(),
+            }
+            for item in members if item["snapshot"].get("type") != "annotation"
+        ]
+        if workset_members:
+            await db.dataset_memberships.insert_many(workset_members)
+        restored += len(members)
     await sync_annotation_memberships(dataset_id, actor_id)
     await db.datasets.update_one({"id": dataset_id}, {"$set": {"updated_at": now()}})
-    return len(members)
+    return restored
+
+
+async def _backup_dataset_memberships(dataset_id: str, restore_id: str) -> None:
+    expires_at = now() + timedelta(days=1)
+    cursor = db.dataset_memberships.find({"dataset_id": dataset_id}).sort("asset_id", ASCENDING)
+    async for members in cursor_batches(cursor):
+        await db.dataset_restore_backups.insert_many([
+            {
+                "restore_id": restore_id,
+                "dataset_id": dataset_id,
+                "membership": {key: value for key, value in item.items() if key != "_id"},
+                "created_at": now(),
+                "expires_at": expires_at,
+            }
+            for item in members
+        ])
+
+
+async def _restore_memberships_from_backup(dataset_id: str, restore_id: str) -> None:
+    await db.dataset_memberships.delete_many({"dataset_id": dataset_id})
+    cursor = db.dataset_restore_backups.find({"restore_id": restore_id}).sort(
+        "created_at", ASCENDING
+    )
+    async for rows in cursor_batches(cursor):
+        await db.dataset_memberships.insert_many([row["membership"] for row in rows])
 
 
 async def _resume_pending_restore(dataset_id: str) -> None:
     dataset = await db.datasets.find_one(
-        {"id": dataset_id}, {"restore_target_version_id": 1, "restore_actor_id": 1}
+        {"id": dataset_id},
+        {"restore_target_version_id": 1, "restore_actor_id": 1, "restore_backup_id": 1},
     )
     if not dataset or not dataset.get("restore_target_version_id"):
         return
@@ -99,9 +141,14 @@ async def _resume_pending_restore(dataset_id: str) -> None:
     if version is None:
         raise AppError(409, "DATASET_RESTORE_INVALID", "未完成的版本恢复指向无效版本")
     await _restore_memberships_from_version(dataset_id, version_id, dataset.get("restore_actor_id") or "system")
+    if dataset.get("restore_backup_id"):
+        with suppress(Exception):
+            await db.dataset_restore_backups.delete_many({"restore_id": dataset["restore_backup_id"]})
     await db.datasets.update_one(
         {"id": dataset_id},
-        {"$unset": {"restore_target_version_id": "", "restore_actor_id": ""}},
+        {"$unset": {
+            "restore_target_version_id": "", "restore_actor_id": "", "restore_backup_id": "",
+        }},
     )
 
 
@@ -220,7 +267,7 @@ async def _dataset_summaries(datasets: list[dict[str, Any]]) -> list[dict[str, A
 
 
 @router.post("", status_code=201)
-async def create_dataset(body: DatasetCreate, request: Request, user: WriteUser) -> dict[str, Any]:
+async def create_dataset(body: DatasetCreate, request: Request, user: DatasetCreateEditUser) -> dict[str, Any]:
     await _validate_status(body.status)
     timestamp = now()
     dataset = {
@@ -241,7 +288,7 @@ async def create_dataset(body: DatasetCreate, request: Request, user: WriteUser)
 
 @router.get("")
 async def list_datasets(
-    user: ReadUser, q: str | None = None, status: str | None = None,
+    user: DatasetReadUser, q: str | None = None, status: str | None = None,
     creator: str | None = None, updated_from: str | None = None,
     page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200),
 ) -> dict[str, Any]:
@@ -268,7 +315,7 @@ async def list_datasets(
 
 @router.get("/options")
 async def dataset_options(
-    user: ReadUser,
+    user: DatasetReadUser,
     q: str = Query("", max_length=120),
     page: int = Query(1, ge=1),
     page_size: int = Query(100, ge=1, le=200),
@@ -290,7 +337,7 @@ async def dataset_options(
 
 
 @router.get("/creators")
-async def dataset_creators(user: ReadUser) -> dict[str, Any]:
+async def dataset_creators(user: DatasetReadUser) -> dict[str, Any]:
     names = await db.datasets.distinct("created_by_name", {"deleted_at": None})
     return {"items": sorted(name for name in names if name)}
 
@@ -302,7 +349,7 @@ class DatasetCopyRequest(BaseModel):
 
 @router.post("/{dataset_id}/copy", status_code=201)
 @serialize_dataset_write
-async def copy_dataset(dataset_id: str, body: DatasetCopyRequest, request: Request, user: WriteUser) -> dict[str, Any]:
+async def copy_dataset(dataset_id: str, body: DatasetCopyRequest, request: Request, user: DatasetCreateEditUser) -> dict[str, Any]:
     original = await _get_dataset(dataset_id)
     name = body.name.strip()
     if not name:
@@ -333,7 +380,7 @@ async def copy_dataset(dataset_id: str, body: DatasetCopyRequest, request: Reque
 
 
 @router.get("/{dataset_id}/tag-distribution")
-async def dataset_tag_distribution(dataset_id: str, user: ReadUser) -> dict[str, Any]:
+async def dataset_tag_distribution(dataset_id: str, user: DatasetReadUser) -> dict[str, Any]:
     await _get_dataset(dataset_id)
     cursor = await db.dataset_memberships.aggregate([
         {"$match": {"dataset_id": dataset_id}},
@@ -352,13 +399,13 @@ async def dataset_tag_distribution(dataset_id: str, user: ReadUser) -> dict[str,
 
 
 @router.get("/{dataset_id}")
-async def get_dataset(dataset_id: str, user: ReadUser) -> dict[str, Any]:
+async def get_dataset(dataset_id: str, user: DatasetReadUser) -> dict[str, Any]:
     return await _dataset_summary(await _get_dataset(dataset_id))
 
 
 @router.patch("/{dataset_id}")
 @serialize_dataset_write
-async def update_dataset(dataset_id: str, body: DatasetUpdate, request: Request, user: WriteUser) -> dict[str, Any]:
+async def update_dataset(dataset_id: str, body: DatasetUpdate, request: Request, user: DatasetCreateEditUser) -> dict[str, Any]:
     await _get_dataset(dataset_id)
     await _validate_status(body.status)
     await db.datasets.update_one({"id": dataset_id}, {"$set": {"name": body.name.strip(), "remark": body.remark, "status": body.status, "updated_at": now()}})
@@ -368,7 +415,7 @@ async def update_dataset(dataset_id: str, body: DatasetUpdate, request: Request,
 
 @router.delete("/{dataset_id}", status_code=204)
 @serialize_dataset_write
-async def delete_dataset(dataset_id: str, request: Request, user: WriteUser) -> None:
+async def delete_dataset(dataset_id: str, request: Request, user: DatasetDeleteUser) -> None:
     await _get_dataset(dataset_id)
     version_ids = await db.dataset_versions.distinct("id", {"dataset_id": dataset_id})
     related_ids = [dataset_id, *version_ids]
@@ -392,7 +439,7 @@ async def delete_dataset(dataset_id: str, request: Request, user: WriteUser) -> 
 
 
 @router.get("/{dataset_id}/members")
-async def list_members(dataset_id: str, user: ReadUser, page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200), q: str = "", asset_type: list[str] = Query(default=[]), tag: list[str] = Query(default=[]), match: str = Query("all", pattern="^(all|any)$"), no_tags: bool = False, ids_only: bool = False) -> dict[str, Any]:
+async def list_members(dataset_id: str, user: DatasetReadUser, page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200), q: str = "", asset_type: list[str] = Query(default=[]), tag: list[str] = Query(default=[]), match: str = Query("all", pattern="^(all|any)$"), no_tags: bool = False, ids_only: bool = False) -> dict[str, Any]:
     await _get_dataset(dataset_id)
     clauses = [{"archived_at": None}, {"type": {"$ne": "annotation"}}]
     if q:
@@ -448,7 +495,7 @@ async def list_members(dataset_id: str, user: ReadUser, page: int = Query(1, ge=
 
 
 @router.post("/{dataset_id}/members/status")
-async def member_status(dataset_id: str, body: DatasetMembersRequest, user: ReadUser) -> dict[str, Any]:
+async def member_status(dataset_id: str, body: DatasetMembersRequest, user: DatasetReadUser) -> dict[str, Any]:
     await _get_dataset(dataset_id)
     ids = list(dict.fromkeys(body.asset_ids))
     existing = await db.dataset_memberships.distinct("asset_id", {
@@ -459,7 +506,7 @@ async def member_status(dataset_id: str, body: DatasetMembersRequest, user: Read
 
 @router.post("/{dataset_id}/members")
 @serialize_dataset_write
-async def add_members(dataset_id: str, body: DatasetMembersRequest, request: Request, user: WriteUser) -> dict[str, Any]:
+async def add_members(dataset_id: str, body: DatasetMembersRequest, request: Request, user: DatasetMembersUser) -> dict[str, Any]:
     await _get_dataset(dataset_id)
     ids = await resolve_selection_ids(user, body.asset_ids, body.selection_id, body.excluded_ids)
     assets = await db.assets.find({"id": {"$in": ids}, "archived_at": None}).to_list(length=len(ids))
@@ -491,7 +538,7 @@ async def add_members(dataset_id: str, body: DatasetMembersRequest, request: Req
 
 
 @router.post("/{dataset_id}/members/preview")
-async def preview_members(dataset_id: str, body: DatasetMembersRequest, user: ReadUser, action: str = Query("add", pattern="^(add|remove)$")) -> dict[str, Any]:
+async def preview_members(dataset_id: str, body: DatasetMembersRequest, user: DatasetReadUser, action: str = Query("add", pattern="^(add|remove)$")) -> dict[str, Any]:
     await _get_dataset(dataset_id)
     requested = set(await resolve_selection_ids(user, body.asset_ids, body.selection_id, body.excluded_ids))
     assets = await db.assets.find({"id": {"$in": list(requested)}, "archived_at": None}).to_list(length=None)
@@ -512,7 +559,7 @@ async def preview_members(dataset_id: str, body: DatasetMembersRequest, user: Re
 
 @router.delete("/{dataset_id}/members")
 @serialize_dataset_write
-async def remove_members(dataset_id: str, body: DatasetMembersRequest, request: Request, user: WriteUser) -> dict[str, Any]:
+async def remove_members(dataset_id: str, body: DatasetMembersRequest, request: Request, user: DatasetMembersUser) -> dict[str, Any]:
     await _get_dataset(dataset_id)
     ids = await resolve_selection_ids(user, body.asset_ids, body.selection_id, body.excluded_ids)
     if await db.assets.find_one({"id": {"$in": ids}, "type": "annotation"}):
@@ -534,7 +581,7 @@ async def remove_members(dataset_id: str, body: DatasetMembersRequest, request: 
 
 @router.post("/{dataset_id}/versions", status_code=201)
 @serialize_dataset_write
-async def publish_version(dataset_id: str, body: DatasetPublishRequest, request: Request, user: WriteUser) -> dict[str, Any]:
+async def publish_version(dataset_id: str, body: DatasetPublishRequest, request: Request, user: DatasetVersionPublishUser) -> dict[str, Any]:
     dataset = await _get_dataset(dataset_id)
     member_ids = await db.dataset_memberships.distinct("asset_id", {"dataset_id": dataset_id})
     assets = (
@@ -575,13 +622,13 @@ async def publish_version(dataset_id: str, body: DatasetPublishRequest, request:
 
 
 @router.get("/{dataset_id}/versions")
-async def list_versions(dataset_id: str, user: ReadUser) -> dict[str, Any]:
+async def list_versions(dataset_id: str, user: DatasetReadUser) -> dict[str, Any]:
     await _get_dataset(dataset_id)
     return {"items": [public_document(item) async for item in db.dataset_versions.find({"dataset_id": dataset_id}).sort("version_number", DESCENDING)]}
 
 
 @router.get("/{dataset_id}/models")
-async def list_dataset_models(dataset_id: str, user: ReadUser) -> dict[str, Any]:
+async def list_dataset_models(dataset_id: str, user: DatasetReadUser) -> dict[str, Any]:
     await _get_dataset(dataset_id)
     version_ids = await db.dataset_versions.distinct("id", {"dataset_id": dataset_id})
     relations = await db.relations.find(
@@ -624,7 +671,7 @@ async def list_dataset_models(dataset_id: str, user: ReadUser) -> dict[str, Any]
 @router.post("/{dataset_id}/models")
 @serialize_dataset_write
 async def add_dataset_model(
-    dataset_id: str, body: DatasetModelLinkRequest, request: Request, user: WriteUser
+    dataset_id: str, body: DatasetModelLinkRequest, request: Request, user: DatasetModelUser
 ) -> dict[str, Any]:
     await _get_dataset(dataset_id)
     version = await db.dataset_versions.find_one(
@@ -720,7 +767,7 @@ async def add_dataset_model(
 @router.delete("/{dataset_id}/models/{relation_id}")
 @serialize_dataset_write
 async def remove_dataset_model(
-    dataset_id: str, relation_id: str, request: Request, user: WriteUser
+    dataset_id: str, relation_id: str, request: Request, user: DatasetModelUser
 ) -> dict[str, Any]:
     await _get_dataset(dataset_id)
     primary = await db.relations.find_one(
@@ -755,74 +802,100 @@ async def remove_dataset_model(
 
 
 @router.get("/{dataset_id}/versions/{version_id}")
-async def get_version(dataset_id: str, version_id: str, user: ReadUser) -> dict[str, Any]:
+async def get_version(
+    dataset_id: str,
+    version_id: str,
+    user: DatasetReadUser,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(200, ge=1, le=500),
+) -> dict[str, Any]:
     await _get_dataset(dataset_id)
     version = await db.dataset_versions.find_one({"id": version_id, "dataset_id": dataset_id})
     if version is None:
         raise AppError(404, "DATASET_VERSION_NOT_FOUND", "数据集版本不存在")
-    items = [public_document(item) async for item in db.dataset_version_memberships.find({"version_id": version_id}).sort("asset_id", ASCENDING)]
-    return {**(public_document(version) or {}), "members": items}
+    total = await db.dataset_version_memberships.count_documents({"version_id": version_id})
+    cursor = db.dataset_version_memberships.find({"version_id": version_id}).sort(
+        "asset_id", ASCENDING
+    ).skip((page - 1) * page_size).limit(page_size)
+    items = [public_document(item) async for item in cursor]
+    return {
+        **(public_document(version) or {}),
+        "members": items,
+        "member_total": total,
+        "page": page,
+        "page_size": page_size,
+    }
 
 
 @router.get("/{dataset_id}/compare")
-async def compare_versions(dataset_id: str, from_version_id: str, to_version_id: str, user: ReadUser) -> dict[str, Any]:
+async def compare_versions(dataset_id: str, from_version_id: str, to_version_id: str, user: DatasetReadUser) -> dict[str, Any]:
     await _get_dataset(dataset_id)
     versions = await db.dataset_versions.find({"dataset_id": dataset_id, "id": {"$in": [from_version_id, to_version_id]}}).to_list(length=2)
     if len(versions) != 2 or from_version_id == to_version_id:
         raise AppError(400, "DATASET_VERSION_COMPARE_INVALID", "请选择两个不同的数据集版本")
-    before = {m["asset_id"]: m async for m in db.dataset_version_memberships.find({"version_id": from_version_id})}
-    after = {m["asset_id"]: m async for m in db.dataset_version_memberships.find({"version_id": to_version_id})}
-    added, removed, unchanged, changed = [], [], [], []
-    for asset_id in sorted(set(before) | set(after)):
-        if asset_id not in before:
-            added.append(after[asset_id])
-        elif asset_id not in after:
-            removed.append(before[asset_id])
-        elif before[asset_id]["snapshot"] == after[asset_id]["snapshot"]:
-            unchanged.append(after[asset_id])
-        else:
-            changed.append({"asset_id": asset_id, "before": before[asset_id]["snapshot"], "after": after[asset_id]["snapshot"]})
-    return {"added": [public_document(i) for i in added], "removed": [public_document(i) for i in removed], "unchanged": [public_document(i) for i in unchanged], "changed": changed, "counts": {"added": len(added), "removed": len(removed), "unchanged": len(unchanged), "changed": len(changed), "total_changed": len(added)+len(removed)+len(changed)}}
+    return await compare_version_memberships(
+        db, from_version_id, to_version_id, DATASET_COMPARE_DETAIL_LIMIT
+    )
 
 
 @router.post("/{dataset_id}/restore")
 @serialize_dataset_write
-async def restore_version(dataset_id: str, body: DatasetRestoreRequest, request: Request, user: WriteUser) -> dict[str, Any]:
+async def restore_version(dataset_id: str, body: DatasetRestoreRequest, request: Request, user: DatasetVersionRestoreUser) -> dict[str, Any]:
     await _get_dataset(dataset_id)
     version = await db.dataset_versions.find_one({"id": body.version_id, "dataset_id": dataset_id})
     if version is None:
         raise AppError(404, "DATASET_VERSION_NOT_FOUND", "数据集版本不存在")
-    members = await db.dataset_version_memberships.find({"version_id": body.version_id}).to_list(length=None)
-    backup = await db.dataset_memberships.find({"dataset_id": dataset_id}).to_list(length=None)
-    valid_ids = await db.assets.distinct("id", {"id": {"$in": [item["asset_id"] for item in members]}, "archived_at": None, "type": {"$ne": "model"}})
-    invalid = sorted({item["asset_id"] for item in members} - set(valid_ids))
+    invalid = []
+    member_count = 0
+    member_cursor = db.dataset_version_memberships.find({"version_id": body.version_id}).sort(
+        "asset_id", ASCENDING
+    )
+    async for members in cursor_batches(member_cursor):
+        member_ids = [item["asset_id"] for item in members]
+        valid_ids = set(await db.assets.distinct(
+            "id", {"id": {"$in": member_ids}, "archived_at": None, "type": {"$ne": "model"}}
+        ))
+        invalid.extend(asset_id for asset_id in member_ids if asset_id not in valid_ids)
+        member_count += len(members)
     if invalid:
-        raise AppError(409, "DATASET_HAS_INVALID_ASSETS", "版本中包含已删除或失效素材", {"asset_ids": invalid})
+        raise AppError(409, "DATASET_HAS_INVALID_ASSETS", "版本中包含已删除或失效素材", {"asset_ids": sorted(invalid)})
+    restore_id = new_id()
+    await _backup_dataset_memberships(dataset_id, restore_id)
     await db.datasets.update_one(
         {"id": dataset_id},
-        {"$set": {"restore_target_version_id": body.version_id, "restore_actor_id": user["id"]}},
+        {"$set": {
+            "restore_target_version_id": body.version_id,
+            "restore_actor_id": user["id"],
+            "restore_backup_id": restore_id,
+        }},
     )
     try:
         await _restore_memberships_from_version(dataset_id, body.version_id, user["id"])
     except Exception:
-        await db.dataset_memberships.delete_many({"dataset_id": dataset_id})
-        if backup:
-            await db.dataset_memberships.insert_many(backup)
+        await _restore_memberships_from_backup(dataset_id, restore_id)
+        with suppress(Exception):
+            await db.dataset_restore_backups.delete_many({"restore_id": restore_id})
         await db.datasets.update_one(
             {"id": dataset_id},
-            {"$unset": {"restore_target_version_id": "", "restore_actor_id": ""}},
+            {"$unset": {
+                "restore_target_version_id": "", "restore_actor_id": "", "restore_backup_id": "",
+            }},
         )
         raise
     await record_audit(actor=user, action="dataset.version_restored", object_type="dataset", object_id=dataset_id, request_id=request.state.request_id, changes={"version_id": body.version_id})
     await db.datasets.update_one(
         {"id": dataset_id},
-        {"$unset": {"restore_target_version_id": "", "restore_actor_id": ""}},
+        {"$unset": {
+            "restore_target_version_id": "", "restore_actor_id": "", "restore_backup_id": "",
+        }},
     )
-    return {"restored": len(members)}
+    with suppress(Exception):
+        await db.dataset_restore_backups.delete_many({"restore_id": restore_id})
+    return {"restored": member_count}
 
 
 @router.post("/{dataset_id}/export", status_code=202)
-async def export_dataset(dataset_id: str, body: DatasetExportRequest, request: Request, user: WriteUser) -> dict[str, Any]:
+async def export_dataset(dataset_id: str, body: DatasetExportRequest, request: Request, user: DatasetExportUser) -> dict[str, Any]:
     dataset = await _get_dataset(dataset_id)
     asset_ids = await db.dataset_memberships.distinct("asset_id", {"dataset_id": dataset_id})
     if not asset_ids:

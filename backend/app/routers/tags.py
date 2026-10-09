@@ -4,7 +4,7 @@ from fastapi import APIRouter, Request
 
 from ..audit import record_audit
 from ..database import db
-from ..dependencies import AdminUser, ReadUser
+from ..dependencies import TagManageUser, TagReadUser
 from ..errors import AppError
 from ..schemas import TagDefinitionCreate, TagDefinitionUpdate
 from ..utils import new_id, now, public_document
@@ -13,7 +13,7 @@ router = APIRouter(prefix="/tag-definitions", tags=["tags"])
 
 
 @router.get("")
-async def list_tags(user: ReadUser) -> dict[str, Any]:
+async def list_tags(user: TagReadUser) -> dict[str, Any]:
     return {
         "items": [public_document(item) async for item in db.tag_definitions.find().sort("name", 1)]
     }
@@ -21,7 +21,7 @@ async def list_tags(user: ReadUser) -> dict[str, Any]:
 
 @router.post("", status_code=201)
 async def create_tag(
-    body: TagDefinitionCreate, request: Request, user: AdminUser
+    body: TagDefinitionCreate, request: Request, user: TagManageUser
 ) -> dict[str, Any]:
     if await db.tag_definitions.find_one({"key": body.key}):
         raise AppError(409, "TAG_DEFINITION_EXISTS", "标签字段已经存在")
@@ -46,7 +46,7 @@ async def create_tag(
 
 @router.patch("/{key}")
 async def update_tag(
-    key: str, body: TagDefinitionUpdate, request: Request, user: AdminUser
+    key: str, body: TagDefinitionUpdate, request: Request, user: TagManageUser
 ) -> dict[str, Any]:
     changes = body.model_dump(mode="json")
     changes["updated_at"] = now()
@@ -62,7 +62,7 @@ async def update_tag(
 
 
 @router.delete("/{key}", status_code=204)
-async def delete_tag(key: str, request: Request, user: AdminUser) -> None:
+async def delete_tag(key: str, request: Request, user: TagManageUser) -> None:
     definition = await db.tag_definitions.find_one({"key": key})
     if not definition:
         raise AppError(404, "TAG_DEFINITION_NOT_FOUND", "标签字段不存在")

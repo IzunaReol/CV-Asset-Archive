@@ -17,7 +17,8 @@ CV Asset Archive is an asset and relationship management system for computer vis
 - Soft deletion, recycle-bin recovery, and background physical cleanup
 - Unified job center with type, state, and creation-time filters, retry, export cancellation, heartbeats, and expiring downloads
 - Chunked uploads for files 64 MB and larger, with pause, resume, and session recovery after reselecting the same file
-- User, role, tag, format, and audit management, with deletion protection for built-in tags
+- Fixed and custom roles with separate menu-access and operation permissions enforced by both the UI and backend APIs
+- Tag, format, and audit management, with deletion protection for built-in tags
 - Dataset membership, immutable versions, custom version names, comparison, and restoration
 - Dataset duplication, version-specific model relationships, and dataset exports
 - Light and dark themes
@@ -89,7 +90,7 @@ bash start-linux.sh
 
 Default endpoints:
 
-- Web: `http://localhost:8080`
+- Web: `http://localhost:8080` (change `FRONTEND_PORT` in `.env` when the port is occupied)
 - API documentation: `http://localhost:8000/docs`
 - Readiness check: `http://localhost:8000/health/ready`
 - MinIO console: `http://localhost:9001`
@@ -126,13 +127,13 @@ npm run test:ui
 npm run build
 ```
 
-The isolated API workflow test is available at `scripts/runtime-e2e.py`. See the [testing guide](docs/testing.md) and [v1.5.1 release checklist](docs/release-checklist.md) for the full scope.
+The isolated API workflow test is available at `scripts/runtime-e2e.py`. See the [testing guide](docs/testing.md) and [v1.6.0 release checklist](docs/release-checklist.md) for the full scope.
 
-## Preparing to upgrade to v1.5.1
+## Preparing to upgrade to v1.6.0
 
-Back up MongoDB, MinIO, and deployment configuration before upgrading from v1.5.0. Update the source and dependencies, rebuild the frontend, and verify dialog keyboard behavior, relationship pagination, invalid filter handling, and historical export-size backfill. The new maintenance-run index is created automatically at startup.
+Back up MongoDB, MinIO, and deployment configuration before upgrading from v1.5.1. Update Python dependencies, rebuild the frontend, and verify authentication tokens, MinIO access, relationship history, and dataset version details, comparison, and restore. Temporary restore-backup and maintenance-retention indexes are created automatically.
 
-See the [dataset guide](docs/datasets.md) and [v1.5.1 release notes](docs/releases/v1.5.1.md) for added features and changes.
+See the [dataset guide](docs/datasets.md) and [v1.6.0 release notes](docs/releases/v1.6.0.md) for added features and changes.
 
 ## Documentation
 

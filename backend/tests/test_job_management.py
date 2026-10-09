@@ -53,6 +53,56 @@ def test_task_center_excludes_asset_processing_jobs(monkeypatch):
     assert result["items"] == []
 
 
+def test_pending_upload_jobs_are_dispatched_and_marked(monkeypatch):
+    job = {
+        "id": "upload-job",
+        "type": "process_asset",
+        "state": "queued",
+        "input": {"asset_id": "asset-1"},
+    }
+    update_one = AsyncMock(return_value=SimpleNamespace(modified_count=1))
+    monkeypatch.setattr(
+        jobs,
+        "db",
+        SimpleNamespace(jobs=SimpleNamespace(
+            find=lambda *args, **kwargs: AsyncRows([job]),
+            update_one=update_one,
+        )),
+    )
+    dispatch = AsyncMock()
+    monkeypatch.setattr(jobs, "_dispatch_job", dispatch)
+
+    result = asyncio.run(jobs.dispatch_pending_process_jobs())
+
+    assert result == 1
+    dispatch.assert_awaited_once_with(job)
+    assert update_one.await_args.args[1]["$set"]["dispatched_at"]
+
+
+def test_failed_pending_upload_dispatch_stays_queued(monkeypatch):
+    job = {
+        "id": "upload-job",
+        "type": "process_asset",
+        "state": "queued",
+        "input": {"asset_id": "asset-1"},
+    }
+    update_one = AsyncMock(return_value=SimpleNamespace(modified_count=1))
+    monkeypatch.setattr(
+        jobs,
+        "db",
+        SimpleNamespace(jobs=SimpleNamespace(
+            find=lambda *args, **kwargs: AsyncRows([job]),
+            update_one=update_one,
+        )),
+    )
+    monkeypatch.setattr(jobs, "_dispatch_job", AsyncMock(side_effect=RuntimeError("broker down")))
+
+    result = asyncio.run(jobs.dispatch_pending_process_jobs())
+
+    assert result == 0
+    assert "broker down" in update_one.await_args.args[1]["$set"]["dispatch_error"]
+
+
 def test_task_center_backfills_export_file_size(monkeypatch):
     job = {
         "id": "job-1",
@@ -154,6 +204,22 @@ def test_task_center_backfill_does_not_block_valid_job_after_corrupted_object(mo
     assert result["processed"] == 2
     assert result["succeeded"] == 1
     assert result["failed"] == 1
+
+
+def test_task_center_backfill_persists_expiring_maintenance_summary(monkeypatch):
+    insert_one = AsyncMock()
+    database = SimpleNamespace(
+        jobs=SimpleNamespace(find=lambda *args, **kwargs: AsyncRows([])),
+        maintenance_runs=SimpleNamespace(insert_one=insert_one),
+    )
+    monkeypatch.setattr(jobs, "db", database)
+
+    result = asyncio.run(jobs.backfill_export_sizes())
+
+    stored = insert_one.await_args.args[0]
+    assert stored["type"] == "export_size_backfill"
+    assert stored["expires_at"] == result["expires_at"]
+    assert 89 <= (stored["expires_at"] - stored["last_run_at"]).days <= 90
 
 
 def test_task_center_listing_does_not_read_object_storage(monkeypatch):

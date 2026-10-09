@@ -103,6 +103,7 @@ export const api = {
   createAssetSelection: (body:Record<string,unknown>) => request<{selection_id:string;total:number}>('/assets/selection-sets', {method:'POST',body:JSON.stringify(body)}),
   assetStats: () => request<AssetStats>('/assets/stats'),
   asset: (id:string) => request<any>(`/assets/${id}`),
+  assetHistory: (id:string) => request<any>(`/assets/${id}/history`),
   updateAssetRemark: (id:string, remark:string) => request<any>(`/assets/${id}/remark`, {method:'PATCH',body:JSON.stringify({remark})}),
   annotationOverlays: (id:string) => request<any>(`/assets/${id}/annotation-overlays`),
   archiveAsset: (id:string) => request<any>(`/assets/${id}/archive`, {method:'POST'}),
@@ -146,7 +147,7 @@ export const api = {
   addDatasetMembers: (id:string, body:Record<string,unknown>) => request<any>(`/datasets/${id}/members`, {method:'POST',body:JSON.stringify(body)}),
   previewDatasetMembers: (id:string, body:Record<string,unknown>, action:'add'|'remove') => request<any>(`/datasets/${id}/members/preview?action=${action}`, {method:'POST',body:JSON.stringify(body)}),
   removeDatasetMembers: (id:string, body:Record<string,unknown>) => request<any>(`/datasets/${id}/members`, {method:'DELETE',body:JSON.stringify(body)}),
-  datasetVersion: (id:string, versionId:string) => request<any>(`/datasets/${id}/versions/${versionId}`),
+  datasetVersion: (id:string, versionId:string, page=1, pageSize=200) => request<any>(`/datasets/${id}/versions/${versionId}?page=${page}&page_size=${pageSize}`),
   datasetVersions: (id:string) => request<any>(`/datasets/${id}/versions`),
   datasetModels: (id:string) => request<any>(`/datasets/${id}/models`),
   addDatasetModel: (id:string, body:Record<string,unknown>) => request<any>(`/datasets/${id}/models`, {method:'POST',body:JSON.stringify(body)}),
@@ -157,7 +158,7 @@ export const api = {
   exportDataset: (id:string, name?:string) => request<any>(`/datasets/${id}/export`, {method:'POST',body:JSON.stringify({name:name||null})}),
   savedViews: () => request<any>('/saved-views'),
   createSavedView: (body:Record<string, unknown>) => request<any>('/saved-views', {method:'POST',body:JSON.stringify(body)}),
-  updateSavedView: (id:string, name:string) => request<any>(`/saved-views/${id}`, {method:'PATCH',body:JSON.stringify({name})}),
+  updateSavedView: (id:string, body:Record<string,unknown>) => request<any>(`/saved-views/${id}`, {method:'PATCH',body:JSON.stringify(body)}),
   deleteSavedView: (id:string) => request<void>(`/saved-views/${id}`, {method:'DELETE'}),
   createExport: (body:Record<string, unknown>) => request<any>('/exports', {method:'POST',body:JSON.stringify(body)}),
   jobs: (page=1, pageSize=20, type='', state='', createdFrom='', createdTo='') => request<ApiList<Job>>(`/jobs?page=${page}&page_size=${pageSize}${type ? `&type=${encodeURIComponent(type)}` : ''}${state ? `&state=${encodeURIComponent(state)}` : ''}${createdFrom ? `&created_from=${encodeURIComponent(createdFrom)}` : ''}${createdTo ? `&created_to=${encodeURIComponent(createdTo)}` : ''}`),
@@ -169,6 +170,8 @@ export const api = {
   updateTag: (key:string, body:Record<string, unknown>) => request<any>(`/tag-definitions/${encodeURIComponent(key)}`, {method:'PATCH',body:JSON.stringify(body)}),
   deleteTag: (key:string) => request<void>(`/tag-definitions/${encodeURIComponent(key)}`, {method:'DELETE'}),
   users: () => request<any>('/users'),
+  roles: () => request<any>('/roles'),
+  myPermissions: () => request<any>('/permissions/me'),
   createUser: (body:Record<string, unknown>) => request<any>('/users', {method:'POST',body:JSON.stringify(body)}),
   updateUser: (id:string, body:Record<string, unknown>) => request<any>(`/users/${id}`, {method:'PATCH',body:JSON.stringify(body)}),
   deleteUser: (id:string) => request<void>(`/users/${id}`, {method:'DELETE'}),
@@ -176,5 +179,9 @@ export const api = {
   createFormat: (body:Record<string, unknown>) => request<any>('/format-definitions', {method:'POST',body:JSON.stringify(body)}),
   updateFormat: (type:string, body:Record<string, unknown>) => request<any>(`/format-definitions/${encodeURIComponent(type)}`, {method:'PATCH',body:JSON.stringify(body)}),
   deleteFormat: (type:string) => request<void>(`/format-definitions/${encodeURIComponent(type)}`, {method:'DELETE'}),
-  auditLogs: () => request<any>('/audit-logs?page_size=20'),
+  auditLogs: (filters:Record<string,string|number>={}) => {
+    const params=new URLSearchParams()
+    for (const [key,value] of Object.entries(filters)) if (value !== '') params.set(key,String(value))
+    return request<any>(`/audit-logs?${params}`)
+  },
 }

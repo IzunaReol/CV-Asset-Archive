@@ -13,6 +13,7 @@ from app.schemas import (
     RelationCreate,
     RevokeRelationRequest,
     SavedViewUpdate,
+    SavedViewCreate,
     TagDefinitionCreate,
     TagDefinitionUpdate,
     UploadInitRequest,
@@ -93,6 +94,13 @@ def test_tag_key_is_storage_safe():
 def test_saved_view_name_cannot_be_empty():
     with pytest.raises(ValidationError):
         SavedViewUpdate(name="")
+
+
+def test_saved_view_has_explicit_share_scope():
+    assert SavedViewCreate(name="我的视图", query={}).shared_scope == "private"
+    assert SavedViewCreate(name="团队视图", query={}, shared_scope="team").shared_scope == "team"
+    with pytest.raises(ValidationError):
+        SavedViewCreate(name="错误范围", query={}, shared_scope="public")
 
 
 def test_tag_update_rejects_invalid_color():

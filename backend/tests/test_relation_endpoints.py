@@ -202,13 +202,19 @@ async def test_list_relations_applies_filters_and_resolves_names(monkeypatch):
     )
     assets = SimpleNamespace(
         distinct=AsyncMock(return_value=["a1"]),
-        find_one=AsyncMock(side_effect=[{"id": "a1", "name": "模型", "type": "model"}, None]),
+        find=lambda *args, **kwargs: Cursor([
+            {"id": "a1", "name": "模型", "type": "model"}
+        ]),
     )
     versions = SimpleNamespace(
-        distinct=AsyncMock(side_effect=[["v1"], ["v1"]]),
-        find_one=AsyncMock(return_value={"id": "v1", "name": "训练集 v1", "kind": "dataset_version"}),
+        distinct=AsyncMock(return_value=["v1"]),
+        find=lambda *args, **kwargs: Cursor([
+            {"id": "v1", "name": "训练集 v1", "kind": "dataset_version"}
+        ]),
     )
-    collections = SimpleNamespace(distinct=AsyncMock(return_value=[]), find_one=AsyncMock(return_value=None))
+    collections = SimpleNamespace(
+        distinct=AsyncMock(return_value=[]), find=lambda *args, **kwargs: Cursor([])
+    )
     monkeypatch.setattr(relations, "db", SimpleNamespace(
         relations=relation_store, assets=assets, dataset_versions=versions, collections=collections,
     ))

@@ -36,8 +36,9 @@ API 保存业务元数据并签发 MinIO 地址。浏览器直接传输大文件
 | `jobs` | type, state, progress, input, result, error, heartbeat_at, expires_at | 后台任务、取消状态和运行心跳 |
 | `tag_definitions` | key, name, values, color, free_input, built_in | 标签字段配置及默认标签保护 |
 | `format_definitions` | asset_type, extensions, protected_extensions, built_in, remark | 格式识别配置 |
-| `users` | username, password_hash, status, roles | 用户与角色 |
-| `audit_logs` | actor_id, action, object_type, object_id, changes, request_id | 只追加审计 |
+| `users` | username, password_hash, status, roles, menu_permissions, action_permissions | 用户、角色、菜单权限与操作权限 |
+| `audit_logs` | actor_username, action, object_type, object_id, object_name, changes, request_id, created_at | 系统关键操作审计日志 |
+| `audit_logs` | actor_id, action, object_type, object_id, object_name, changes, request_id | 只追加审计 |
 
 ## 素材与格式
 
@@ -76,11 +77,17 @@ API 保存业务元数据并签发 MinIO 地址。浏览器直接传输大文件
 
 删除素材先进入回收站。还原会清除删除状态；清空回收站由后台任务物理删除 MinIO 对象和相关记录。
 
-导出 ZIP 只包含所选原文件，同名文件自动增加标识避免覆盖。任务中心统一展示素材处理、素材导出、数据集导出和清空回收站任务，支持筛选、失败重试和导出取消。Worker 定期写入运行心跳，API 启动时恢复长时间无更新的异常任务。
+导出 ZIP 只包含所选原文件，同名文件自动增加标识避免覆盖。任务中心展示素材导出、数据集导出和清空回收站任务，不展示内部素材处理任务；支持筛选、失败重试和导出取消。Worker 定期写入运行心跳，API 启动时恢复长时间无更新的异常任务。
 
 ## 安全与权限
 
-访问令牌短期有效且仅保存在前端运行内存中；可撤销的刷新令牌保存在 `HttpOnly`、`SameSite=Strict` Cookie 中，不暴露给前端脚本。密码使用 Argon2 哈希。系统提供管理员、数据管理员、标注员、算法工程师和只读访客五类角色。所有关键写操作记录请求 ID 和审计事件。
+访问令牌短期有效且仅保存在前端运行内存中；可撤销的刷新令牌保存在 `HttpOnly`、`SameSite=Strict` Cookie 中，不暴露给前端脚本。密码使用 Argon2 哈希。
+
+系统提供管理员、数据管理员、标注员、算法工程师、只读访客和自定义六类角色。固定角色使用系统预设权限；自定义角色分别保存菜单权限与操作权限，也可以从固定角色模板复制后继续调整。菜单权限决定页面和只读接口是否可访问，操作权限决定上传、编辑、删除、保存视图、关系维护、导出、回收站、标签、格式和用户管理等动作是否可执行。数据集权限进一步拆分为创建编辑、成员管理、版本发布、版本恢复、删除和模型关联。前端仅负责隐藏无权限入口，后端依赖校验是最终权限边界。操作权限必须依附于对应菜单，移除菜单时同步移除该菜单下的操作权限。
+
+登录或恢复会话后，前端通过当前用户权限接口同步有效权限，只加载当前有权访问页面所需的数据，不预取无权限菜单的数据。用户资料或权限变更会撤销其刷新会话；已有访问令牌发起请求时仍会读取数据库中的最新权限。所有关键写操作记录请求 ID 和审计事件。
+
+系统日志使用独立菜单权限。管理员默认可以访问，自定义角色可以只获得系统日志读取权限而不获得用户管理权限。日志页面支持关键字、操作、对象类型、创建时间和分页筛选，列表展示目标类型和名称，右侧详情使用中文字段展示完整变更内容。
 
 开发环境首次启动创建 `admin/admin`。正式部署必须通过环境变量替换管理员密码、JWT 密钥和 MinIO 凭据；生产模式会拒绝默认、空值或过短的凭据。
 
@@ -89,4 +96,6 @@ API 保存业务元数据并签发 MinIO 地址。浏览器直接传输大文件
 - 单机部署，不包含高可用、多租户和 Kubernetes；
 - CVAT 和 MLflow 在线集成尚未实现；
 - Linux Docker 全新部署和生产备份恢复尚未完成实机演练；
+
+前端的弹窗键盘行为和关系分页使用独立工具模块；后端的数据集版本流式对比位于 `dataset_versioning.py`，路由仅负责权限、参数和响应编排。新增大数据量逻辑应继续放入独立服务模块，避免继续扩大页面和路由文件。
 - 超大列表仍采用分页和分批加载，前端尚未使用虚拟滚动。

@@ -1,31 +1,66 @@
+import asyncio
 import re
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from pymongo import DESCENDING
 
-from ..audit import record_audit
+from ..audit import record_audit, resolve_audit_object_name
 from ..database import db
-from ..dependencies import AdminUser, ManageUser, ReadUser
+from ..dependencies import (
+    FormatManageUser, FormatReadUser, ReadUser, SystemLogReadUser, UserManageUser,
+)
 from ..errors import AppError
 from ..schemas import AssetType, Role
+from ..permissions import (
+    ACTION_DEFINITIONS, ACTION_MENU, MENU_DEFINITIONS, ROLE_ACTION_PERMISSIONS,
+    ROLE_MENU_PERMISSIONS, ActionPermission, MenuPermission,
+    effective_action_permissions, effective_menu_permissions,
+)
 from ..security import hash_password
 from ..utils import new_id, now, public_document
 
 router = APIRouter(tags=["administration"])
 
+class UserPermissionsMixin(BaseModel):
+    roles: list[Role] = Field(min_length=1, max_length=1)
+    menu_permissions: list[MenuPermission] = Field(default_factory=list)
+    action_permissions: list[ActionPermission] = Field(default_factory=list)
 
-class UserCreate(BaseModel):
+    @model_validator(mode="after")
+    def normalize_menu_permissions(self):
+        role = self.roles[0]
+        if role is Role.CUSTOM:
+            self.menu_permissions = list(dict.fromkeys(self.menu_permissions))
+            self.action_permissions = list(dict.fromkeys(self.action_permissions))
+            if "dataset_manage" in self.action_permissions:
+                self.action_permissions = [key for key in self.action_permissions if key != "dataset_manage"]
+                self.action_permissions.extend([
+                    "dataset_create_edit", "dataset_members_manage", "dataset_version_publish",
+                    "dataset_version_restore", "dataset_delete", "dataset_model_manage",
+                ])
+                self.action_permissions = list(dict.fromkeys(self.action_permissions))
+            if not self.menu_permissions:
+                raise ValueError("自定义角色请至少选择一个菜单权限")
+            invalid = [key for key in self.action_permissions if ACTION_MENU[key] not in self.menu_permissions]
+            if invalid:
+                raise ValueError("操作权限必须先启用对应菜单")
+        else:
+            self.menu_permissions = list(ROLE_MENU_PERMISSIONS[role.value])
+            self.action_permissions = list(ROLE_ACTION_PERMISSIONS[role.value])
+        return self
+
+
+class UserCreate(UserPermissionsMixin):
     username: str = Field(pattern=r"^[a-zA-Z0-9_.-]{3,50}$")
     password: str = Field(min_length=8, max_length=128)
-    roles: list[Role] = Field(min_length=1)
 
 
-class UserUpdate(BaseModel):
+class UserUpdate(UserPermissionsMixin):
     username: str = Field(pattern=r"^[a-zA-Z0-9_.-]{3,50}$")
     password: str | None = Field(default=None, min_length=8, max_length=128)
-    roles: list[Role] = Field(min_length=1)
     status: str = Field(pattern=r"^(active|disabled)$")
 
 
@@ -79,14 +114,14 @@ async def ensure_extensions_removable(asset_type: str, removed: list[str]) -> No
 
 
 @router.get("/users")
-async def list_users(user: AdminUser) -> dict[str, Any]:
+async def list_users(user: UserManageUser) -> dict[str, Any]:
     return {
         "items": [public_document(item) async for item in db.users.find().sort("created_at", -1)]
     }
 
 
 @router.post("/users", status_code=201)
-async def create_user(body: UserCreate, request: Request, user: AdminUser) -> dict[str, Any]:
+async def create_user(body: UserCreate, request: Request, user: UserManageUser) -> dict[str, Any]:
     if await db.users.find_one({"username": body.username}):
         raise AppError(409, "USER_EXISTS", "用户名已经存在")
     document = {
@@ -94,6 +129,8 @@ async def create_user(body: UserCreate, request: Request, user: AdminUser) -> di
         "username": body.username,
         "password_hash": hash_password(body.password),
         "roles": [role.value for role in body.roles],
+        "menu_permissions": body.menu_permissions,
+        "action_permissions": body.action_permissions,
         "status": "active",
         "must_change_password": True,
         "created_at": now(),
@@ -106,12 +143,20 @@ async def create_user(body: UserCreate, request: Request, user: AdminUser) -> di
         object_type="user",
         object_id=document["id"],
         request_id=request.state.request_id,
+        object_name=document["username"],
+        changes={
+            "username": document["username"],
+            "roles": document["roles"],
+            "menu_permissions": document["menu_permissions"],
+            "action_permissions": document["action_permissions"],
+            "status": document["status"],
+        },
     )
     return public_document(document) or {}
 
 
 @router.patch("/users/{user_id}")
-async def update_user(user_id: str, body: UserUpdate, request: Request, user: AdminUser) -> dict[str, Any]:
+async def update_user(user_id: str, body: UserUpdate, request: Request, user: UserManageUser) -> dict[str, Any]:
     target = await db.users.find_one({"id": user_id})
     if target is None:
         raise AppError(404, "USER_NOT_FOUND", "用户不存在")
@@ -120,17 +165,29 @@ async def update_user(user_id: str, body: UserUpdate, request: Request, user: Ad
     duplicate = await db.users.find_one({"username": body.username, "id": {"$ne": user_id}})
     if duplicate:
         raise AppError(409, "USER_EXISTS", "用户名已经存在")
-    changes: dict[str, Any] = {"username": body.username, "roles": [role.value for role in body.roles], "status": body.status, "updated_at": now()}
+    changes: dict[str, Any] = {"username": body.username, "roles": [role.value for role in body.roles], "menu_permissions": body.menu_permissions, "action_permissions": body.action_permissions, "status": body.status, "updated_at": now()}
     if body.password:
         changes["password_hash"] = hash_password(body.password)
         changes["must_change_password"] = True
     await db.users.update_one({"id": user_id}, {"$set": changes})
-    await record_audit(actor=user, action="user.updated", object_type="user", object_id=user_id, request_id=request.state.request_id)
+    await db.refresh_sessions.delete_many({"user_id": user_id})
+    await record_audit(
+        actor=user, action="user.updated", object_type="user", object_id=user_id,
+        object_name=body.username, request_id=request.state.request_id,
+        changes={
+            "username": body.username,
+            "roles": [role.value for role in body.roles],
+            "menu_permissions": body.menu_permissions,
+            "action_permissions": body.action_permissions,
+            "status": body.status,
+            "password_changed": bool(body.password),
+        },
+    )
     return public_document(await db.users.find_one({"id": user_id})) or {}
 
 
 @router.delete("/users/{user_id}", status_code=204)
-async def delete_user(user_id: str, request: Request, user: AdminUser) -> None:
+async def delete_user(user_id: str, request: Request, user: UserManageUser) -> None:
     target = await db.users.find_one({"id": user_id})
     if target is None:
         raise AppError(404, "USER_NOT_FOUND", "用户不存在")
@@ -138,16 +195,20 @@ async def delete_user(user_id: str, request: Request, user: AdminUser) -> None:
         raise AppError(403, "ADMIN_USER_PROTECTED", "admin 用户不允许删除")
     await db.users.delete_one({"id": user_id})
     await db.refresh_sessions.delete_many({"user_id": user_id})
-    await record_audit(actor=user, action="user.deleted", object_type="user", object_id=user_id, request_id=request.state.request_id)
+    await record_audit(
+        actor=user, action="user.deleted", object_type="user", object_id=user_id,
+        object_name=target["username"], request_id=request.state.request_id,
+        changes={"username": target["username"], "roles": target.get("roles", [])},
+    )
 
 
 @router.get("/format-definitions")
-async def list_format_definitions(user: ReadUser) -> dict[str, Any]:
+async def list_format_definitions(user: FormatReadUser) -> dict[str, Any]:
     return {"items": [public_document(item) async for item in db.format_definitions.find({"asset_type": {"$ne": "other"}}).sort("asset_type", 1)]}
 
 
 @router.post("/format-definitions", status_code=201)
-async def create_format_definition(body: FormatCreate, request: Request, user: AdminUser) -> dict[str, Any]:
+async def create_format_definition(body: FormatCreate, request: Request, user: FormatManageUser) -> dict[str, Any]:
     if body.asset_type not in FORMAT_TYPES:
         raise AppError(400, "FORMAT_TYPE_INVALID", "只允许创建图片、视频、标注或模型格式")
     if await db.format_definitions.find_one({"asset_type": body.asset_type.value}):
@@ -165,14 +226,12 @@ async def create_format_definition(body: FormatCreate, request: Request, user: A
 
 
 @router.patch("/format-definitions/{asset_type}")
-async def update_format_definition(asset_type: AssetType, body: FormatUpdate, request: Request, user: AdminUser) -> dict[str, Any]:
+async def update_format_definition(asset_type: AssetType, body: FormatUpdate, request: Request, user: FormatManageUser) -> dict[str, Any]:
     if asset_type not in FORMAT_TYPES:
         raise AppError(400, "FORMAT_TYPE_INVALID", "只允许维护图片、视频、标注或模型格式")
     current = await db.format_definitions.find_one({"asset_type": asset_type.value})
     if current is None:
         raise AppError(404, "FORMAT_DEFINITION_NOT_FOUND", "格式类别不存在")
-    if current.get("built_in"):
-        raise AppError(409, "BUILT_IN_FORMAT_PROTECTED", "内置格式类别不允许修改")
     extensions = normalize_extensions(body.extensions)
     protected_extensions = set(current.get("protected_extensions", []))
     removed_protected = sorted(protected_extensions - set(extensions))
@@ -191,7 +250,7 @@ async def update_format_definition(asset_type: AssetType, body: FormatUpdate, re
 
 
 @router.delete("/format-definitions/{asset_type}", status_code=204)
-async def delete_format_definition(asset_type: AssetType, request: Request, user: AdminUser) -> None:
+async def delete_format_definition(asset_type: AssetType, request: Request, user: FormatManageUser) -> None:
     if asset_type not in FORMAT_TYPES:
         raise AppError(400, "FORMAT_TYPE_INVALID", "只允许维护图片、视频、标注或模型格式")
     definition = await db.format_definitions.find_one({"asset_type": asset_type.value})
@@ -206,7 +265,7 @@ async def delete_format_definition(asset_type: AssetType, request: Request, user
 
 
 @router.get("/roles")
-async def list_roles(user: AdminUser) -> dict[str, Any]:
+async def list_roles(user: UserManageUser) -> dict[str, Any]:
     return {
         "items": [
             {
@@ -217,23 +276,57 @@ async def list_roles(user: AdminUser) -> dict[str, Any]:
                     "annotator": "标注员",
                     "ml_engineer": "算法工程师",
                     "viewer": "只读访客",
+                    "custom": "自定义",
                 }[role.value],
+                "menu_permissions": ROLE_MENU_PERMISSIONS[role.value],
+                "action_permissions": ROLE_ACTION_PERMISSIONS[role.value],
             }
             for role in Role
-        ]
+        ],
+        "menus": MENU_DEFINITIONS,
+        "actions": ACTION_DEFINITIONS,
+        "templates": [
+            {
+                "key": role.value,
+                "name": f"复制{role_name}权限",
+                "menu_permissions": ROLE_MENU_PERMISSIONS[role.value],
+                "action_permissions": ROLE_ACTION_PERMISSIONS[role.value],
+            }
+            for role, role_name in [
+                (Role.DATA_MANAGER, "数据管理员"), (Role.ANNOTATOR, "标注员"),
+                (Role.ML_ENGINEER, "算法工程师"), (Role.VIEWER, "只读访客"),
+            ]
+        ],
+    }
+
+
+@router.get("/permissions/me")
+async def my_permissions(user: ReadUser) -> dict[str, Any]:
+    menu_keys = effective_menu_permissions(user)
+    action_keys = effective_action_permissions(user)
+    return {
+        "role": user.get("roles", [""])[0],
+        "menus": [item for item in MENU_DEFINITIONS if item["key"] in menu_keys],
+        "actions": [item for item in ACTION_DEFINITIONS if item["key"] in action_keys],
+        "updated_at": user.get("updated_at"),
     }
 
 
 @router.get("/audit-logs")
 async def list_audit_logs(
-    user: ManageUser,
+    user: SystemLogReadUser,
+    q: str = Query("", max_length=200),
     actor_id: str | None = None,
     object_type: str | None = None,
     action: str | None = None,
+    created_from: datetime | None = None,
+    created_to: datetime | None = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
 ) -> dict[str, Any]:
-    query = {
+    if created_from and created_to and created_from > created_to:
+        raise AppError(400, "INVALID_TIME_RANGE", "开始时间不能晚于结束时间")
+    query: dict[str, Any] = {
         key: value
         for key, value in {
             "actor_id": actor_id,
@@ -242,6 +335,17 @@ async def list_audit_logs(
         }.items()
         if value
     }
+    if q.strip():
+        pattern = {"$regex": re.escape(q.strip()), "$options": "i"}
+        query["$or"] = [
+            {"actor_username": pattern}, {"action": pattern}, {"object_type": pattern},
+            {"object_id": pattern}, {"object_name": pattern}, {"request_id": pattern},
+        ]
+    if created_from or created_to:
+        query["created_at"] = {
+            key: value for key, value in {"$gte": created_from, "$lte": created_to}.items()
+            if value is not None
+        }
     total = await db.audit_logs.count_documents(query)
     cursor = (
         db.audit_logs.find(query)
@@ -249,8 +353,16 @@ async def list_audit_logs(
         .skip((page - 1) * page_size)
         .limit(page_size)
     )
+    items = [public_document(item) async for item in cursor]
+    missing_names = [item for item in items if item and not item.get("object_name")]
+    names = await asyncio.gather(*[
+        resolve_audit_object_name(item["object_type"], item["object_id"], item.get("changes"))
+        for item in missing_names
+    ])
+    for item, name in zip(missing_names, names, strict=True):
+        item["object_name"] = name
     return {
-        "items": [public_document(item) async for item in cursor],
+        "items": items,
         "page": page,
         "page_size": page_size,
         "total": total,

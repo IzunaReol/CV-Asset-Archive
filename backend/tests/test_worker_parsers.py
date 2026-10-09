@@ -10,11 +10,31 @@ from worker.tasks import (
     fail_asset,
     failure_details,
     inspect_supported_bundle,
+    process_asset,
     sha256_file,
     sha256_object,
     yolo_archive_class_names,
     yolo_class_names,
 )
+
+
+def test_duplicate_process_delivery_does_not_run_twice(monkeypatch):
+    updates = []
+
+    class Jobs:
+        def update_one(self, query, update):
+            updates.append((query, update))
+            return type("Result", (), {"modified_count": 0})()
+
+    monkeypatch.setattr("worker.tasks.database", type("Database", (), {"jobs": Jobs()})())
+
+    process_asset.run("job-1", "asset-1")
+
+    assert len(updates) == 1
+    assert updates[0][0] == {
+        "id": "job-1",
+        "state": {"$in": ["queued", "failed"]},
+    }
 
 
 def test_sha256_file(tmp_path):

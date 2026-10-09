@@ -12,9 +12,10 @@ async def test_ensure_indexes_creates_all_required_indexes(monkeypatch):
         name: SimpleNamespace(create_index=AsyncMock(return_value="index"))
         for name in (
             "users", "refresh_sessions", "assets", "relations", "collections", "datasets",
-            "dataset_memberships", "dataset_versions", "dataset_version_memberships", "jobs",
+            "dataset_memberships", "dataset_versions", "dataset_version_memberships",
+            "dataset_restore_backups", "jobs",
             "asset_selection_sets", "upload_sessions", "tag_definitions", "audit_logs",
-            "maintenance_runs",
+            "maintenance_runs", "saved_views",
         )
     }
     monkeypatch.setattr(database, "db", SimpleNamespace(**collections))
@@ -24,12 +25,18 @@ async def test_ensure_indexes_creates_all_required_indexes(monkeypatch):
     assert collections["users"].create_index.await_count == 1
     assert collections["assets"].create_index.await_count == 5
     assert collections["relations"].create_index.await_count == 3
-    assert collections["jobs"].create_index.await_count == 5
-    assert collections["maintenance_runs"].create_index.await_count == 1
+    assert collections["jobs"].create_index.await_count == 6
+    assert collections["maintenance_runs"].create_index.await_count == 2
+    assert collections["dataset_restore_backups"].create_index.await_count == 2
+    assert collections["maintenance_runs"].create_index.await_args_list[1].kwargs == {
+        "expireAfterSeconds": 0
+    }
     normalized_index = collections["assets"].create_index.await_args_list[3].args[0]
     assert ("normalized_name", 1) in normalized_index
     assert collections["relations"].create_index.await_args_list[0].kwargs == {"unique": True}
     assert collections["upload_sessions"].create_index.await_args.kwargs == {"expireAfterSeconds": 0}
+    assert collections["audit_logs"].create_index.await_count == 2
+    assert collections["saved_views"].create_index.await_count == 2
 
 
 @pytest.mark.asyncio

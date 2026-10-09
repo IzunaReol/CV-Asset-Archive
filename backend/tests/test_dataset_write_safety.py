@@ -6,11 +6,30 @@ from app.routers import datasets
 from app.schemas import DatasetRestoreRequest
 
 
+class AsyncCursor:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def sort(self, *args):
+        return self
+
+    def __aiter__(self):
+        self.iterator = iter(self.rows)
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self.iterator)
+        except StopIteration:
+            raise StopAsyncIteration
+
+
 def test_restore_rolls_back_members_on_insert_failure(monkeypatch):
     backup=[{'id':'old','dataset_id':'dataset','asset_id':'old-asset'}]
     members=[{'asset_id':'asset','snapshot':{'type':'image'}}]
-    membership=SimpleNamespace(find=lambda query:SimpleNamespace(to_list=AsyncMock(return_value=backup)),delete_many=AsyncMock(),insert_many=AsyncMock(side_effect=[RuntimeError('storage failed'),None]))
-    database=SimpleNamespace(datasets=SimpleNamespace(find_one=AsyncMock(return_value={'id':'dataset'}),update_one=AsyncMock()),dataset_versions=SimpleNamespace(find_one=AsyncMock(return_value={'id':'version'})),dataset_version_memberships=SimpleNamespace(find=lambda query:SimpleNamespace(to_list=AsyncMock(return_value=members))),dataset_memberships=membership,assets=SimpleNamespace(distinct=AsyncMock(return_value=['asset'])))
+    membership=SimpleNamespace(find=lambda query:AsyncCursor(backup),delete_many=AsyncMock(),insert_many=AsyncMock(side_effect=[RuntimeError('storage failed'),None]))
+    backups=SimpleNamespace(find=lambda query:AsyncCursor([{'membership': backup[0]}]),insert_many=AsyncMock(),delete_many=AsyncMock())
+    database=SimpleNamespace(datasets=SimpleNamespace(find_one=AsyncMock(return_value={'id':'dataset'}),update_one=AsyncMock()),dataset_versions=SimpleNamespace(find_one=AsyncMock(return_value={'id':'version'})),dataset_version_memberships=SimpleNamespace(find=lambda query:AsyncCursor(members)),dataset_memberships=membership,dataset_restore_backups=backups,assets=SimpleNamespace(distinct=AsyncMock(return_value=['asset'])))
     monkeypatch.setattr(datasets,'db',database)
     with pytest.raises(RuntimeError,match='storage failed'):
         asyncio.run(datasets.restore_version.__wrapped__('dataset',DatasetRestoreRequest(version_id='version'),SimpleNamespace(state=SimpleNamespace(request_id='test')),{'id':'user'}))
@@ -60,10 +79,9 @@ def test_pending_restore_is_replayed_before_next_write(monkeypatch):
     database = SimpleNamespace(
         datasets=datasets_collection,
         dataset_versions=SimpleNamespace(find_one=AsyncMock(return_value={'id': 'version'})),
-        dataset_version_memberships=SimpleNamespace(
-            find=lambda query: SimpleNamespace(to_list=AsyncMock(return_value=members))
-        ),
+        dataset_version_memberships=SimpleNamespace(find=lambda query: AsyncCursor(members)),
         dataset_memberships=memberships,
+        dataset_restore_backups=SimpleNamespace(delete_many=AsyncMock()),
     )
     monkeypatch.setattr(datasets, 'db', database)
     sync = AsyncMock()
@@ -74,5 +92,5 @@ def test_pending_restore_is_replayed_before_next_write(monkeypatch):
     assert [item['asset_id'] for item in memberships.insert_many.call_args.args[0]] == ['image']
     sync.assert_awaited_once_with('dataset', 'user')
     assert datasets_collection.update_one.call_args.args[1]['$unset'] == {
-        'restore_target_version_id': '', 'restore_actor_id': '',
+        'restore_target_version_id': '', 'restore_actor_id': '', 'restore_backup_id': '',
     }
