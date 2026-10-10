@@ -15,7 +15,47 @@ def test_normalize_extensions_trims_prefix_and_duplicates():
 def test_fixed_role_uses_predefined_menu_permissions():
     body = admin.UserCreate(username="viewer-user", password="password123", roles=["viewer"])
 
-    assert body.menu_permissions == ["library", "datasets", "relations", "lineage", "downloads"]
+    assert body.menu_permissions == ["overview", "library", "datasets", "relations", "lineage", "downloads"]
+
+
+def test_reusable_role_rejects_action_without_corresponding_menu():
+    with pytest.raises(ValueError, match="缺少对应菜单"):
+        admin.RoleTemplateBody(
+            name="素材只读角色", menu_permissions=["overview"], action_permissions=["asset_edit"],
+        )
+
+
+@pytest.mark.asyncio
+async def test_create_reusable_role_persists_permissions(monkeypatch):
+    role_templates = SimpleNamespace(insert_one=AsyncMock())
+    monkeypatch.setattr(admin, "db", SimpleNamespace(role_templates=role_templates))
+    monkeypatch.setattr(admin, "record_audit", AsyncMock())
+    request = SimpleNamespace(state=SimpleNamespace(request_id="request"))
+    body = admin.RoleTemplateBody(
+        name="质检负责人", menu_permissions=["overview", "library"], action_permissions=["asset_edit"],
+    )
+
+    result = await admin.create_role_template(body, request, {"id": "admin", "username": "admin"})
+
+    assert result["name"] == "质检负责人"
+    assert result["menu_permissions"] == ["overview", "library"]
+    role_templates.insert_one.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_delete_bound_reusable_role_reports_usernames(monkeypatch):
+    class Cursor:
+        def limit(self, *_): return self
+        async def to_list(self, **_): return [{"username": "zhangsan"}, {"username": "lisi"}]
+    role_templates = SimpleNamespace(find_one=AsyncMock(return_value={"id": "role-1", "name": "质检"}))
+    users = SimpleNamespace(find=lambda *_args, **_kwargs: Cursor())
+    monkeypatch.setattr(admin, "db", SimpleNamespace(role_templates=role_templates, users=users))
+    request = SimpleNamespace(state=SimpleNamespace(request_id="request"))
+
+    with pytest.raises(AppError, match="zhangsan、lisi") as error:
+        await admin.delete_role_template("role-1", request, {"id": "admin", "username": "admin"})
+
+    assert error.value.code == "ROLE_IN_USE"
 
 
 def test_custom_role_keeps_unique_selected_menu_permissions():
@@ -97,6 +137,41 @@ async def test_extension_in_use_cannot_be_removed(monkeypatch):
         await admin.ensure_extensions_removable(AssetType.IMAGE.value, [".jpg"])
 
     assert error.value.code == "FORMAT_EXTENSION_IN_USE"
+
+
+@pytest.mark.asyncio
+async def test_audit_export_contains_request_context_and_utf8_bom(monkeypatch):
+    class Cursor:
+        def __init__(self, items):
+            self.items = items
+        def sort(self, *args):
+            return self
+        def limit(self, *args):
+            return self
+        def __aiter__(self):
+            self.iterator = iter(self.items)
+            return self
+        async def __anext__(self):
+            try:
+                return next(self.iterator)
+            except StopIteration:
+                raise StopAsyncIteration
+
+    audit_logs = SimpleNamespace(find=lambda query: Cursor([{
+        "created_at": "2026-10-09", "actor_username": "admin", "action": "asset.created",
+        "object_type": "asset", "object_name": "测试.jpg", "outcome": "success",
+        "response_status": 201, "client_ip": "127.0.0.1", "request_id": "request-1",
+        "changes": {"filename": "测试.jpg"},
+    }]))
+    monkeypatch.setattr(admin, "db", SimpleNamespace(audit_logs=audit_logs))
+
+    response = await admin.export_audit_logs({"id": "admin"}, "", None, None, None, None, None)
+    body = b"".join([chunk async for chunk in response.body_iterator])
+
+    assert body.startswith(b"\xef\xbb\xbf")
+    text = body.decode("utf-8")
+    assert "客户端IP" in text
+    assert "测试.jpg" in text
 
 
 @pytest.mark.asyncio

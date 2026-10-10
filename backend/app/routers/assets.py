@@ -17,8 +17,8 @@ from ..config import get_settings
 from ..database import db
 from ..dependencies import (
     AssetDeleteUser,
-    AssetReadUser,
     AssetEditUser,
+    AssetReadUser,
     AssetUploadUser,
     TrashManageUser,
     TrashReadUser,
@@ -26,14 +26,14 @@ from ..dependencies import (
 )
 from ..errors import AppError
 from ..schemas import (
-    AssetSelectionCreate,
     AssetRemarkUpdate,
+    AssetSelectionCreate,
     BatchAssetDeleteRequest,
     BatchTagRequest,
     UploadBatchCompleteRequest,
     UploadBatchInitRequest,
-    UploadConflictCheckRequest,
     UploadCompleteRequest,
+    UploadConflictCheckRequest,
     UploadInitRequest,
 )
 from ..storage import (
@@ -199,23 +199,28 @@ async def matching_name_assets(filename: str, asset_type: str) -> list[dict[str,
 async def check_upload_conflicts(
     body: UploadConflictCheckRequest, user: AssetUploadUser
 ) -> dict[str, Any]:
-    requested = [(index, safe_filename(item.filename), item.asset_type.value) for index, item in enumerate(body.files)]
+    requested = [(index, safe_filename(item.filename), item.asset_type.value, item.size, item.sha256.lower() if item.sha256 else None) for index, item in enumerate(body.files)]
     names_by_type: dict[str, set[str]] = {}
-    for _, filename, asset_type in requested:
+    for _, filename, asset_type, _, _ in requested:
         names_by_type.setdefault(asset_type, set()).add(filename.casefold())
     clauses = [
         {"type": asset_type, "normalized_name": {"$in": sorted(names)}}
         for asset_type, names in names_by_type.items()
     ]
+    content_clauses = [{"sha256": sha256, "size": size} for _, _, _, size, sha256 in requested if sha256]
     documents = await db.assets.find(
-        {"archived_at": None, "$or": clauses},
+        {"archived_at": None, "$or": [*clauses, *content_clauses]},
         {"id": 1, "name": 1, "normalized_name": 1, "type": 1, "size": 1, "mime_type": 1,
-         "status": 1, "tags": 1, "media": 1, "remark": 1, "created_at": 1, "modified_at": 1},
-    ).sort("created_at", DESCENDING).to_list(length=None) if clauses else []
+         "status": 1, "tags": 1, "media": 1, "remark": 1, "sha256": 1, "created_at": 1, "modified_at": 1},
+    ).sort("created_at", DESCENDING).to_list(length=None) if clauses or content_clauses else []
     matches_by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for document in documents:
         key = (document["type"], document.get("normalized_name") or document.get("name", "").casefold())
         matches_by_key.setdefault(key, []).append(document)
+    matches_by_hash: dict[tuple[str, int], list[dict[str, Any]]] = {}
+    for document in documents:
+        if document.get("sha256"):
+            matches_by_hash.setdefault((document["sha256"].lower(), document.get("size", 0)), []).append(document)
     asset_ids = [document["id"] for document in documents]
     related_ids: set[str] = set()
     if asset_ids:
@@ -229,12 +234,15 @@ async def check_upload_conflicts(
                 related_ids.add(relation["target_id"])
     conflicts = []
     counts: dict[str, int] = {}
-    for index, filename, asset_type in requested:
-        matches = matches_by_key.get((asset_type, filename.casefold()), [])
+    for index, filename, asset_type, size, sha256 in requested:
+        name_matches = matches_by_key.get((asset_type, filename.casefold()), [])
+        content_matches = matches_by_hash.get((sha256, size), []) if sha256 else []
+        matches = list({match["id"]: match for match in [*name_matches, *content_matches]}.values())
         if not matches:
             continue
+        match_kind = "name_and_content" if name_matches and content_matches else "content" if content_matches else "name"
         conflict_items = [
-            {**public_document(match), "has_active_relations": match["id"] in related_ids}
+            {**public_document(match), "has_active_relations": match["id"] in related_ids, "match_kind": match_kind}
             for match in matches
         ]
         conflicts.append({
@@ -244,6 +252,7 @@ async def check_upload_conflicts(
             "existing_count": len(matches),
             "existing_asset_id": matches[0]["id"],
             "has_active_relations": any(match["id"] in related_ids for match in matches),
+            "match_kind": match_kind,
             "items": conflict_items,
         })
         counts[asset_type] = counts.get(asset_type, 0) + 1
@@ -355,6 +364,39 @@ async def cleanup_expired_upload_chunks() -> int:
     return await asyncio.to_thread(
         delete_orphan_chunks, active_session_ids, now() - timedelta(hours=24)
     )
+
+
+@router.get("/upload-sessions")
+async def list_resumable_upload_sessions(user: AssetUploadUser) -> dict[str, Any]:
+    cursor = db.upload_sessions.find({
+        "owner_id": user["id"],
+        "expires_at": {"$gt": now()},
+        "state": {"$in": ["pending", "reused"]},
+        "transfer_mode": "chunks",
+    }).sort("created_at", -1).limit(200)
+    sessions = [item async for item in cursor]
+
+    async def summarize(session: dict[str, Any]) -> dict[str, Any]:
+        existing = await asyncio.to_thread(uploaded_chunks, chunk_prefix(session["id"]))
+        chunk_size = int(session.get("chunk_size") or CHUNK_SIZE)
+        chunk_count = int(session.get("chunk_count") or 0)
+        uploaded_parts = sum(
+            1 for number in range(chunk_count)
+            if existing.get(number) == min(chunk_size, session["declared_size"] - number * chunk_size)
+        )
+        return {
+            "upload_session_id": session["id"],
+            "filename": session["filename"],
+            "size": session["declared_size"],
+            "asset_type": session["asset_type"],
+            "uploaded_parts": uploaded_parts,
+            "chunk_count": chunk_count,
+            "progress": round(uploaded_parts * 100 / chunk_count) if chunk_count else 0,
+            "created_at": session["created_at"],
+            "expires_at": session["expires_at"],
+        }
+
+    return {"items": await asyncio.gather(*(summarize(item) for item in sessions))}
 
 
 @router.get("/upload-sessions/{session_id}")

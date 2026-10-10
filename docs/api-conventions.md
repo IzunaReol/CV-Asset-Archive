@@ -25,7 +25,7 @@
 
 - 认证：`POST /auth/login`、`/auth/refresh`、`/auth/logout`。刷新令牌仅通过 `HttpOnly` Cookie 传递，接口响应不返回刷新令牌；“保持登录”关闭时 Cookie 仅在当前浏览器会话有效。登录失败默认按 IP 和用户名组合限制为 5 分钟 5 次，超限返回 `429`。
 - 素材：`GET /assets`、`/assets/stats`、`/assets/{id}`
-- 上传：先使用 `POST /assets/upload-conflicts` 检查同名同类型文件，再通过 `POST /assets/upload-sessions` 创建上传会话；冲突处理支持 `overwrite` 和 `rename`，未明确选择时拒绝同名上传。`GET|DELETE /assets/upload-sessions/{id}` 用于恢复或取消，`POST /assets/upload-sessions/complete` 完成入库；64 MB 及以上文件使用 64 MB 分片。前端暂停时中止当前请求但保留会话，继续或重新选择同一文件时查询会话并跳过已完成分片。多文件可使用 `/assets/upload-sessions/batch` 和 `/assets/upload-sessions/complete-batch`，接口不限制文件总数；前端每 25 项提交一次，后端每 12 项作为一个执行窗口。生成上传地址失败时不会留下上传会话。
+- 上传：先使用 `POST /assets/upload-conflicts` 检查同名同类型文件，再通过 `POST /assets/upload-sessions` 创建上传会话；冲突处理支持 `overwrite` 和 `rename`，未明确选择时拒绝同名上传。`GET /assets/upload-sessions` 列出当前用户可恢复的大文件分片会话，`GET|DELETE /assets/upload-sessions/{id}` 用于恢复或取消，`POST /assets/upload-sessions/complete` 完成入库；64 MB 及以上文件使用 64 MB 分片。前端暂停时中止当前请求但保留会话，继续或重新选择同一文件时查询会话并跳过已完成分片。多文件可使用 `/assets/upload-sessions/batch` 和 `/assets/upload-sessions/complete-batch`，接口不限制文件总数；前端每 25 项提交一次，后端每 12 项作为一个执行窗口。生成上传地址失败时不会留下上传会话。
 - 选择集：`POST /assets/selection-sets` 固化当前筛选结果，有效期 2 小时，最多 10 万项。批量标签、删除、集合及导出可以提交 `selection_id` 和 `excluded_ids`。
 - 素材编辑：`PATCH /assets/{id}/remark`、`POST /assets/batch-tags`
 - 标注：`GET /assets/{id}/annotation-overlays`
@@ -78,7 +78,11 @@ CVAT 在线任务和 MLflow 接口尚未实现。
 - 数据集写入拆分为创建编辑、成员管理、版本发布、版本恢复、删除和模型关联权限；保存视图使用独立操作权限。
 - 创建素材导出必须同时具备任务中心、素材库和导出权限；创建数据集导出必须同时具备任务中心、数据集和导出权限。
 - 管理员更新用户资料或权限后，服务端立即撤销该用户的刷新会话。
-- `GET /audit-logs` 使用独立的系统日志菜单权限，支持 `q`、`actor_id`、`action`、`object_type`、`created_from`、`created_to`、`page` 和 `page_size`。
+- `GET /audit-logs` 使用独立的系统日志菜单权限，支持 `q`、`actor_id`、`action`、`object_type`、`created_from`、`created_to`、`page` 和 `page_size`；`GET /audit-logs/export` 按相同条件导出 CSV，最多 10000 条。
+- `GET /system/health` 返回 MongoDB、MinIO 和 Redis 的当前状态，供前端展示降级提示和恢复检测。
+- `GET /system/overview` 按当前账号菜单权限返回概览统计，并包含各素材类型的数量和占用空间；`GET /system/search?q=` 搜索当前账号有权访问的素材、模型、数据集、关联关系、任务、用户、角色和系统日志。
+- `POST|PUT|DELETE /role-templates` 管理团队可复用角色；`PUT|DELETE /role-definitions/{role}` 管理系统预设角色。管理员角色受保护，其他角色删除前会检查绑定用户并返回具体用户名。
+- `POST /role-impact/{role}` 在保存角色权限前返回受影响用户及新增、移除的菜单和操作权限。
 - 无权限请求统一返回 `403 / PERMISSION_DENIED`，不会以空列表掩盖越权访问。
 - `404`：资源不存在或已删除
 - `409`：重复资源、状态冲突或正在使用

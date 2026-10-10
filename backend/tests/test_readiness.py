@@ -34,3 +34,19 @@ def test_readiness_reports_invalid_redis_configuration(monkeypatch):
 
     assert captured.value.status_code == 503
     assert captured.value.details == {"mongodb": True, "minio": True, "redis": False}
+
+
+def test_system_health_returns_dependency_details_without_raising(monkeypatch):
+    monkeypatch.setattr(
+        main, "ready", AsyncMock(side_effect=AppError(
+            503, "DEPENDENCY_UNAVAILABLE", "基础服务不可用",
+            {"mongodb": True, "minio": False, "redis": True},
+        )),
+    )
+
+    result = asyncio.run(main.system_health())
+
+    assert result == {
+        "status": "degraded",
+        "checks": {"mongodb": True, "minio": False, "redis": True},
+    }

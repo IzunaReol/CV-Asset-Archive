@@ -1,8 +1,9 @@
+from datetime import timedelta
 from typing import Any
 
+from .config import get_settings
 from .database import db
 from .utils import new_id, now
-
 
 AUDIT_OBJECT_SOURCES = {
     "asset": ("assets", "name"),
@@ -10,11 +11,13 @@ AUDIT_OBJECT_SOURCES = {
     "dataset_version": ("dataset_versions", "version"),
     "job": ("jobs", "name"),
     "user": ("users", "username"),
+    "role_template": ("role_templates", "name"),
     "tag_definition": ("tag_definitions", "name"),
     "format_definition": ("format_definitions", "asset_type"),
     "collection": ("collections", "name"),
     "saved_view": ("saved_views", "name"),
 }
+settings = get_settings()
 
 
 async def resolve_audit_object_name(
@@ -50,6 +53,7 @@ async def record_audit(
     object_name: str | None = None,
 ) -> None:
     change_details = changes or {}
+    created_at = now()
     await db.audit_logs.insert_one(
         {
             "id": new_id(),
@@ -63,6 +67,28 @@ async def record_audit(
             ),
             "changes": change_details,
             "request_id": request_id,
-            "created_at": now(),
+            "created_at": created_at,
+            "expires_at": created_at + timedelta(days=settings.audit_log_retention_days),
         }
     )
+
+
+async def record_system_audit(
+    *, action: str, request_id: str, object_name: str, changes: dict[str, Any] | None = None,
+    actor: dict[str, Any] | None = None,
+) -> None:
+    """Record security and availability events that may not have an authenticated actor."""
+    created_at = now()
+    await db.audit_logs.insert_one({
+        "id": new_id(),
+        "actor_id": (actor or {}).get("id", "system"),
+        "actor_username": (actor or {}).get("username", "系统"),
+        "action": action,
+        "object_type": "system",
+        "object_id": action,
+        "object_name": object_name,
+        "changes": changes or {},
+        "request_id": request_id,
+        "created_at": created_at,
+        "expires_at": created_at + timedelta(days=settings.audit_log_retention_days),
+    })

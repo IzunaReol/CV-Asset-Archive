@@ -127,13 +127,13 @@ npm run test:ui
 npm run build
 ```
 
-The isolated API workflow test is available at `scripts/runtime-e2e.py`. See the [testing guide](docs/testing.md) and [v1.6.0 release checklist](docs/release-checklist.md) for the full scope.
+The isolated API workflow test is available at `scripts/runtime-e2e.py`. See the [testing guide](docs/testing.md) and [v1.6.1 release checklist](docs/release-checklist.md) for the full scope.
 
-## Preparing to upgrade to v1.6.0
+## Preparing to upgrade to v1.6.1
 
-Back up MongoDB, MinIO, and deployment configuration before upgrading from v1.5.1. Update Python dependencies, rebuild the frontend, and verify authentication tokens, MinIO access, relationship history, and dataset version details, comparison, and restore. Temporary restore-backup and maintenance-retention indexes are created automatically.
+Back up MongoDB, MinIO, and deployment configuration before upgrading from v1.6.0. Rebuild the API and frontend, then verify the system overview, global search, role permissions, system logs, and duplicate upload checks. No manual data migration is required.
 
-See the [dataset guide](docs/datasets.md) and [v1.6.0 release notes](docs/releases/v1.6.0.md) for added features and changes.
+See the [dataset guide](docs/datasets.md) and [v1.6.1 release notes](docs/releases/v1.6.1.md) for added features and changes.
 
 ## Documentation
 

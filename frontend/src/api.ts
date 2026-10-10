@@ -10,6 +10,7 @@ let rememberSession = Boolean(localStorage.getItem(SESSION_KEY))
 let tokens: Tokens | null = parseStoredSession(localStorage.getItem(SESSION_KEY) || sessionStorage.getItem(SESSION_KEY))
 let refreshPromise: Promise<boolean> | null = null
 let sessionExpiredHandler: (() => void) | null = null
+let serviceStatusHandler: ((status:{state:'online'|'degraded'|'offline';message:string;checks?:Record<string,boolean>}) => void) | null = null
 
 if (tokens) {
   const storage = rememberSession ? localStorage : sessionStorage
@@ -57,7 +58,7 @@ async function refreshSession(): Promise<boolean> {
   return refreshPromise
 }
 
-async function request<T>(path: string, init: RequestInit = {}, retry = true): Promise<T> {
+async function request<T>(path: string, init: RequestInit = {}, retry = true, transientRetry = true): Promise<T> {
   const headers = new Headers(init.headers)
   if (init.body && !headers.has('content-type')) headers.set('content-type', 'application/json')
   if (tokens?.access_token) headers.set('authorization', `Bearer ${tokens.access_token}`)
@@ -65,14 +66,27 @@ async function request<T>(path: string, init: RequestInit = {}, retry = true): P
   try {
     response = await fetch(`${API_BASE}${path}`, { ...init, headers, credentials:'include' })
   } catch {
+    if ((init.method || 'GET') === 'GET' && transientRetry) {
+      await new Promise(resolve => setTimeout(resolve, 800))
+      return request<T>(path, init, retry, false)
+    }
+    serviceStatusHandler?.({state:'offline',message:'无法连接至 API 服务'})
     throw new Error('无法连接至服务器，请重启后端服务')
   }
+  if (response.status < 500) serviceStatusHandler?.({state:'online',message:'服务连接正常'})
   if (response.status === 401 && retry && tokens) {
-    if (await refreshSession()) return request<T>(path, init, false)
+    if (await refreshSession()) return request<T>(path, init, false, transientRetry)
   }
   if (!response.ok) {
     const isJson = response.headers.get('content-type')?.includes('application/json')
     const payload = isJson ? await response.json().catch(() => ({})) : {}
+    if ([502,503,504].includes(response.status) && (init.method || 'GET') === 'GET' && transientRetry) {
+      await new Promise(resolve => setTimeout(resolve, 800))
+      return request<T>(path, init, retry, false)
+    }
+    if (response.status >= 500) {
+      serviceStatusHandler?.({state:'degraded',message:payload?.error?.message || '基础服务暂时不可用',checks:payload?.error?.details})
+    }
     if (response.status >= 500 && !isJson) {
       throw new Error('服务器异常，请重启后端服务')
     }
@@ -85,9 +99,24 @@ async function request<T>(path: string, init: RequestInit = {}, retry = true): P
   return response.json()
 }
 
+async function download(path:string, filename:string) {
+  const headers = new Headers()
+  if (tokens?.access_token) headers.set('authorization', `Bearer ${tokens.access_token}`)
+  let response = await fetch(`${API_BASE}${path}`, {headers,credentials:'include'})
+  if (response.status === 401 && await refreshSession()) {
+    headers.set('authorization', `Bearer ${tokens?.access_token || ''}`)
+    response = await fetch(`${API_BASE}${path}`, {headers,credentials:'include'})
+  }
+  if (!response.ok) throw new Error('下载失败')
+  const href=URL.createObjectURL(await response.blob())
+  const anchor=document.createElement('a');anchor.href=href;anchor.download=filename;anchor.click()
+  URL.revokeObjectURL(href)
+}
+
 export const api = {
   session: () => tokens,
   onSessionExpired: (handler:() => void) => { sessionExpiredHandler = handler },
+  onServiceStatus: (handler:typeof serviceStatusHandler) => { serviceStatusHandler = handler },
   restoreSession: () => tokens?.access_token ? Promise.resolve(true) : refreshSession(),
   login: async (username:string, password:string, remember=true) => {
     rememberSession = remember
@@ -108,6 +137,7 @@ export const api = {
   annotationOverlays: (id:string) => request<any>(`/assets/${id}/annotation-overlays`),
   archiveAsset: (id:string) => request<any>(`/assets/${id}/archive`, {method:'POST'}),
   initUpload: (body:Record<string, unknown>) => request<any>('/assets/upload-sessions', {method:'POST',body:JSON.stringify(body)}),
+  resumableUploads: () => request<any>('/assets/upload-sessions'),
   checkUploadConflicts: (files:Record<string, unknown>[]) => request<any>('/assets/upload-conflicts', {method:'POST',body:JSON.stringify({files})}),
   completeUpload: (body:Record<string, unknown>) => request<any>('/assets/upload-sessions/complete', {method:'POST',body:JSON.stringify(body)}),
   initUploadBatch: (files:Record<string, unknown>[]) => request<any>('/assets/upload-sessions/batch', {method:'POST',body:JSON.stringify({files})}),
@@ -171,6 +201,12 @@ export const api = {
   deleteTag: (key:string) => request<void>(`/tag-definitions/${encodeURIComponent(key)}`, {method:'DELETE'}),
   users: () => request<any>('/users'),
   roles: () => request<any>('/roles'),
+  createRoleTemplate: (body:Record<string,unknown>) => request<any>('/role-templates', {method:'POST',body:JSON.stringify(body)}),
+  updateRoleTemplate: (id:string, body:Record<string,unknown>) => request<any>(`/role-templates/${id}`, {method:'PUT',body:JSON.stringify(body)}),
+  deleteRoleTemplate: (id:string) => request<void>(`/role-templates/${id}`, {method:'DELETE'}),
+  previewRoleImpact: (roleRef:string, body:Record<string,unknown>) => request<any>(`/role-impact/${encodeURIComponent(roleRef)}`, {method:'POST',body:JSON.stringify(body)}),
+  updateRoleDefinition: (key:string, body:Record<string,unknown>) => request<any>(`/role-definitions/${key}`, {method:'PUT',body:JSON.stringify(body)}),
+  deleteRoleDefinition: (key:string) => request<void>(`/role-definitions/${key}`, {method:'DELETE'}),
   myPermissions: () => request<any>('/permissions/me'),
   createUser: (body:Record<string, unknown>) => request<any>('/users', {method:'POST',body:JSON.stringify(body)}),
   updateUser: (id:string, body:Record<string, unknown>) => request<any>(`/users/${id}`, {method:'PATCH',body:JSON.stringify(body)}),
@@ -184,4 +220,12 @@ export const api = {
     for (const [key,value] of Object.entries(filters)) if (value !== '') params.set(key,String(value))
     return request<any>(`/audit-logs?${params}`)
   },
+  exportAuditLogs: (filters:Record<string,string|number>={}) => {
+    const params=new URLSearchParams()
+    for (const [key,value] of Object.entries(filters)) if (value !== '') params.set(key,String(value))
+    return download(`/audit-logs/export?${params}`, `audit-logs-${new Date().toISOString().slice(0,10)}.csv`)
+  },
+  health: () => request<any>('/system/health', {}, false),
+  overview: () => request<any>('/system/overview'),
+  globalSearch: (q:string) => request<any>(`/system/search?q=${encodeURIComponent(q)}`),
 }

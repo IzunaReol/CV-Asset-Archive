@@ -27,6 +27,38 @@ def test_batch_upload_returns_per_file_results(monkeypatch):
     assert result["items"][2]["session"]["upload_session_id"] == "two.jpg"
 
 
+def test_lists_resumable_chunk_uploads_with_progress(monkeypatch):
+    class Cursor:
+        def __init__(self, items):
+            self.items = items
+        def sort(self, *args):
+            return self
+        def limit(self, *args):
+            return self
+        def __aiter__(self):
+            self.iterator = iter(self.items)
+            return self
+        async def __anext__(self):
+            try:
+                return next(self.iterator)
+            except StopIteration:
+                raise StopAsyncIteration
+
+    session = {
+        "id": "session-1", "filename": "large.bin", "declared_size": 20,
+        "asset_type": "other", "chunk_size": 10, "chunk_count": 2,
+        "created_at": "created", "expires_at": "expires",
+    }
+    upload_sessions = SimpleNamespace(find=lambda *args, **kwargs: Cursor([session]))
+    monkeypatch.setattr(assets, "db", SimpleNamespace(upload_sessions=upload_sessions))
+    monkeypatch.setattr(assets, "uploaded_chunks", lambda prefix: {0: 10})
+
+    result = asyncio.run(assets.list_resumable_upload_sessions({"id": "user-1"}))
+
+    assert result["items"][0]["progress"] == 50
+    assert result["items"][0]["uploaded_parts"] == 1
+
+
 def test_batch_upload_runs_in_bounded_windows(monkeypatch):
     active = 0
     peak = 0
@@ -226,6 +258,37 @@ def test_upload_requests_have_no_file_count_limit():
     assert len(assets.UploadConflictCheckRequest(files=files).files) == 159
     assert len(assets.UploadBatchInitRequest(files=files).files) == 159
     assert len(assets.UploadBatchCompleteRequest(upload_session_ids=[f"s-{index}" for index in range(159)]).upload_session_ids) == 159
+
+
+def test_upload_conflicts_detect_same_content_with_different_name(monkeypatch):
+    class Cursor:
+        def sort(self, *args):
+            return self
+
+        async def to_list(self, **kwargs):
+            return [{
+                "id": "existing", "name": "old-name.jpg", "normalized_name": "old-name.jpg",
+                "type": "image", "size": 10, "sha256": "a" * 64,
+            }]
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    collection = SimpleNamespace(find=lambda *args, **kwargs: Cursor())
+    monkeypatch.setattr(assets, "db", SimpleNamespace(assets=collection, relations=collection))
+    body = assets.UploadConflictCheckRequest(files=[{
+        "filename": "new-name.jpg", "size": 10, "mime_type": "image/jpeg",
+        "asset_type": "image", "sha256": "a" * 64,
+    }])
+
+    result = asyncio.run(assets.check_upload_conflicts(body, {"id": "user"}))
+
+    assert result["total"] == 1
+    assert result["items"][0]["match_kind"] == "content"
+    assert result["groups"][0]["items"][0]["match_kind"] == "content"
 
 
 def test_upload_rejects_unresolved_name_conflict(monkeypatch):

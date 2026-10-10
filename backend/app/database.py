@@ -65,11 +65,14 @@ async def ensure_indexes() -> None:
     await db.upload_sessions.create_index("expires_at", expireAfterSeconds=0)
     await db.tag_definitions.create_index("key", unique=True)
     await db.audit_logs.create_index([("created_at", DESCENDING)])
+    await db.audit_logs.create_index("expires_at", expireAfterSeconds=0)
     await db.audit_logs.create_index(
         [("object_type", ASCENDING), ("object_id", ASCENDING), ("created_at", DESCENDING)]
     )
     await db.saved_views.create_index([("owner_id", ASCENDING), ("updated_at", DESCENDING)])
     await db.saved_views.create_index([("shared_scope", ASCENDING), ("updated_at", DESCENDING)])
+    await db.role_templates.create_index("name", unique=True)
+    await db.role_overrides.create_index("key", unique=True)
 
 
 async def ping_database() -> bool:

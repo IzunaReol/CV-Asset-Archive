@@ -52,24 +52,30 @@ async function mockApi(
     if (path.endsWith('/permissions/me')) {
       const role = sessionTokens.user.roles[0]
       const annotator = role === 'annotator'
+      const custom = role === 'custom'
       return json(route, {
         role,
-        menus: (annotator
+        menus: (custom
+          ? ((sessionTokens.user as any).menu_permissions || [])
+          : annotator
           ? ['library', 'datasets', 'relations', 'lineage', 'downloads']
-          : ['library', 'datasets', 'relations', 'lineage', 'downloads', 'tags', 'formats', 'admin', 'logs']
+          : ['overview', 'library', 'datasets', 'relations', 'lineage', 'downloads', 'tags', 'formats', 'admin', 'roles', 'logs']
         ).map(key => ({ key, name: key })),
-        actions: (annotator
+        actions: (custom
+          ? ((sessionTokens.user as any).action_permissions || [])
+          : annotator
           ? ['asset_upload', 'asset_edit', 'saved_view_manage', 'dataset_create_edit', 'dataset_members_manage', 'dataset_version_publish', 'relation_manage', 'export_create']
-          : ['asset_upload', 'asset_edit', 'asset_delete', 'saved_view_manage', 'dataset_create_edit', 'dataset_members_manage', 'dataset_version_publish', 'dataset_version_restore', 'dataset_delete', 'dataset_model_manage', 'relation_manage', 'relation_revoke', 'export_create', 'trash_manage', 'tag_manage', 'format_manage', 'user_manage']
+          : ['asset_upload', 'asset_edit', 'asset_delete', 'saved_view_manage', 'dataset_create_edit', 'dataset_members_manage', 'dataset_version_publish', 'dataset_version_restore', 'dataset_delete', 'dataset_model_manage', 'relation_manage', 'relation_revoke', 'export_create', 'trash_manage', 'tag_manage', 'format_manage', 'user_manage', 'role_manage']
         ).map(key => ({ key, name: key })),
       })
     }
     if (path.endsWith('/users')) return json(route, { items: [] })
+    if (path.endsWith('/role-templates/role-1') && request.method() === 'DELETE') return json(route, { error: { code: 'ROLE_IN_USE', message: '已有用户zhangsan绑定该角色，不可删除' } }, 409)
     if (path.endsWith('/roles')) {
       const menus = [
         ['library', '素材库'], ['datasets', '数据集管理'], ['relations', '关联关系'], ['lineage', '模型溯源'],
         ['downloads', '任务中心'], ['trash', '回收站'], ['tags', '标签管理'], ['formats', '格式管理'],
-        ['admin', '用户管理'], ['logs', '系统日志'],
+        ['admin', '用户管理'], ['roles', '角色管理'], ['logs', '系统日志'],
       ].map(([key, name]) => ({ key, name }))
       const actions = [
         ['asset_upload', '上传素材', 'library'], ['asset_edit', '编辑素材', 'library'], ['asset_delete', '删除素材', 'library'],
@@ -79,17 +85,21 @@ async function mockApi(
         ['dataset_model_manage', '管理模型关联', 'relations'], ['relation_manage', '管理关联关系', 'relations'],
         ['relation_revoke', '撤销关联关系', 'relations'], ['export_create', '创建导出', 'downloads'],
         ['trash_manage', '管理回收站', 'trash'], ['tag_manage', '管理标签', 'tags'],
-        ['format_manage', '管理格式', 'formats'], ['user_manage', '管理用户', 'admin'],
+        ['format_manage', '管理格式', 'formats'], ['user_manage', '管理用户', 'admin'], ['role_manage', '管理角色', 'roles'],
       ].map(([key, name, menu]) => ({ key, name, menu }))
       return json(route, {
-        items: [{ key: 'admin', menu_permissions: menus.map(item => item.key), action_permissions: actions.map(item => item.key) }],
+        items: [{ key: 'admin', name: '管理员', built_in: true, menu_permissions: menus.map(item => item.key), action_permissions: actions.map(item => item.key) }, { key: 'data_manager', name: '数据管理员', built_in: false, menu_permissions: ['overview','library','datasets'], action_permissions: ['asset_edit'] }],
         menus,
         actions,
-        templates: [],
+        templates: [{ id: 'role-1', name: '质检角色', built_in: false, menu_permissions: ['overview','library'], action_permissions: ['asset_edit'] }],
       })
     }
     if (path.endsWith('/assets/stats')) return json(route, { total: assetRows.length, untagged: assetRows.length, by_type: { other: assetRows.length }, storage: { total: 0, used: 0, free: 0 } })
-    if (path.endsWith('/audit-logs')) return json(route, { items: [{ id: 'audit-1', actor_id: 'admin', actor_username: 'admin', action: 'user.updated', object_type: 'user', object_id: 'user-1', object_name: '测试用户', changes: { status: 'active', roles: ['viewer'], password_changed: false, size: 1048576 }, request_id: 'request-1', created_at: '2026-10-08T01:00:00Z' }], page: 1, page_size: 50, total: 1 })
+    if (path.endsWith('/system/health')) return json(route, { status: 'ok', checks: { mongodb: true, minio: true, redis: true } })
+    if (path.endsWith('/system/overview')) return json(route, { counts: { assets: assetRows.length, datasets: 2, relations: 3, running_jobs: 1, failed_jobs: 0 }, asset_types: { image: assetRows.length }, recent_activity: [] })
+    if (path.endsWith('/system/search')) return json(route, { query: '示例', groups: [{ type: 'asset', label: '素材', items: [{ id: 'asset-1', name: '示例素材.jpg', type: 'image', remark: '全局结果' }] }] })
+    if (path.endsWith('/audit-logs')) return json(route, { items: [{ id: 'audit-1', actor_id: 'admin', actor_username: 'admin', action: 'user.updated', object_type: 'user', object_id: 'user-1', object_name: '测试用户', changes: { status: 'active', roles: ['viewer'], password_changed: false, size: 1048576 }, outcome: 'success', response_status: 200, client_ip: '127.0.0.1', request_id: 'request-1', created_at: '2026-10-08T01:00:00Z' }], page: 1, page_size: 50, total: 1 })
+    if (path.endsWith('/assets/upload-sessions') && request.method() === 'GET') return json(route, { items: [] })
     if (path.endsWith('/assets/trash/items')) return json(route, { items: [], total: 0 })
     if (path.endsWith('/format-definitions')) return json(route, { items: [{ asset_type: 'image', extensions: ['.jpg'] }] })
     if (path.endsWith('/saved-views') || path.endsWith('/tag-definitions')) return json(route, { items: [] })
@@ -167,6 +177,7 @@ test('素材库全部数量使用当前筛选结果总数', async ({ page }) => 
   await mockApi(page, assetRows, 100)
   await page.addInitScript(value => localStorage.setItem('cv-archive-session', JSON.stringify(value)), tokens)
   await page.goto('/')
+  await page.getByRole('button', { name: /素材库/ }).click()
 
   await page.locator('.check-list').getByRole('button', { name: /图片/ }).click()
 
@@ -183,6 +194,7 @@ test('素材详情支持方向键切换且编辑备注时不会误切换', async
   await mockApi(page, assetRows)
   await page.addInitScript(value => localStorage.setItem('cv-archive-session', JSON.stringify(value)), tokens)
   await page.goto('/')
+  await page.getByRole('button', { name: /素材库/ }).click()
   await page.locator('.asset-card').first().locator('.asset-preview').click()
   const detail = page.locator('.detail-sheet')
   await expect(detail.getByRole('heading', { name: '第一项.txt' })).toBeVisible()
@@ -215,6 +227,7 @@ test('弹窗支持标准语义、自动聚焦、Esc 关闭并归还焦点', asyn
   await mockApi(page)
   await page.addInitScript(value => localStorage.setItem('cv-archive-session', JSON.stringify(value)), tokens)
   await page.goto('/')
+  await page.getByRole('button', { name: /素材库/ }).click()
   const trigger = page.getByRole('button', { name: '＋ 上传素材' })
   await trigger.click()
   const dialog = page.getByRole('dialog', { name: '上传素材' })
@@ -258,6 +271,7 @@ test('上传同名文件时按类型展示覆盖和重命名选择', async ({ pa
   await mockApi(page)
   await page.addInitScript(value => localStorage.setItem('cv-archive-session', JSON.stringify(value)), tokens)
   await page.goto('/')
+  await page.getByRole('button', { name: /素材库/ }).click()
   await expect(page.getByText('没有匹配的素材')).toBeVisible()
   await page.getByRole('combobox', { name: '界面' }).selectOption('command')
   await page.getByRole('button', { name: '＋ 上传素材' }).click()
@@ -276,7 +290,7 @@ test('上传同名文件时按类型展示覆盖和重命名选择', async ({ pa
   await page.getByRole('button', { name: '开始上传' }).click()
 
   await expect(page.getByText('图片1 项')).toBeVisible()
-  await expect(page.getByText('存在共1项重名文件，请选择：')).toBeVisible()
+  await expect(page.getByText('存在共1项同名或内容重复文件，请选择：')).toBeVisible()
   await expect(page.getByText('共1项文件')).toBeVisible()
   await expect(page.locator('.upload-conflict-items')).toHaveCount(0)
   await page.locator('.upload-conflict-group').click()
@@ -304,6 +318,10 @@ test('上传同名文件时按类型展示覆盖和重命名选择', async ({ pa
   await expect(page.locator('.confirm-dialog')).toHaveCount(0)
   await expect(page.getByText('正在上传 · 已处理 0 / 1 项')).toBeVisible()
   await expect(page.getByRole('button', { name: '暂停上传', exact: true })).toBeEnabled()
+  await page.getByRole('button', { name: '转入后台', exact: true }).click()
+  await expect(page.locator('.upload-background-status')).toContainText('后台上传 0 / 1')
+  await page.locator('.upload-background-status').click()
+  await expect(uploadDialog).toBeVisible()
 })
 
 test('普通写入角色不显示破坏性操作', async ({ page }) => {
@@ -318,6 +336,7 @@ test('普通写入角色不显示破坏性操作', async ({ page }) => {
   await mockApi(page, assetRows, assetRows.length, annotatorTokens)
   await page.addInitScript(value => localStorage.setItem('cv-archive-session', JSON.stringify(value)), annotatorTokens)
   await page.goto('/')
+  await page.getByRole('button', { name: /素材库/ }).click()
 
   await expect(page.locator('.profile small')).toHaveText('标注员')
   await page.getByLabel('选择 普通素材.jpg').click()
@@ -339,6 +358,7 @@ test('系统管理可以查看并筛选系统日志', async ({ page }) => {
 
   await page.getByRole('button', { name: /系统日志/ }).click()
   await expect(page.getByRole('heading', { name: '系统日志' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '导出 CSV' })).toBeVisible()
   await expect(page.getByText('查看系统内的重要操作记录和请求编号。')).toHaveCount(0)
   await expect(page.locator('.audit-log-table').getByText('修改用户')).toBeVisible()
   await expect(page.locator('.audit-log-table').getByText('用户：测试用户')).toBeVisible()
@@ -351,6 +371,8 @@ test('系统管理可以查看并筛选系统日志', async ({ page }) => {
   await expect(detail.getByText('正常', { exact: true })).toBeVisible()
   await expect(detail.getByText('角色', { exact: true })).toBeVisible()
   await expect(detail.getByText('只读访客', { exact: true })).toBeVisible()
+  await expect(detail.getByText('成功（200）')).toBeVisible()
+  await expect(detail.getByText('127.0.0.1')).toBeVisible()
   await page.locator('.audit-detail-stage').click({ position: { x: 20, y: 20 } })
   await expect(detail).toHaveCount(0)
   await page.getByPlaceholder('搜索用户、对象、操作或请求 ID').fill('admin')
@@ -360,6 +382,7 @@ test('系统管理可以查看并筛选系统日志', async ({ page }) => {
 
 test('自定义用户的菜单权限和操作权限支持全选与取消选择', async ({ page }) => {
   await mockApi(page)
+  await page.setViewportSize({ width: 1100, height: 600 })
   await page.addInitScript(value => localStorage.setItem('cv-archive-session', JSON.stringify(value)), tokens)
   await page.goto('/')
 
@@ -368,18 +391,99 @@ test('自定义用户的菜单权限和操作权限支持全选与取消选择',
   const userDialog = page.getByRole('heading', { name: '新增用户', exact: true }).locator('..')
   await userDialog.getByLabel('角色').selectOption('custom')
 
-  const menuPermissions = userDialog.getByRole('group', { name: '菜单权限' })
-  const actionPermissions = userDialog.getByRole('group', { name: '操作权限' })
-  await menuPermissions.getByRole('button', { name: '全选', exact: true }).click()
-  await expect(menuPermissions.getByLabel('有权限')).toHaveCount(10)
+  const permissions = userDialog.getByRole('group', { name: '菜单与操作权限' })
+  const bulk = permissions.locator('.permission-bulk-toolbar')
+  await permissions.locator('.permission-menu-title').filter({ hasText: '素材库' }).click()
+  await expect(permissions.locator('.permission-menu-group').filter({ hasText: '素材库' }).locator('.permission-menu-actions').getByLabel('有权限')).toHaveCount(4)
+  await expect(permissions.getByText('上传素材', { exact: true })).toBeVisible()
+  await expect.poll(() => permissions.locator('.permission-groups-list').evaluate(element => getComputedStyle(element).overflowY)).toBe('auto')
+  await expect.poll(() => userDialog.evaluate(element => getComputedStyle(element).overflowY)).toBe('hidden')
+  await permissions.locator('.permission-menu-title').filter({ hasText: '素材库' }).click()
+  await bulk.getByRole('button', { name: '全选', exact: true }).click()
+  await expect(permissions.locator('.permission-menu-title').getByLabel('有权限')).toHaveCount(11)
+  await expect(permissions.locator('.permission-menu-actions').getByLabel('有权限')).toHaveCount(18)
+  await bulk.getByRole('button', { name: '取消全选', exact: true }).click()
+  await expect(permissions.locator('.permission-menu-title').getByLabel('有权限')).toHaveCount(0)
+  await expect(permissions.locator('.permission-menu-actions').getByLabel('有权限')).toHaveCount(0)
+})
 
-  await actionPermissions.getByRole('button', { name: '全选', exact: true }).click()
-  await expect(actionPermissions.getByLabel('有权限')).toHaveCount(17)
-  await actionPermissions.getByRole('button', { name: '取消选择', exact: true }).click()
-  await expect(actionPermissions.getByLabel('有权限')).toHaveCount(0)
+test('全局搜索可以打开素材结果', async ({ page }) => {
+  await mockApi(page)
+  await page.addInitScript(value => localStorage.setItem('cv-archive-session', JSON.stringify(value)), tokens)
+  await page.goto('/')
 
-  await actionPermissions.getByRole('button', { name: '全选', exact: true }).click()
-  await menuPermissions.getByRole('button', { name: '取消选择', exact: true }).click()
-  await expect(menuPermissions.getByLabel('有权限')).toHaveCount(0)
-  await expect(actionPermissions.getByLabel('有权限')).toHaveCount(0)
+  await page.getByPlaceholder('全局搜索素材、数据集和任务…').fill('示例')
+  await expect(page.locator('.global-search-results')).toContainText('示例素材.jpg')
+  await page.locator('.global-search-results').getByRole('button', { name: /示例素材.jpg/ }).click()
+  await expect(page.getByRole('heading', { name: '素材库' })).toBeVisible()
+})
+
+test('素材库筛选和表格列设置会按用户持久保存', async ({ page }) => {
+  const assetRows = [{ id: 'asset-1', name: '持久化素材.jpg', type: 'image', size: 2048, status: 'ready', tags: {}, media: {}, created_at: '2026-10-09T01:00:00Z' }]
+  await mockApi(page, assetRows)
+  await page.addInitScript(value => localStorage.setItem('cv-archive-session', JSON.stringify(value)), tokens)
+  await page.goto('/')
+  await page.getByRole('button', { name: /素材库/ }).click()
+
+  await page.getByRole('button', { name: '表格', exact: true }).click()
+  await page.getByRole('button', { name: '列设置', exact: true }).click()
+  const dialog = page.getByRole('heading', { name: '素材库列设置' }).locator('..')
+  await dialog.getByRole('button', { name: /备注/ }).click()
+  await dialog.getByRole('button', { name: '完成' }).click()
+  await page.reload()
+  await page.getByRole('button', { name: /素材库/ }).click()
+
+  await expect(page.locator('.asset-custom-table')).toBeVisible()
+  await expect(page.locator('.asset-custom-row.head')).toContainText('备注')
+  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('cv-archive-library:admin') || '{}').libraryView)).toBe('table')
+})
+
+test('角色管理锁定管理员并提示绑定用户不可删除', async ({ page }) => {
+  await mockApi(page)
+  await page.addInitScript(value => localStorage.setItem('cv-archive-session', JSON.stringify(value)), tokens)
+  await page.goto('/')
+
+  await page.getByRole('button', { name: /角色管理/ }).click()
+  await expect(page.getByRole('heading', { name: '角色管理' })).toBeVisible()
+  const adminRole = page.locator('.role-management-table .table-row:not(.head)').filter({ has: page.locator('b', { hasText: /^管理员$/ }) })
+  await expect(adminRole.getByRole('button')).toHaveCount(0)
+  const customRole = page.locator('.role-management-table .table-row').filter({ hasText: '质检角色' })
+  await customRole.getByRole('button', { name: '删除' }).click()
+  await page.locator('.confirm-dialog').getByRole('button', { name: '确认删除' }).click()
+  await expect(page.getByText('已有用户zhangsan绑定该角色，不可删除')).toBeVisible()
+})
+
+test('只有角色菜单但无管理角色权限时隐藏全部角色操作按钮', async ({ page }) => {
+  const readOnlyRoleTokens = {
+    ...tokens,
+    user: { id: 'role-viewer', username: 'role-viewer', roles: ['custom'], menu_permissions: ['roles'], action_permissions: [] },
+  } as any
+  await mockApi(page, [], 0, readOnlyRoleTokens)
+  await page.addInitScript(value => localStorage.setItem('cv-archive-session', JSON.stringify(value)), readOnlyRoleTokens)
+  await page.goto('/')
+
+  await expect(page.getByRole('button', { name: /角色管理/ })).toBeVisible()
+  await page.getByRole('button', { name: /角色管理/ }).click()
+  await expect(page.getByRole('heading', { name: '角色管理' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '＋ 新建角色', exact: true })).toHaveCount(0)
+  await expect(page.locator('.role-management-table').getByRole('button', { name: '编辑', exact: true })).toHaveCount(0)
+  await expect(page.locator('.role-management-table').getByRole('button', { name: '删除', exact: true })).toHaveCount(0)
+})
+
+test('只有用户菜单但无管理用户权限时隐藏全部用户操作按钮', async ({ page }) => {
+  const readOnlyUserTokens = {
+    ...tokens,
+    user: { id: 'user-viewer', username: 'user-viewer', roles: ['custom'], menu_permissions: ['admin'], action_permissions: [] },
+  } as any
+  await mockApi(page, [], 0, readOnlyUserTokens)
+  await page.route('**/api/v1/users', route => json(route, { items: [{ id: 'user-1', username: '普通用户', roles: ['viewer'], status: 'active' }] }))
+  await page.addInitScript(value => localStorage.setItem('cv-archive-session', JSON.stringify(value)), readOnlyUserTokens)
+  await page.goto('/')
+
+  await page.getByRole('button', { name: /用户管理/ }).click()
+  await expect(page.getByRole('heading', { name: '用户管理' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '＋ 新增用户', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '按角色新增', exact: true })).toHaveCount(0)
+  await expect(page.locator('.admin-users').getByRole('button', { name: '编辑', exact: true })).toHaveCount(0)
+  await expect(page.locator('.admin-users').getByRole('button', { name: '删除', exact: true })).toHaveCount(0)
 })

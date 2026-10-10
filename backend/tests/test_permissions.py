@@ -115,3 +115,20 @@ def test_system_log_menu_can_be_granted_without_user_management():
     assert asyncio.run(require_menu("logs")(user)) == user
     with pytest.raises(AppError):
         asyncio.run(require_action("user_manage")(user))
+
+
+def test_role_management_requires_role_action_and_role_menu():
+    allowed = {"roles": ["role_manage"]}
+    user = {"roles": ["custom"], "menu_permissions": ["roles"], "action_permissions": allowed["roles"]}
+    assert asyncio.run(require_action("role_manage")(user)) == user
+    with pytest.raises(AppError):
+        asyncio.run(require_action("role_manage")({**user, "action_permissions": []}))
+    with pytest.raises(AppError):
+        asyncio.run(require_action("role_manage")({**user, "menu_permissions": ["admin"]}))
+
+
+def test_user_menu_allows_read_without_user_management_action():
+    user = {"roles": ["custom"], "menu_permissions": ["admin"], "action_permissions": []}
+    assert asyncio.run(require_menu("admin")(user)) == user
+    with pytest.raises(AppError):
+        asyncio.run(require_action("user_manage")(user))

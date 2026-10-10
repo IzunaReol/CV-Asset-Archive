@@ -5,6 +5,7 @@ from datetime import timedelta
 from fastapi import APIRouter, Request, Response
 from redis.asyncio import Redis
 
+from ..audit import record_system_audit
 from ..config import get_settings
 from ..database import db
 from ..errors import AppError
@@ -81,14 +82,17 @@ async def issue_tokens(user: dict, response: Response, remember: bool) -> TokenR
 async def login(body: LoginRequest, request: Request, response: Response) -> TokenResponse:
     failure_key = _login_failure_key(request, body.username)
     if await _login_failure_count(failure_key) >= settings.login_max_failures:
+        await record_system_audit(action="auth.login_blocked", request_id=request.state.request_id, object_name=body.username, changes={"reason": "rate_limited"})
         raise AppError(429, "LOGIN_RATE_LIMITED", "登录失败次数过多，请稍后重试")
     user = await db.users.find_one({"username": body.username, "status": "active"})
     if user is None or not verify_password(body.password, user["password_hash"]):
         failures = await _login_failure_count(failure_key, increment=True)
+        await record_system_audit(action="auth.login_failed", request_id=request.state.request_id, object_name=body.username, changes={"failure_count": failures})
         if failures >= settings.login_max_failures:
             raise AppError(429, "LOGIN_RATE_LIMITED", "登录失败次数过多，请稍后重试")
         raise AppError(401, "INVALID_CREDENTIALS", "用户名或密码错误")
     await _login_failure_count(failure_key, clear=True)
+    await record_system_audit(action="auth.login_succeeded", request_id=request.state.request_id, object_name=user["username"], actor=user)
     return await issue_tokens(user, response, body.remember)
 
 
@@ -112,6 +116,10 @@ async def refresh(request: Request, response: Response) -> TokenResponse:
 @router.post("/logout", status_code=204)
 async def logout(request: Request, response: Response) -> None:
     refresh_token = request.cookies.get(REFRESH_COOKIE)
+    actor = None
     if refresh_token:
-        await db.refresh_sessions.delete_one({"token_hash": hash_token(refresh_token)})
+        session = await db.refresh_sessions.find_one_and_delete({"token_hash": hash_token(refresh_token)})
+        if session:
+            actor = await db.users.find_one({"id": session["user_id"]})
+    await record_system_audit(action="auth.logout", request_id=request.state.request_id, object_name=(actor or {}).get("username", "当前用户"), actor=actor)
     response.delete_cookie(REFRESH_COOKIE, path="/api/v1/auth")

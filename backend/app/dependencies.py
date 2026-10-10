@@ -1,19 +1,20 @@
 from typing import Annotated, Any, Callable
 
 import jwt
-from fastapi import Depends
+from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .database import db
 from .errors import AppError
-from .schemas import Role
 from .permissions import ACTION_MENU, effective_action_permissions, effective_menu_permissions
+from .schemas import Role
 from .security import decode_access_token
 
 bearer = HTTPBearer(auto_error=False)
 
 
 async def current_user(
+    request: Request,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
 ) -> dict[str, Any]:
     if credentials is None:
@@ -25,6 +26,7 @@ async def current_user(
     user = await db.users.find_one({"id": claims["sub"], "status": "active"})
     if user is None:
         raise AppError(401, "TOKEN_INVALID", "用户不存在或已停用")
+    request.state.current_user = user
     return user
 
 
@@ -113,7 +115,10 @@ TagReadUser = Annotated[dict[str, Any], Depends(require_menu("tags", "library", 
 TagManageUser = Annotated[dict[str, Any], Depends(require_action("tag_manage"))]
 FormatReadUser = Annotated[dict[str, Any], Depends(require_menu("formats", "library"))]
 FormatManageUser = Annotated[dict[str, Any], Depends(require_action("format_manage"))]
+UserReadUser = Annotated[dict[str, Any], Depends(require_menu("admin"))]
 UserManageUser = Annotated[dict[str, Any], Depends(require_action("user_manage"))]
+RoleReadUser = Annotated[dict[str, Any], Depends(require_menu("roles", "admin"))]
+RoleManageUser = Annotated[dict[str, Any], Depends(require_action("role_manage"))]
 SystemLogReadUser = Annotated[dict[str, Any], Depends(require_menu("logs"))]
 
 
