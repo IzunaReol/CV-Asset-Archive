@@ -2,9 +2,16 @@
 
 English | [简体中文](README.md)
 
+Current version: **v2.0.0**. See the [release notes](docs/releases/v2.0.0.md) and [release checklist](docs/release-checklist.md) for changes and remaining validation limits.
+
 CV Asset Archive is an asset and relationship management system for computer vision teams. It stores images, videos, annotations, models, and archives in one place, with search, annotation preview, lineage tracking, recycle-bin recovery, and asynchronous exports.
 
 ## Features
+
+- Project overview with multi-project selection, current dataset composition, deduplicated models, and tagged files
+- Required dataset project membership and per-model parameter metadata shared across asset details and dataset model management
+- Six built-in metric categories and 16 definitions, with custom category and metric management
+- Usage-impact preview before deletion or overwrite; deleting referenced assets requires a second confirmation and clears their associations
 
 - Batch upload for images, videos, annotations, models, and archives
 - Same-name checks before upload, grouped by asset type, with overwrite or automatic rename choices
@@ -19,7 +26,7 @@ CV Asset Archive is an asset and relationship management system for computer vis
 - Chunked uploads for files 64 MB and larger, with pause, resume, and session recovery after reselecting the same file
 - Fixed and custom roles with separate menu-access and operation permissions enforced by both the UI and backend APIs
 - Tag, format, and audit management, with deletion protection for built-in tags
-- Dataset membership, immutable versions, custom version names, comparison, and restoration
+- Dataset membership, version snapshots, custom version names, comparison, and restoration; explicitly confirmed asset deletion can remove historical version members, and recycle-bin recovery does not restore associations
 - Dataset duplication, version-specific model relationships, and dataset exports
 - Light and dark themes
 
@@ -127,13 +134,13 @@ npm run test:ui
 npm run build
 ```
 
-The isolated API workflow test is available at `scripts/runtime-e2e.py`. See the [testing guide](docs/testing.md) and [v1.6.1 release checklist](docs/release-checklist.md) for the full scope.
+The isolated API workflow test is available at `scripts/runtime-e2e.py`. See the [testing guide](docs/testing.md) and [v2.0.0 release checklist](docs/release-checklist.md) for results and remaining validation gates. Mocked browser tests do not constitute real end-to-end acceptance.
 
-## Preparing to upgrade to v1.6.1
+## Preparing to upgrade to v2.0.0
 
-Back up MongoDB, MinIO, and deployment configuration before upgrading from v1.6.0. Rebuild the API and frontend, then verify the system overview, global search, role permissions, system logs, and duplicate upload checks. No manual data migration is required.
+Back up MongoDB, MinIO, and deployment configuration and retain old images before upgrading from v1.6.1. Verify project overview, dataset projects, model parameters, deletion impact, and navigation. Startup seeds missing metric definitions without overwriting existing configuration; no manual migration is required. Legacy datasets require projects before editing or copying. Rolling back images does not undo data changes. This preparation does not redeploy Docker.
 
-See the [dataset guide](docs/datasets.md) and [v1.6.1 release notes](docs/releases/v1.6.1.md) for added features and changes.
+See the [dataset guide](docs/datasets.md), [model parameters](docs/model-parameters.md), and [v2.0.0 release notes](docs/releases/v2.0.0.md). MLflow integration is not implemented.
 
 ## Documentation
 

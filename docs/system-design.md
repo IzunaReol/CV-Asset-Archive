@@ -27,10 +27,11 @@ API 保存业务元数据并签发 MinIO 地址。浏览器直接传输大文件
 
 | 集合 | 关键字段 | 说明 |
 | --- | --- | --- |
-| `assets` | type, name, remark, object_key, sha256, size, mime_type, media, tags, status, archived_at | 文件元数据与处理状态 |
+| `assets` | type, name, remark, object_key, sha256, size, mime_type, media, tags, metric_values, status, archived_at | 文件元数据、模型参数值与处理状态 |
 | `relations` | source_id, target_id, relation_type, status, provenance, revoke_reason | 有方向的资产关系 |
-| `datasets`、`dataset_memberships` | name, status, asset_id, updated_at | 当前数据集及成员 |
-| `dataset_versions`、`dataset_version_memberships` | version, member_count, content_digest, snapshot | 不可变版本与成员摘要 |
+| `datasets`、`dataset_memberships` | name, status, projects, asset_id, updated_at | 当前数据集、所属项目及成员 |
+| `metric_categories`、`metric_definitions` | id, name, category, description, built_in | 指标分类与定义，值独立保存在模型素材上 |
+| `dataset_versions`、`dataset_version_memberships` | version, member_count, content_digest, snapshot | 发布后固定版本与成员摘要；确认删除关联素材时同步修正 |
 | `collections` | name, kind, asset_ids, revision, frozen_at | 旧集合兼容与迁移来源 |
 | `saved_views` | owner_id, name, query, sort, fields, shared | 保存筛选规则 |
 | `jobs` | type, state, progress, input, result, error, heartbeat_at, expires_at | 后台任务、取消状态和运行心跳 |
@@ -38,7 +39,6 @@ API 保存业务元数据并签发 MinIO 地址。浏览器直接传输大文件
 | `format_definitions` | asset_type, extensions, protected_extensions, built_in, remark | 格式识别配置 |
 | `users` | username, password_hash, status, roles, menu_permissions, action_permissions | 用户、角色、菜单权限与操作权限 |
 | `audit_logs` | actor_username, action, object_type, object_id, object_name, changes, request_id, created_at | 系统关键操作审计日志 |
-| `audit_logs` | actor_id, action, object_type, object_id, object_name, changes, request_id | 只追加审计 |
 
 ## 素材与格式
 
@@ -59,7 +59,7 @@ API 保存业务元数据并签发 MinIO 地址。浏览器直接传输大文件
 
 ## 标签与筛选
 
-标签字段支持配置名称、枚举值、颜色和自由输入。同一素材的同一标签可以保存多个值。素材备注是独立字段。
+标签定义保留名称、枚举值、颜色及历史自由输入配置。同一素材的同一标签可以保存多个值；当前素材批量添加标签只能选取标签管理中的最新枚举值，不提供自定义输入。素材备注是独立字段。
 
 素材库支持名称和备注模糊搜索、素材类型、无标签以及标签、备注、创建时间、修改时间组合筛选。修改备注或标签会更新 `updated_at`。
 
@@ -71,7 +71,7 @@ API 保存业务元数据并签发 MinIO 地址。浏览器直接传输大文件
 
 图片与标注使用 `annotates` 关系。图片进入当前数据集时带入有效标注；撤销图片与标注关系后，只调整未发布的当前数据集，历史版本保持不变。模型只通过 `trained_on` 关系关联已发布的数据集版本，不再直接关联图片、视频、标注或压缩文件。图谱中的版本成员路径为只读推导结果，不额外写入模型直连关系。关系软撤销后从有效图谱移除，但保留历史和审计。
 
-早期版本使用过 `asset_versions` 集合，当前版本已由不可变的 `dataset_versions` 和 `dataset_version_memberships` 承担版本快照；Worker 清理逻辑仍兼容删除遗留记录，但不再写入新数据。
+早期版本使用过 `asset_versions` 集合，当前版本由 `dataset_versions` 和 `dataset_version_memberships` 承担发布后的版本快照；明确确认删除关联素材是允许修正这些快照的例外，Worker 清理逻辑仍兼容删除遗留记录，但不再写入新数据。
 
 ## 删除与导出
 
@@ -92,6 +92,8 @@ API 保存业务元数据并签发 MinIO 地址。浏览器直接传输大文件
 开发环境首次启动创建 `admin/admin`。正式部署必须通过环境变量替换管理员密码、JWT 密钥和 MinIO 凭据；生产模式会拒绝默认、空值或过短的凭据。
 
 ## 已知限制
+
+项目概览由服务端按项目聚合，结合来源页面权限过滤数据；当前成员与历史版本分开统计。模型参数是文件级元数据，关联关系只维护关联备注，详见[数据集与项目概览](datasets.md)和[模型参数](model-parameters.md)。模型参数保存同时更新 `modified_at` 与 `updated_at`。
 
 - 单机部署，不包含高可用、多租户和 Kubernetes；
 - CVAT 和 MLflow 在线集成尚未实现；

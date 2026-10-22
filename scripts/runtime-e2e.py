@@ -119,7 +119,14 @@ def main() -> None:
     )
     assert len(auto_create["succeeded"]) == 1
 
-    dataset = request("/datasets", "POST", {"name": "e2e-dataset"}, token)
+    project = next(item for item in request("/tag-definitions", token=token)["items"] if item["key"] == "project")
+    project_values = list(dict.fromkeys([*project.get("values", []), "e2e-isolated"]))
+    request("/tag-definitions/project", "PATCH", {
+        "name": project["name"], "values": project_values,
+        "color": project.get("color", "#64748b"),
+        "asset_types": project.get("asset_types", []), "free_input": project.get("free_input", False),
+    }, token)
+    dataset = request("/datasets", "POST", {"name": "e2e-dataset", "projects": ["e2e-isolated"]}, token)
     members = request(f"/datasets/{dataset['id']}/members", "POST", {"asset_ids": [image["id"]]}, token)
     assert members["added"] == 1 and annotation["id"] in members["annotations"]["added"]
     version = request(f"/datasets/{dataset['id']}/versions", "POST", {"version": "v1", "release_note": "e2e"}, token)

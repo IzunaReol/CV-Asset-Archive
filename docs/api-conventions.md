@@ -4,7 +4,27 @@
 
 接口统一使用 `/api/v1` 前缀和 JSON。时间字段使用带时区的 ISO 8601，列表接口使用 `page`、`page_size`、`sort`、`direction`、`q` 及领域筛选参数。
 
-列表响应包含 `items`、`page`、`page_size` 和 `total`。素材列表还返回 `next_cursor`；按相同筛选和排序传入 `after=<next_cursor>` 可连续读取下一页，原有页码参数仍可使用。批量操作返回成功数、失败数和逐项 `details`；单项失败不回滚已成功项，明细达到保护上限时返回 `details_truncated=true`。
+分页列表响应包含 `items`、`page`、`page_size` 和 `total`；指标与分类等非分页列表按各接口返回，不强制分页字段。素材列表还返回 `next_cursor`；按相同筛选和排序传入 `after=<next_cursor>` 可连续读取下一页，原有页码参数仍可使用。批量操作返回成功数、失败数和逐项 `details`；单项失败不回滚已成功项，明细达到保护上限时返回 `details_truncated=true`。
+
+## v2.0.0 接口补充
+
+以下路径均在 `/api/v1` 下，完整请求模型以 OpenAPI 为准。产品版本为 2.0.0，接口前缀仍为 `/api/v1`。
+
+| 接口 | 行为 |
+| --- | --- |
+| `GET /projects/overview` | 重复 `projects` 查询参数选择项目，最多 50 项且必须在项目标签可选值中；省略则选择全部。前端清空选择时不查询全部。按项目概览及来源菜单权限过滤结果 |
+| `POST /datasets`、`PATCH /datasets/{dataset_id}` | `projects` 必填且至少一项，值来自项目标签；旧数据读取兼容，复制前也须补齐项目 |
+| `GET /metric-categories`、`POST /metric-categories` | 查询、创建指标分类 |
+| `PATCH /metric-categories/{category_id}`、`DELETE /metric-categories/{category_id}` | 修改、删除自定义分类；内置项受保护，分类有指标时禁止删除 |
+| `GET /metric-definitions`、`POST /metric-definitions` | 查询、创建指标定义 |
+| `PATCH /metric-definitions/{metric_id}`、`DELETE /metric-definitions/{metric_id}` | 修改、删除指标；内置指标不可删除，删除自定义指标同步清除模型取值 |
+| `GET /assets/{asset_id}/parameters`、`PATCH /assets/{asset_id}/parameters` | 读取、保存模型参数；保存 `values` 为整份替换，非逐键合并，需提交全部保留值 |
+| `PATCH /datasets/{dataset_id}/models/{relation_id}` | 只更新关联备注，不更换模型或版本 |
+| `POST /assets/usage-impact` | 查询删除或覆盖的素材使用影响 |
+| `GET /assets/{asset_id}/history` | 返回 `items`、`total`、`page`、`page_size`，默认每页 100、上限 200 |
+| `GET /relations?asset_id=...` | 精确筛选素材关联，用于详情数量跳转 |
+
+模型取值修改要求 `asset_edit`；指标定义与分类管理要求参数管理菜单及 `parameter_manage`。数据集可读不代表模型可编辑。删除关联素材是历史快照固定性的明确例外，详见[数据集](datasets.md)与[模型参数](model-parameters.md)。
 
 错误响应：
 

@@ -15,7 +15,7 @@ def test_normalize_extensions_trims_prefix_and_duplicates():
 def test_fixed_role_uses_predefined_menu_permissions():
     body = admin.UserCreate(username="viewer-user", password="password123", roles=["viewer"])
 
-    assert body.menu_permissions == ["overview", "library", "datasets", "relations", "lineage", "downloads"]
+    assert body.menu_permissions == ["overview", "project_overview", "library", "datasets", "relations", "lineage", "downloads"]
 
 
 def test_reusable_role_rejects_action_without_corresponding_menu():
@@ -40,6 +40,42 @@ async def test_create_reusable_role_persists_permissions(monkeypatch):
     assert result["name"] == "质检负责人"
     assert result["menu_permissions"] == ["overview", "library"]
     role_templates.insert_one.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_role_impact_includes_active_and_disabled_users(monkeypatch):
+    class Cursor:
+        def sort(self, *_): return self
+        def limit(self, *_): return self
+        async def to_list(self, **_):
+            return [
+                {"username": "active-user", "status": "active"},
+                {"username": "disabled-user", "status": "disabled"},
+            ]
+
+    async def count_documents(query):
+        if query.get("status") == "active":
+            return 1
+        if query.get("status") == "disabled":
+            return 1
+        return 2
+
+    role_templates = SimpleNamespace(find_one=AsyncMock(return_value={
+        "id": "role-1", "menu_permissions": ["library"], "action_permissions": ["asset_edit"],
+    }))
+    users = SimpleNamespace(find=lambda *_args, **_kwargs: Cursor(), count_documents=count_documents)
+    monkeypatch.setattr(admin, "db", SimpleNamespace(role_templates=role_templates, users=users))
+    body = admin.RoleTemplateBody(
+        name="质检负责人", menu_permissions=["library", "datasets"], action_permissions=["asset_edit"],
+    )
+
+    result = await admin.preview_role_impact("role-1", body, {"id": "admin"})
+
+    assert result["affected_count"] == 2
+    assert result["active_count"] == 1
+    assert result["disabled_count"] == 1
+    assert result["menus_added"] == ["datasets"]
+    assert result["users"][1]["status"] == "disabled"
 
 
 @pytest.mark.asyncio

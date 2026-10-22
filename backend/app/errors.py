@@ -15,7 +15,7 @@ class AppError(Exception):
 
 
 async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
-    if exc.status_code in {401, 403} and exc.code not in {"INVALID_CREDENTIALS", "LOGIN_RATE_LIMITED"}:
+    if exc.status_code in {401, 403} and exc.code not in {"AUTH_REQUIRED", "INVALID_CREDENTIALS", "LOGIN_RATE_LIMITED"}:
         try:
             from .audit import record_system_audit
             actor = getattr(request.state, "current_user", None)

@@ -2,12 +2,30 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api } from './api'
 import DatasetView from './DatasetView.vue'
-import { canDeleteTag, jobAction } from './uiPolicy'
 import { UploadPauseController } from './uploadPause'
 import { jobPollDelay } from './sessionPolicy'
 import { useDialogAccessibility } from './dialogAccessibility'
 import { nearbyPages } from './relationPagination'
 import { resolveActionPermissions, resolveMenuPermissions, type ActionKey, type MenuKey } from './menuPermissions'
+import { useConfirmation } from './composables/useConfirmation'
+import { useLineageGraph } from './composables/useLineageGraph'
+import { useJobs, jobStateText } from './composables/useJobs'
+import GlobalSearch from './components/GlobalSearch.vue'
+import ConfirmationDialog from './components/ConfirmationDialog.vue'
+import ModelParametersDialog from './components/ModelParametersDialog.vue'
+import OverviewView from './views/OverviewView.vue'
+import ProjectOverviewView from './views/ProjectOverviewView.vue'
+import JobsView from './views/JobsView.vue'
+import TagsView from './views/TagsView.vue'
+import FormatsView from './views/FormatsView.vue'
+import ParametersView from './views/ParametersView.vue'
+import AuditLogsView from './views/AuditLogsView.vue'
+import TrashView from './views/TrashView.vue'
+import { useAuditLogs } from './composables/useAuditLogs'
+import { useTrash } from './composables/useTrash'
+import { createAuditPresentation, auditObjectLabels, auditFieldLabels, auditActionText } from './auditPresentation'
+import PermissionImpactDialog from './components/PermissionImpactDialog.vue'
+import { transferUploads, uploadFileHash, uploadFileKey } from './uploadTransfer'
 
 type Page = MenuKey
 type MenuDefinition = { key: Page; name: string }
@@ -19,10 +37,10 @@ type FilterRule = { id: number; tag: TagKey; operator: FilterOperator; value: st
 type AssetId = string | number
 type Asset = { id:AssetId; name:string; type:string; status:string; scene:string; algorithm:string; tone:string; mark:string; remark:string; createdAt:string; updatedAt:string; size?:number; preview_url?:string|null; tags:Partial<Record<TagKey,string|string[]>>; datasets?:Array<{id:string;name:string;in_current_dataset:boolean;versions:string[]}> }
 
-const UPLOAD_API_BATCH_SIZE = 25
-
 const page = ref<Page>('overview')
 const datasetOpenRequest = ref<{id:string;nonce:number}|null>(null)
+const datasetListRequestNonce = ref(0)
+const datasetResumeDraft = ref<any>(null)
 const skin = ref<Skin>((localStorage.getItem('cv-archive-skin') as Skin) || 'light')
 const selected = ref<AssetId[]>([])
 const selectedSetId = ref('')
@@ -31,11 +49,6 @@ const selectedSetExcluded = ref<string[]>([])
 const assetAllCursor = ref<string|null>(null)
 const assetAllLoading = ref(false)
 const query = ref('')
-const globalQuery = ref('')
-const globalSearchOpen = ref(false)
-const globalSearchLoading = ref(false)
-const globalSearchGroups = ref<any[]>([])
-let globalSearchTimer: number | null = null
 const status = ref('全部状态')
 const scene = ref('全部场景')
 const noTags = ref(false)
@@ -60,8 +73,13 @@ const assetColumnDefinitions = [
 ]
 const detailId = ref<AssetId | null>(null)
 const detailAsset = ref<any>(null)
+const modelParametersAssetId = ref<string|null>(null)
 const assetHistory = ref<any[]>([])
+const assetHistoryExpanded = ref(false)
+const visibleAssetHistory = computed(() => assetHistoryExpanded.value ? assetHistory.value : assetHistory.value.slice(0, 3))
 const assetHistoryLoading = ref(false)
+const assetHistoryTotal = ref(0)
+let assetDetailGeneration = 0
 const annotationSources = ref<any[]>([])
 const selectedAnnotationSourceId = ref('')
 const annotationLoading = ref(false)
@@ -78,10 +96,12 @@ let pageScrollbarTimer: number | null = null
 let assetLoadGeneration = 0
 const toast = ref('')
 const toastKind = ref<'success'|'error'>('success')
-const confirmOpen = ref(false)
-const confirmMessage = ref('')
-const confirmBusy = ref(false)
-let pendingConfirmAction: (() => void | Promise<void>) | null = null
+const { confirmOpen, confirmMessage, confirmUsageImpact, deleteConfirmationStage, confirmBusy,
+  confirmTitle, confirmActionText, askConfirmation, runConfirmedAction, cancelConfirmation } = useConfirmation(notifyError)
+const permissionImpactOpen = ref(false)
+const permissionImpact = ref<any>(null)
+const permissionImpactBusy = ref(false)
+let pendingPermissionImpactAction: (() => void | Promise<void>) | null = null
 const showLogin = ref(!api.session())
 const loginUsername = ref('admin')
 const loginPassword = ref('admin')
@@ -94,16 +114,16 @@ let serviceHealthTimer: number | null = null
 const myPermissionsOpen = ref(false)
 const myPermissionSummary = ref<any>(null)
 const menuDefinitions = ref<MenuDefinition[]>([
-  {key:'overview',name:'系统概览'}, {key:'library',name:'素材库'}, {key:'datasets',name:'数据集'}, {key:'relations',name:'关联关系'},
+  {key:'overview',name:'系统概览'}, {key:'project_overview',name:'项目概览'}, {key:'library',name:'素材库'}, {key:'datasets',name:'数据集'}, {key:'relations',name:'关联关系'},
   {key:'lineage',name:'模型溯源'}, {key:'downloads',name:'任务中心'}, {key:'trash',name:'回收站'},
-  {key:'tags',name:'标签管理'}, {key:'formats',name:'格式管理'}, {key:'admin',name:'用户管理'}, {key:'roles',name:'角色管理'}, {key:'logs',name:'系统日志'},
+  {key:'tags',name:'标签管理'}, {key:'formats',name:'格式管理'}, {key:'parameters',name:'参数管理'}, {key:'admin',name:'用户管理'}, {key:'roles',name:'角色管理'}, {key:'logs',name:'系统日志'},
 ])
 const roleMenuPermissions = ref<Record<string,Page[]>>({
   admin: menuDefinitions.value.map(item=>item.key),
-  data_manager: ['overview','library','datasets','relations','lineage','downloads','trash'],
-  annotator: ['overview','library','datasets','relations','downloads'],
-  ml_engineer: ['overview','library','datasets','relations','lineage','downloads'],
-  viewer: ['overview','library','datasets','relations','lineage','downloads'],
+  data_manager: ['overview','project_overview','library','datasets','relations','lineage','downloads','trash'],
+  annotator: ['overview','project_overview','library','datasets','relations','downloads'],
+  ml_engineer: ['overview','project_overview','library','datasets','relations','lineage','downloads'],
+  viewer: ['overview','project_overview','library','datasets','relations','lineage','downloads'],
   custom: [],
 })
 const actionDefinitions = ref<ActionDefinition[]>([
@@ -114,7 +134,7 @@ const actionDefinitions = ref<ActionDefinition[]>([
   {key:'dataset_delete',name:'删除数据集',menu:'datasets'}, {key:'dataset_model_manage',name:'管理数据集模型关联',menu:'datasets'},
   {key:'relation_manage',name:'建立关联关系',menu:'relations'}, {key:'relation_revoke',name:'撤销关联关系',menu:'relations'},
   {key:'export_create',name:'创建导出任务',menu:'downloads'}, {key:'trash_manage',name:'管理回收站',menu:'trash'},
-  {key:'tag_manage',name:'管理标签',menu:'tags'}, {key:'format_manage',name:'管理格式',menu:'formats'},
+  {key:'tag_manage',name:'管理标签',menu:'tags'}, {key:'format_manage',name:'管理格式',menu:'formats'}, {key:'parameter_manage',name:'管理模型指标参数',menu:'parameters'},
   {key:'user_manage',name:'管理用户',menu:'admin'}, {key:'role_manage',name:'管理角色',menu:'roles'},
 ])
 const roleActionPermissions = ref<Record<string,ActionKey[]>>({
@@ -130,7 +150,8 @@ const permissionGroups = computed(() => menuDefinitions.value.map(menu => ({
 const currentMenuPermissions = computed<Page[]>(() => {
   return resolveMenuPermissions(currentUser.value, roleMenuPermissions.value)
 })
-const hasSystemMenuPermission = computed(() => ['tags','formats','admin','roles','logs'].some(item=>currentMenuPermissions.value.includes(item as Page)))
+const hasSystemMenuPermission = computed(() => ['tags','formats','parameters','admin','roles','logs'].some(item=>currentMenuPermissions.value.includes(item as Page)))
+const hasAssetMenuPermission = computed(() => ['library','datasets','relations','lineage','downloads','trash'].some(item=>currentMenuPermissions.value.includes(item as Page)))
 function canViewMenu(menu:Page) { return currentMenuPermissions.value.includes(menu) }
 const currentActionPermissions = computed(() => resolveActionPermissions(currentUser.value, roleActionPermissions.value))
 function can(action:ActionKey) { return currentActionPermissions.value.includes(action) }
@@ -155,6 +176,7 @@ const batchTagOpen = ref(false)
 const batchTagAction = ref<'add'|'remove'>('add')
 const batchTagKey = ref<TagKey>('status')
 const batchTagValue = ref('')
+const batchTagLoading = ref(false)
 const batchTagTarget = ref<'library'|'upload'>('library')
 const batchResultOpen = ref(false)
 const batchResultTitle = ref('')
@@ -199,16 +221,8 @@ const lineagePickerQuery = ref('')
 const lineagePickerPage = ref(1)
 const lineagePickerTotal = ref(0)
 const lineagePickerLoading = ref(false)
-const jobRows = ref<any[]>([])
-const jobTotal = ref(0)
-const jobAllTotal = ref(0)
-const jobPage = ref(1)
-const jobPageSize = ref(20)
-const jobTypeFilter = ref('')
-const jobStateFilter = ref('')
-const jobCreatedFrom = ref('')
-const jobCreatedTo = ref('')
-const jobPages = computed(() => Math.max(1, Math.ceil(jobTotal.value / jobPageSize.value)))
+const jobs = useJobs(notify, notifyError, askConfirmation)
+const { rows: jobRows, allTotal: jobAllTotal, load: loadJobs, clear: clearJobs } = jobs
 let jobPoll: number | null = null
 const tagRows = ref<any[]>([])
 const demoState = ref<'normal' | 'loading' | 'empty' | 'error' | 'forbidden'>('normal')
@@ -218,6 +232,7 @@ const relationDetailId = ref<string | number | null>(null)
 const relationDetailData = ref<any>(null)
 const relationTotal = ref(0)
 const relationHistoryQuery = ref('')
+const relationHistoryAssetId = ref('')
 const relationHistoryType = ref('')
 const relationHistoryStatus = ref('')
 const relationHistoryCreator = ref('')
@@ -244,18 +259,8 @@ const savedViewName = ref('')
 const savedViewScope = ref<'private'|'team'>('private')
 const editingViewId = ref<string | null>(null)
 const userRows = ref<any[]>([])
-const auditRows = ref<any[]>([])
-const auditLoading = ref(false)
-const auditPage = ref(1)
-const auditPageSize = ref(50)
-const auditTotal = ref(0)
-const auditQuery = ref('')
-const auditAction = ref('')
-const auditObjectType = ref('')
-const auditCreatedFrom = ref('')
-const auditCreatedTo = ref('')
-const auditDetail = ref<any|null>(null)
-const auditPages = computed(() => Math.max(1, Math.ceil(auditTotal.value / auditPageSize.value)))
+const audit = useAuditLogs(notify, notifyError)
+const { load: loadAuditLogs, openDetail: openAuditDetail, clear: clearAuditLogs } = audit
 const userOpen = ref(false)
 const permissionTemplateOpen = ref(false)
 const permissionTemplates = ref<any[]>([])
@@ -264,23 +269,6 @@ const roleEditorOpen = ref(false)
 const editingRoleTemplateId = ref<string|null>(null)
 const editingFixedRoleKey = ref<string|null>(null)
 const roleTemplateDraft = ref<{name:string;description:string;menu_permissions:Page[];action_permissions:ActionKey[]}>({name:'',description:'',menu_permissions:['overview','library'],action_permissions:[]})
-const overviewData = ref<any>({counts:{},asset_types:{},asset_storage_by_type:{},recent_activity:[]})
-const overviewShareColors:Record<string,string>={image:'#3b82f6',video:'#8b5cf6',annotation:'#10b981',model:'#f59e0b',archive:'#ef6c57',image_annotation:'#14b8a6',other:'#94a3b8'}
-const overviewAssetShares = computed(()=>{
-  const entries=Object.entries(overviewData.value.asset_storage_by_type||{}).map(([type,value]:[string,any])=>({type,count:Number(value.count||0),size:Number(value.size||0),color:overviewShareColors[type]||'#64748b'}))
-  const sizeTotal=entries.reduce((sum,item)=>sum+item.size,0)
-  const total=sizeTotal>0?sizeTotal:entries.reduce((sum,item)=>sum+item.count,0)
-  let current=0
-  return entries.map(item=>{
-    const amount=sizeTotal>0?item.size:item.count
-    const start=total?current/total*100:0
-    current+=amount
-    const end=total?current/total*100:0
-    return {...item,percentage:total?amount/total*100:0,start,end}
-  })
-})
-const overviewAssetPieStyle = computed(()=>({background:overviewAssetShares.value.length?`conic-gradient(${overviewAssetShares.value.map(item=>`${item.color} ${item.start}% ${item.end}%`).join(',')})`:'var(--soft)'}))
-const overviewLoading = ref(false)
 const editingUserId = ref<string|null>(null)
 const newUser = ref<{username:string;password:string;role:string;status:string;menu_permissions:Page[];action_permissions:ActionKey[]}>({username:'',password:'',role:'viewer',status:'active',menu_permissions:[],action_permissions:[]})
 const formatRows = ref<any[]>([])
@@ -291,62 +279,34 @@ const newFormatType = ref('')
 const formatRemark = ref('')
 const formatValueRows = ref<Array<{id:number;value:string;editing:boolean;protected:boolean}>>([])
 let nextFormatValueId = 1
-const trashAssets = ref<Asset[]>([])
-const trashSelected = ref<AssetId[]>([])
-const trashPage = ref(1)
-const trashPageSize = ref(50)
-const trashTotal = ref(0)
+const trash = useTrash({ mapAsset, refreshAssets: loadAssets, notify, notifyError, confirm: askConfirmation, showBatchResult })
+const { total: trashTotal, load: loadTrash, clear: clearTrash } = trash
 
 const assets = ref<Asset[]>([])
 const tagDefinitions = computed(() => tagRows.value.map((tag:any) => ({key:tag.key,label:tag.name,values:tag.values || [],free_input:Boolean(tag.free_input)})))
 const datasetStatusValues = computed(() => tagRows.value.find((tag:any) => tag.key === 'status')?.values || ['待整理','未标注','已标注','审核中','待复核','已训练'])
+const datasetProjectValues = computed<string[]>(() => tagRows.value.find((tag:any) => tag.key === 'project')?.values || [])
 const filterDefinitions = computed(() => [{key:'remark',label:'备注',values:[],free_input:true},{key:'created_at',label:'创建时间',values:[],free_input:false,time:true},{key:'updated_at',label:'修改时间',values:[],free_input:false,time:true}, ...tagDefinitions.value])
 const uploadTagEntries = computed(() => Object.entries(uploadTags.value).flatMap(([key,values]) => values.map(value => ({key,value,label:tagDefinitions.value.find((tag:any)=>tag.key===key)?.label || key}))))
 const uploadConflictGroups = computed(() => uploadConflictResult.value?.groups || [])
-const uploadConflictHasRelations = computed(() => uploadConflictGroups.value.some((group:any) => group.items?.some((item:any) => item.has_active_relations)))
 const assetTypeLabels: Record<string,string> = { image:'图片', video:'视频', annotation:'标注', model:'模型', dataset:'数据集', dataset_version:'数据集版本', snapshot:'数据集', manual:'数据集', archive:'压缩文件', image_annotation:'图片+标注', other:'其他', asset:'素材' }
 const manageableFormatTypes = ['image','video','annotation','model','archive','image_annotation']
 const availableFormatTypes = computed(() => manageableFormatTypes.filter(type => !formatRows.value.some(row => row.asset_type === type)))
 const relationTypeLabels: Record<string,string> = { annotates:'对应标注', contains:'属于数据集', trained_on:'用于训练', produced_by:'由训练产生', version_of:'版本关系' }
 const historyRelationTypeLabels: Record<string,string> = {annotates:'对应标注',trained_on:'用于训练'}
-const jobTypeLabels: Record<string,string> = { export:'素材导出', dataset_export:'数据集导出', trash_empty:'清空回收站' }
-const jobStateLabels: Record<string,string> = { queued:'等待处理', running:'处理中', succeeded:'已完成', failed:'失败', cancelled:'已取消' }
 const roleLabels: Record<string,string> = { admin:'管理员', data_manager:'数据管理员', annotator:'标注员', ml_engineer:'算法工程师', viewer:'只读访客', custom:'自定义' }
 const userStatusLabels: Record<string,string> = { active:'正常', disabled:'已停用' }
-const auditActionLabels: Record<string,string> = {
-  'asset.created':'创建素材', 'asset.overwritten':'覆盖素材', 'asset.deleted':'删除素材',
-  'asset.batch_deleted':'移入回收站', 'asset.batch_restored':'还原素材',
-  'asset.remark_updated':'修改素材备注', 'asset.tags_updated':'修改素材标签', 'asset.batch_tags':'批量修改素材标签',
-  'trash.emptied':'清空回收站', 'export.created':'创建导出任务',
-  'dataset.export_created':'创建数据集导出', 'job.cancelled':'取消任务',
-  'relation.created':'建立关联关系', 'relation.revoked':'撤销关联关系',
-  'dataset.created':'创建数据集', 'dataset.updated':'修改数据集', 'dataset.deleted':'删除数据集',
-  'dataset.members_added':'添加数据集成员', 'dataset.members_removed':'移除数据集成员',
-  'dataset.version_published':'发布数据集版本', 'dataset.version_restored':'恢复数据集版本',
-  'dataset.model_link_created':'关联数据集模型', 'dataset.model_link_removed':'移除数据集模型关联',
-  'collection.created':'创建集合', 'collection.frozen':'冻结集合',
-  'saved_view.created':'创建保存视图', 'saved_view.updated':'修改保存视图', 'saved_view.deleted':'删除保存视图',
-  'user.created':'创建用户', 'user.updated':'修改用户', 'user.deleted':'删除用户',
-  'tag_definition.created':'创建标签', 'tag_definition.updated':'修改标签', 'tag_definition.deleted':'删除标签',
-  'format.created':'创建格式', 'format.updated':'修改格式', 'format.deleted':'删除格式',
-  'role_template.created':'创建角色', 'role_template.updated':'修改角色', 'role_template.deleted':'删除角色',
-  'auth.login_succeeded':'登录成功', 'auth.login_failed':'登录失败', 'auth.login_blocked':'登录受限', 'auth.logout':'退出登录', 'auth.permission_denied':'权限拦截', 'auth.session_invalid':'登录状态失效',
-  'system.service_unavailable':'服务不可用', 'system.service_recovered':'服务已恢复', 'job.stale_recovered':'异常任务已恢复',
-}
-const auditObjectLabels: Record<string,string> = {asset:'素材',dataset:'数据集',dataset_version:'数据集版本',relation:'关联关系',job:'任务',user:'用户',role_template:'角色',tag_definition:'标签',format_definition:'格式',collection:'集合',saved_view:'保存视图',system:'系统'}
-const auditFieldLabels: Record<string,string> = {
-  username:'用户名', roles:'角色', menu_permissions:'菜单权限', action_permissions:'操作权限', status:'状态', password_changed:'是否修改密码', description:'说明',
-  filename:'文件名', size:'文件大小', mime_type:'文件类型', remark:'备注', tags:'标签', values:'可选值', name:'名称',
-  asset_count:'素材数量', count:'处理数量', added:'新增数量', removed:'移除数量', created:'创建数量', revoked:'撤销数量',
-  versions_deleted:'删除版本数', relations_deleted:'删除关系数', relations_preserved:'是否保留关联关系', reason:'撤销原因',
-  dataset_effects:'数据集影响', shared_scope:'共享范围', visibility:'可见范围', type:'类型', state:'任务状态',
-  asset_ids:'涉及素材', invalid_ids:'无效素材', dataset_id:'数据集编号', version_id:'版本编号', selection_id:'选择范围编号',
-  upload_session_id:'上传会话编号', previous_object_key:'原文件位置', new_object_key:'新文件位置',
-}
 const auditPermissionLabels = computed<Record<string,string>>(()=>Object.fromEntries([
   ...menuDefinitions.value.map(item=>[item.key,item.name]),
   ...actionDefinitions.value.map(item=>[item.key,item.name]),
 ]))
+const auditPresentation = createAuditPresentation({
+  fieldLabels: auditFieldLabels,
+  objectLabels: auditObjectLabels,
+  permissionLabels: () => auditPermissionLabels.value,
+  roleText,
+  formatStorageSize,
+})
 
 const relationHistory = ref<any[]>([])
 const lineageRoot = ref<any>(null)
@@ -377,50 +337,16 @@ const activeRelation = computed(() => relationDetailData.value || relationHistor
 const activeRelationIndex = computed(() => relationHistory.value.findIndex(item => String(item.id) === String(relationDetailId.value)))
 const hasPreviousRelation = computed(() => activeRelationIndex.value > 0)
 const hasNextRelation = computed(() => activeRelationIndex.value >= 0 && activeRelationIndex.value < relationHistory.value.length - 1)
-const openDialogCount = computed(() => [activeAsset.value,activeRelation.value,uploadOpen.value,batchTagOpen.value,batchResultOpen.value,collectionOpen.value,savedViewOpen.value,tagOpen.value,confirmOpen.value,userOpen.value,permissionTemplateOpen.value,roleEditorOpen.value,columnSettingsOpen.value,myPermissionsOpen.value,mediaViewerOpen.value&&viewerAsset.value,formatOpen.value,relationPickerOpen.value,relationPreviewOpen.value].filter(Boolean).length)
+const openDialogCount = computed(() => [activeAsset.value,modelParametersAssetId.value,activeRelation.value,uploadOpen.value,batchTagOpen.value,batchResultOpen.value,collectionOpen.value,savedViewOpen.value,tagOpen.value,confirmOpen.value,permissionImpactOpen.value,userOpen.value,permissionTemplateOpen.value,roleEditorOpen.value,columnSettingsOpen.value,myPermissionsOpen.value,mediaViewerOpen.value&&viewerAsset.value,formatOpen.value,relationPickerOpen.value,relationPreviewOpen.value].filter(Boolean).length)
 const selectedCount = computed(() => selectedSetId.value ? selectedSetTotal.value - selectedSetExcluded.value.length : selected.value.length)
 const allCurrentSelected = computed(() => Boolean(filtered.value.length) && filtered.value.every(asset => isAssetSelected(asset.id)))
 const relationPickerSelectedIds = computed(() => relationPickerSelection.value.map(item => String(item.id)))
 const relationPickerPages = computed(() => relationPickerPageSize.value === 0 ? 1 : Math.max(1,Math.ceil(relationPickerTotal.value/relationPickerPageSize.value)))
-const filteredLineageEdges = computed(() => lineageEdges.value.filter((edge:any) => {
-  if (!lineageTypeFilter.value) return true
-  if (lineageTypeFilter.value === 'dataset_version') return edge.relation_type === 'trained_on' && edge.target_type === 'dataset_version'
-  return edge.target_type === lineageTypeFilter.value && (edge.derived || edge.relation_type === 'annotates')
-}))
-const lineageGroups = computed(() => Object.entries(filteredLineageEdges.value.reduce((groups:Record<string,any[]>,edge:any) => { const key=edge.target_type || 'asset'; (groups[key] ||= []).push(edge); return groups },{})))
-const lineageNodeMap = computed(() => new Map(lineageNodes.value.map((item:any)=>[String(item.id),item])))
-const lineageRootEdges = computed(() => {
-  const rootId=String(lineageRoot.value?.id||'')
-  return lineageEdges.value.filter((edge:any)=>String(edge.source_id)===rootId&&edge.relation_type==='trained_on')
+const { filteredLineageEdges, lineageGroups, lineageAssetGroups, lineageDatasets,
+  lineageDisplayedNodeCount, lineageDisplayedRelationCount, toggleLineageGroup } = useLineageGraph({
+  edges:lineageEdges, nodes:lineageNodes, root:lineageRoot,
+  typeFilter:lineageTypeFilter, expanded:lineageExpanded, typeLabels:assetTypeLabels,
 })
-const lineageVersionIds = computed(() => new Set(lineageEdges.value.filter((edge:any)=>String(edge.source_id)===String(lineageRoot.value?.id)&&edge.relation_type==='trained_on'&&edge.target_type==='dataset_version').map((edge:any)=>String(edge.target_id))))
-const lineageMemberEdges = computed(() => filteredLineageEdges.value.filter((edge:any)=>edge.derived && lineageVersionIds.value.has(String(edge.source_id))))
-const lineageAssetGroups = computed(() => ([
-  {key:'image',label:'图片文件'},
-  {key:'annotation',label:'标注文件'},
-  {key:'video',label:'视频文件'},
-  {key:'archive',label:'压缩文件'},
-  {key:'other',label:'其他文件'},
-].filter(group => !lineageTypeFilter.value || lineageTypeFilter.value === group.key).map(group => {
-  const items = new Map<string,any>()
-  for (const edge of lineageMemberEdges.value.filter((item:any) => item.target_type === group.key)) {
-    const id = String(edge.target_id)
-    if (!items.has(id)) items.set(id,{id,name:edge.target,type:group.key,edge,sources:[]})
-    const node = lineageNodeMap.value.get(String(edge.source_id)) || {}
-    items.get(id).sources.push({id:String(edge.source_id),name:node.dataset_name || edge.source,version:node.version || '未知版本',edgeId:edge.id})
-  }
-  return {...group,items:[...items.values()]}
-})).filter(group => group.items.length > 0))
-const lineageDatasets = computed(() => lineageTypeFilter.value && lineageTypeFilter.value !== 'dataset_version' ? [] : lineageRootEdges.value.filter((edge:any)=>['dataset','dataset_version','snapshot','manual'].includes(edge.target_type)).map((edge:any)=>({id:String(edge.target_id),name:edge.target,type:edge.target_type,typeLabel:edge.targetType||assetTypeLabels[edge.target_type]||'数据集',relation:edge.relation,edge,node:lineageNodeMap.value.get(String(edge.target_id))||{}})))
-const lineageDisplayedNodeCount = computed(() => 1 + lineageAssetGroups.value.reduce((count,group)=>count+group.items.length,0) + lineageDatasets.value.length)
-const lineageDisplayedRelationCount = computed(() => new Set([
-  ...lineageDatasets.value.map((item:any)=>item.edge.id),
-  ...lineageAssetGroups.value.flatMap(group=>group.items.flatMap((item:any)=>item.sources.map((source:any)=>source.edgeId))),
-]).size)
-
-function toggleLineageGroup(group:string) {
-  lineageExpanded.value=lineageExpanded.value===group?'':group
-}
 function resetLineagePage() {
   lineageRoot.value = null
   lineageNodes.value = []
@@ -430,13 +356,20 @@ function resetLineagePage() {
   lineageView.value = 'graph'
   selectedModel.value = null
 }
-const effectiveTrashPageSize = computed(() => trashPageSize.value === 0 ? 200 : trashPageSize.value)
-const trashPages = computed(() => trashPageSize.value === 0 ? 1 : Math.max(1, Math.ceil(trashTotal.value / trashPageSize.value)))
-const allTrashSelected = computed(() => Boolean(trashAssets.value.length) && trashAssets.value.every(asset => trashSelected.value.includes(asset.id)))
 const storageUsedPercent = computed(() => storageStats.value.total ? Math.round(storageStats.value.used / storageStats.value.total * 100) : 0)
 const storageFreePercent = computed(() => storageStats.value.total ? 100 - storageUsedPercent.value : 0)
-const confirmTitle = computed(() => confirmMessage.value.includes('覆盖原文件') ? '覆盖确认' : confirmMessage.value.includes('撤销关联') ? '撤销确认' : confirmMessage.value.includes('还原') ? '还原确认' : '删除确认')
-const confirmActionText = computed(() => confirmMessage.value.includes('覆盖原文件') ? '确定' : confirmMessage.value.includes('撤销关联') ? '确认撤销' : confirmMessage.value.includes('还原') ? '确认还原' : confirmMessage.value.includes('清空回收站') ? '确认清空' : '确认删除')
+const hasStorageStats = computed(() => Number.isFinite(storageStats.value.total) && storageStats.value.total > 0 && Number.isFinite(storageStats.value.free) && storageStats.value.free >= 0)
+function applyStorageStats(value:unknown) {
+  const stats = value as {total?:number;used?:number;free?:number}|null
+  storageStats.value = stats && [stats.total,stats.used,stats.free].every(item=>typeof item==='number'&&Number.isFinite(item)&&item>=0) && Number(stats.total)>0
+    ? {total:Number(stats.total),used:Number(stats.used),free:Number(stats.free)}
+    : {total:0,used:0,free:0}
+}
+async function loadStorageStats() {
+  if (!canViewMenu('library')) return
+  try { applyStorageStats((await api.assetStats()).storage) }
+  catch { storageStats.value={total:0,used:0,free:0} }
+}
 
 function isAssetSelected(id:AssetId) {
   return selectedSetId.value ? !selectedSetExcluded.value.includes(String(id)) : selected.value.includes(id)
@@ -508,38 +441,6 @@ function invertCurrentPageSelection() {
   selected.value = [...selected.value.filter(id => !currentSet.has(id)), ...currentIds.filter(id => !selected.value.includes(id))]
 }
 
-function askConfirmation(message:string, action:() => void | Promise<void>) {
-  confirmMessage.value = message
-  pendingConfirmAction = action
-  confirmOpen.value = true
-}
-
-async function runConfirmedAction() {
-  if (!pendingConfirmAction) return
-  const action = pendingConfirmAction
-  const dismissBeforeAction = confirmMessage.value.includes('覆盖原文件')
-  confirmBusy.value = true
-  if (dismissBeforeAction) {
-    confirmOpen.value = false
-    pendingConfirmAction = null
-  }
-  try {
-    await action()
-    if (!dismissBeforeAction) {
-      confirmOpen.value = false
-      pendingConfirmAction = null
-    }
-  } catch (error) {
-    notifyError(error instanceof Error ? error.message : '操作失败')
-  } finally { confirmBusy.value = false }
-}
-
-function cancelConfirmation() {
-  if (confirmBusy.value) return
-  confirmOpen.value = false
-  pendingConfirmAction = null
-}
-
 function notify(message: string, kind: 'success'|'error' = 'success') {
   const normalizedMessage = kind === 'error' ? message.replace(/^\s*[✓√]\s*/, '') : message
   toast.value = normalizedMessage
@@ -553,10 +454,11 @@ function notifyError(message: string) {
 
 function setPage(next: Page) {
   if (!canViewMenu(next)) return
+  datasetOpenRequest.value = null
+  if (next === 'datasets') datasetListRequestNonce.value++
   page.value = next
   detailId.value = null; detailAsset.value = null
   relationDetailId.value = null; relationDetailData.value = null; revokeReason.value = ''
-  if (next === 'overview') void loadOverview()
   if (next === 'library') void Promise.all([loadAssets(), loadTags(), loadFormats()])
   if (next === 'datasets') void loadTags()
   if (next === 'relations') { void loadRelations(); void loadRelationDatasets() }
@@ -570,7 +472,7 @@ function setPage(next: Page) {
 }
 
 async function loadCurrentPage() {
-  if (page.value === 'overview') await loadOverview()
+  if (page.value === 'overview') return
   else if (page.value === 'library') await Promise.all([loadAssets(), loadTags(), loadFormats()])
   else if (page.value === 'datasets') await loadTags()
   else if (page.value === 'relations') await Promise.all([loadRelations(), loadRelationDatasets()])
@@ -583,34 +485,14 @@ async function loadCurrentPage() {
   else if (page.value === 'logs') await loadAuditLogs()
 }
 
-async function loadOverview() {
-  if (!api.session()) return
-  overviewLoading.value = true
-  try { overviewData.value = await api.overview() }
-  catch (error) { notifyError(error instanceof Error ? error.message : '系统概览加载失败') }
-  finally { overviewLoading.value = false }
-}
-
-function searchGlobally() {
-  if (globalSearchTimer !== null) window.clearTimeout(globalSearchTimer)
-  if (!globalQuery.value.trim()) { globalSearchGroups.value=[]; globalSearchOpen.value=false; return }
-  globalSearchTimer = window.setTimeout(async () => {
-    globalSearchLoading.value=true; globalSearchOpen.value=true
-    try { globalSearchGroups.value=(await api.globalSearch(globalQuery.value.trim())).groups || [] }
-    catch (error) { notifyError(error instanceof Error?error.message:'全局搜索失败') }
-    finally { globalSearchLoading.value=false }
-  }, 250)
-}
-
 function openGlobalResult(groupType:string, item:any) {
-  globalSearchOpen.value=false
   if (groupType==='asset'||groupType==='model') { setPage('library'); query.value=item.name; applyAssetFilters() }
   else if (groupType==='dataset') { setPage('datasets'); datasetOpenRequest.value={id:item.id,nonce:Date.now()} }
   else if (groupType==='job') setPage('downloads')
   else if (groupType==='relation') { setPage('relations'); void openRelationDetail(item) }
   else if (groupType==='user') setPage('admin')
   else if (groupType==='role') setPage('roles')
-  else if (groupType==='log') { setPage('logs'); auditDetail.value=item }
+  else if (groupType==='log') { setPage('logs'); openAuditDetail(item) }
 }
 
 function libraryPreferenceKey() { return `cv-archive-library:${currentUser.value?.id || currentUser.value?.username || 'anonymous'}` }
@@ -651,8 +533,14 @@ function assetColumnValue(asset:Asset,key:string) {
 }
 
 async function openAsset(asset:Asset) {
+  const generation = ++assetDetailGeneration
+  const isCurrent = () => generation === assetDetailGeneration && detailId.value === asset.id
   detailId.value = asset.id; detailAsset.value = asset
   assetHistory.value = []
+  assetHistoryTotal.value = 0
+  assetHistoryLoading.value = false
+  annotationLoading.value = false
+  assetHistoryExpanded.value = false
   remarkDraft.value = asset.remark || ''
   annotationSources.value = []
   selectedAnnotationSourceId.value = ''
@@ -662,6 +550,7 @@ async function openAsset(asset:Asset) {
       api.asset(String(asset.id)),
       api.assetHistory(String(asset.id)).catch(() => ({items:[]})),
     ])
+    if (!isCurrent()) return
     detailAsset.value = {
       ...asset,
       ...detail,
@@ -674,9 +563,36 @@ async function openAsset(asset:Asset) {
     }
     remarkDraft.value = detail.remark || ''
     assetHistory.value = history.items || []
+    assetHistoryTotal.value = history.total ?? assetHistory.value.length
     if (detail.type === 'image') await loadAnnotationOverlays(String(asset.id))
   }
-  catch (error) { notifyError(error instanceof Error ? error.message : '素材详情加载失败') }
+  catch (error) { if (isCurrent()) notifyError(error instanceof Error ? error.message : '素材详情加载失败') }
+}
+
+async function toggleAssetHistory() {
+  if (assetHistoryLoading.value) return
+  if (assetHistoryExpanded.value) { assetHistoryExpanded.value = false; return }
+  const generation = assetDetailGeneration
+  const assetId = detailId.value
+  const isCurrent = () => generation === assetDetailGeneration && detailId.value === assetId
+  assetHistoryLoading.value = true
+  try {
+    const items = [...assetHistory.value]
+    let total = assetHistoryTotal.value
+    let pageNumber = 2
+    while (items.length < total) {
+      const result = await api.assetHistory(String(assetId), pageNumber++)
+      if (!isCurrent()) return
+      if (!result.items.length) break
+      items.push(...result.items)
+      total = result.total ?? total
+    }
+    if (!isCurrent()) return
+    assetHistory.value = items
+    assetHistoryTotal.value = total
+    assetHistoryExpanded.value = true
+  } catch (error) { if (isCurrent()) notifyError(error instanceof Error ? error.message : '操作历史加载失败') }
+  finally { if (isCurrent()) assetHistoryLoading.value = false }
 }
 
 function mapAsset(item:any, index:number):Asset {
@@ -722,8 +638,28 @@ function openAssociatedDataset(datasetId:string) {
   mediaViewerOpen.value=false
   detailId.value=null
   detailAsset.value=null
-  datasetOpenRequest.value={id:datasetId,nonce:Date.now()}
   setPage('datasets')
+  datasetOpenRequest.value={id:datasetId,nonce:Date.now()}
+}
+
+function openAssetRelations() {
+  const asset = activeAsset.value
+  if (!asset?.relations?.length || !canViewMenu('relations')) return
+  relationHistoryAssetId.value = String(asset.id)
+  relationHistoryQuery.value = asset.name
+  relationHistoryType.value = ''
+  relationHistoryStatus.value = 'active'
+  relationHistoryCreator.value = ''
+  relationHistoryFrom.value = ''
+  relationHistoryTo.value = ''
+  relationPage.value = 1
+  setPage('relations')
+}
+
+async function openProjectAsset(assetId:string) {
+  setPage('library')
+  try { await openAsset(mapAsset(await api.asset(assetId), 0)) }
+  catch (error) { notifyError(error instanceof Error ? error.message : '素材详情加载失败') }
 }
 
 function relationOriginText(source:string) {
@@ -775,14 +711,17 @@ function changeMediaViewerZoom(step:number) {
 }
 
 async function loadAnnotationOverlays(assetId:string) {
+  const generation = assetDetailGeneration
+  const isCurrent = () => generation === assetDetailGeneration && String(detailId.value) === assetId
   annotationLoading.value = true
   try {
     const result = await api.annotationOverlays(assetId)
+    if (!isCurrent()) return
     annotationSources.value = result.sources || []
     selectedAnnotationSourceId.value = annotationSources.value.find((source:any) => source.matched)?.annotation_asset_id || annotationSources.value[0]?.annotation_asset_id || ''
   } catch (error) {
-    notifyError(error instanceof Error ? error.message : '关联标注加载失败')
-  } finally { annotationLoading.value = false }
+    if (isCurrent()) notifyError(error instanceof Error ? error.message : '关联标注加载失败')
+  } finally { if (isCurrent()) annotationLoading.value = false }
 }
 
 const activeAnnotationSource = computed(() => annotationSources.value.find((source:any) => source.annotation_asset_id === selectedAnnotationSourceId.value))
@@ -1054,6 +993,7 @@ async function login() {
     page.value = firstAllowedPage()
     showLogin.value = false
     await loadCurrentPage()
+    if (page.value !== 'library') void loadStorageStats()
     startJobPolling()
   } catch (error) {
     loginError.value = error instanceof Error ? error.message : '登录失败'
@@ -1076,12 +1016,8 @@ function resetAuthenticatedView() {
   detailId.value = null
   detailAsset.value = null
   annotationSources.value = []
-  jobRows.value = []
-  jobTotal.value = 0
-  jobAllTotal.value = 0
-  trashAssets.value = []
-  trashSelected.value = []
-  trashTotal.value = 0
+  clearJobs()
+  clearTrash()
   tagRows.value = []
   formatRows.value = []
   formatsLoaded.value = false
@@ -1094,8 +1030,9 @@ function resetAuthenticatedView() {
   lineageNodes.value = []
   lineageEdges.value = []
   userRows.value = []
-  auditRows.value = []
+  clearAuditLogs()
   datasetOpenRequest.value = null
+  datasetResumeDraft.value = null
   if (jobPoll !== null) window.clearTimeout(jobPoll)
   jobPoll = null
   showLogin.value = true
@@ -1118,7 +1055,7 @@ async function loadAssets() {
     assetTotal.value = stats.total
     untaggedTotal.value = stats.untagged
     assetTypeCounts.value = stats.by_type
-    storageStats.value = stats.storage
+    applyStorageStats(stats.storage)
     tagRows.value = tags.items
     assets.value = result.items.map(mapAsset)
     assetAllCursor.value = assetPageSize.value===0 ? result.next_cursor||null : null
@@ -1186,7 +1123,6 @@ function detectAssetType(file:File) {
   const configured = formatRows.value.find(row => (row.extensions || []).includes(extension))
   return configured?.asset_type || ''
 }
-function uploadFileKey(file:File) { return `${file.name}:${file.size}:${file.lastModified}` }
 function resolvedUploadType(file:File) { return uploadTypeOverrides.value[uploadFileKey(file)] || detectAssetType(file) || '' }
 function uploadTypeStatus(file:File) {
   const detected = detectAssetType(file)
@@ -1243,17 +1179,6 @@ async function uploadRequest(url:string, body:Blob|File, failureMessage:string) 
   )
 }
 
-const uploadHashes = new Map<string,string>()
-async function uploadFileHash(file:File) {
-  const key=uploadFileKey(file)
-  if (uploadHashes.has(key)) return uploadHashes.get(key)
-  if (!globalThis.crypto?.subtle || file.size>64*1024*1024) return undefined
-  const digest=await globalThis.crypto.subtle.digest('SHA-256',await file.arrayBuffer())
-  const value=Array.from(new Uint8Array(digest),byte=>byte.toString(16).padStart(2,'0')).join('')
-  uploadHashes.set(key,value)
-  return value
-}
-
 async function uploadRequestFiles(nameConflict:'reject'|'overwrite'|'rename' = 'reject') {
   return Promise.all(uploadFiles.value.map(async file => ({filename:file.name,size:file.size,mime_type:file.type || 'application/octet-stream',asset_type:resolvedUploadType(file),sha256:await uploadFileHash(file),name_conflict:nameConflict})))
 }
@@ -1277,130 +1202,42 @@ async function uploadAsset() {
 }
 
 async function performUpload(nameConflict:'reject'|'overwrite'|'rename') {
+  const overwriteTargets = new Map<string,string>(
+    nameConflict === 'overwrite'
+      ? (uploadConflictResult.value?.items || []).filter((item:any)=>item.overwrite_target_id).map((item:any)=>[
+          uploadFileKey(uploadFiles.value[item.index]), String(item.overwrite_target_id),
+        ])
+      : [],
+  )
   uploadConflictResult.value = null
   uploadBusy.value = true; uploadPaused.value = false; uploadProgress.value = 0; uploadCompleted.value = 0; uploadError.value = ''
   const files = [...uploadFiles.value]
-  const failed:Array<{file:File;message:string}> = []
-  const operationDetails:Array<{id:string;name:string;status:'succeeded'|'failed';message:string}> = []
-  let succeeded = 0
-  let hasDatasetPackage = false
   try {
     let completed = 0
-    const markCompleted = () => {
-      completed += 1
-      uploadCompleted.value = completed
-      uploadProgress.value = Math.round((completed / files.length) * 100)
-    }
-    const uploadGroup = async (group: File[], concurrency: number) => {
-      for (let offset = 0; offset < group.length; offset += UPLOAD_API_BATCH_SIZE) {
-        const chunk = group.slice(offset, offset + UPLOAD_API_BATCH_SIZE)
-        let initialized:any[]
-        try {
-          initialized = (await api.initUploadBatch(await Promise.all(chunk.map(async file => ({
-            filename:file.name,size:file.size,mime_type:file.type || 'application/octet-stream',asset_type:resolvedUploadType(file),sha256:await uploadFileHash(file),name_conflict:nameConflict,
-          }))))).items
-        } catch (error) {
-          chunk.forEach(file => { const message=error instanceof Error?error.message:'创建上传任务失败'; failed.push({file,message}); operationDetails.push({id:uploadFileKey(file),name:file.name,status:'failed',message}); markCompleted() })
-          continue
-        }
-        const ready:Array<{file:File;sessionId:string}> = []
-        const queue = [...initialized]
-        const uploadOne = async () => {
-          while (queue.length) {
-            const item = queue.shift()!
-            const file = chunk[item.index]
-            if (item.error) { failed.push({file,message:item.error.message}); operationDetails.push({id:uploadFileKey(file),name:file.name,status:'failed',message:item.error.message}); markCompleted(); continue }
-            try {
-              if (item.session.upload_required) {
-                await uploadRequest(item.session.upload_url, file, '文件上传到对象存储失败')
-              }
-              ready.push({file,sessionId:item.session.upload_session_id})
-            } catch (error) {
-              failed.push({file,message:error instanceof Error?error.message:'上传失败'})
-              operationDetails.push({id:uploadFileKey(file),name:file.name,status:'failed',message:error instanceof Error?error.message:'上传失败'})
-              markCompleted()
-            }
-          }
-        }
-        await Promise.all(Array.from({length:Math.min(concurrency,queue.length)},()=>uploadOne()))
-        if (!ready.length) continue
-        try {
-          const result = await api.completeUploadBatch(ready.map(item=>item.sessionId), {...uploadTags.value})
-          result.items.forEach((item:any) => {
-            const file = ready[item.index].file
-            if (item.error) { failed.push({file,message:item.error.message}); operationDetails.push({id:uploadFileKey(file),name:file.name,status:'failed',message:item.error.message}) }
-            else { succeeded += 1; hasDatasetPackage ||= resolvedUploadType(file) === 'image_annotation'; operationDetails.push({id:uploadFileKey(file),name:file.name,status:'succeeded',message:nameConflict==='overwrite'?'已覆盖原文件':'上传完成'}) }
-            markCompleted()
-          })
-        } catch (error) {
-          ready.forEach(({file}) => { const message=error instanceof Error?error.message:'完成上传失败'; failed.push({file,message}); operationDetails.push({id:uploadFileKey(file),name:file.name,status:'failed',message}); markCompleted() })
-        }
-      }
-    }
-    // Small assets spend more time on per-file requests than on transfer.
-    // Keep large uploads bounded so several 10 GB files cannot saturate the host.
-    const smallFiles = files.filter(file => file.size < 64 * 1024 * 1024)
-    const largeFiles = files.filter(file => file.size >= 64 * 1024 * 1024)
-    await uploadGroup(smallFiles, 12)
-    const largeQueue = [...largeFiles]
-    const uploadLarge = async () => {
-      while (largeQueue.length) {
-        const file = largeQueue.shift()!
-        const storageKey = `cv-archive-upload:${uploadFileKey(file)}`
-        try {
-          let sessionId = localStorage.getItem(storageKey)
-          let status:any = null
-          if (sessionId) {
-            status = await api.uploadSession(sessionId).catch(() => null)
-            if (status && (status.size !== file.size || status.asset_type !== resolvedUploadType(file))) status = null
-          }
-          if (!status) {
-            localStorage.removeItem(storageKey)
-            const initial = await api.initUpload({filename:file.name,size:file.size,mime_type:file.type || 'application/octet-stream',asset_type:resolvedUploadType(file),sha256:await uploadFileHash(file),name_conflict:nameConflict})
-            sessionId = initial.upload_session_id
-            localStorage.setItem(storageKey, sessionId!)
-            status = await api.uploadSession(sessionId!)
-          }
-          if (status.transfer_mode === 'chunks') {
-            const pending = Array.from({length:status.chunk_count},(_,index)=>index).filter(index=>!status.uploaded_parts.includes(index))
-            const uploadChunk = async () => {
-              while (pending.length) {
-                const index = pending.shift()!
-                const offset = index * status.chunk_size
-                await uploadRequest(status.upload_urls[String(index)], file.slice(offset,Math.min(offset+status.chunk_size,file.size)), `第 ${index+1} 个分片上传失败`)
-              }
-            }
-            await Promise.all(Array.from({length:Math.min(3,pending.length)},()=>uploadChunk()))
-          } else if (status.upload_required) {
-            throw new Error('上传会话模式不正确，请重新选择文件')
-          }
-          await api.completeUpload({upload_session_id:sessionId,tags:{...uploadTags.value}})
-          localStorage.removeItem(storageKey)
-          succeeded += 1
-          hasDatasetPackage ||= resolvedUploadType(file) === 'image_annotation'
-          operationDetails.push({id:uploadFileKey(file),name:file.name,status:'succeeded',message:nameConflict==='overwrite'?'已覆盖原文件':'上传完成'})
-        } catch (error) {
-          const message=error instanceof Error?error.message:'上传失败'
-          failed.push({file,message})
-          operationDetails.push({id:uploadFileKey(file),name:file.name,status:'failed',message})
-        } finally { markCompleted() }
-      }
-    }
-    await Promise.all(Array.from({length:Math.min(2,largeFiles.length)},()=>uploadLarge()))
-    if (files.length > 1) showBatchResult('批量上传结果', {succeeded_count:succeeded,failed_count:failed.length,details:operationDetails})
-    if (failed.length) {
-      uploadFiles.value = failed.map(item => item.file)
-      uploadError.value = failed.map(item => `${item.file.name}：${item.message}`).join('；')
-      notify(`已上传 ${succeeded} 个，失败 ${failed.length} 个`, 'error')
+    const result = await transferUploads(files, {
+      nameConflict, overwriteTargets, resolvedUploadType,
+      tags: () => ({...uploadTags.value}), uploadRequest,
+      onCompleted: () => {
+        completed += 1
+        uploadCompleted.value = completed
+        uploadProgress.value = Math.round((completed / files.length) * 100)
+      },
+    })
+    if (files.length > 1) showBatchResult('批量上传结果', {
+      succeeded_count:result.succeeded, failed_count:result.failed.length, details:result.details,
+    })
+    if (result.failed.length) {
+      uploadFiles.value = result.failed.map(item => item.file)
+      uploadError.value = result.failed.map(item => `${item.file.name}：${item.message}`).join('；')
+      notify(`已上传 ${result.succeeded} 个，失败 ${result.failed.length} 个`, 'error')
     } else {
       uploadOpen.value = false; uploadFiles.value = []; uploadTypeOverrides.value = {}; uploadTags.value={}; uploadConflictResult.value = null
-      notify(hasDatasetPackage ? `已上传 ${succeeded} 个文件，数据集包正在解压并建立关联` : `已上传 ${succeeded} 个文件，正在生成预览`)
+      notify(result.hasDatasetPackage ? `已上传 ${result.succeeded} 个文件，数据集包正在解压并建立关联` : `已上传 ${result.succeeded} 个文件，正在生成预览`)
     }
     await loadAssets()
   } catch (error) { uploadError.value = error instanceof Error ? error.message : '批量上传失败' }
   finally { resumeUpload(); uploadBusy.value = false; void loadResumableUploads() }
 }
-
 onMounted(async () => {
   if (!await api.restoreSession()) return
   currentUser.value = api.session()?.user || null
@@ -1409,6 +1246,7 @@ onMounted(async () => {
   page.value = firstAllowedPage()
   showLogin.value = false
   await loadCurrentPage()
+  if (page.value !== 'library') void loadStorageStats()
   await checkServiceHealth()
   serviceHealthTimer = window.setInterval(checkServiceHealth, 15000)
 })
@@ -1417,7 +1255,8 @@ async function loadRelations() {
   if (!api.session()) return
   try {
     const filters:Record<string,string>={}
-    if(relationHistoryQuery.value.trim()) filters.q=relationHistoryQuery.value.trim()
+    if(relationHistoryAssetId.value) filters.asset_id=relationHistoryAssetId.value
+    else if(relationHistoryQuery.value.trim()) filters.q=relationHistoryQuery.value.trim()
     if(relationHistoryType.value) filters.relation_type=relationHistoryType.value
     if(relationHistoryStatus.value) filters.status=relationHistoryStatus.value
     if(relationHistoryCreator.value.trim()) filters.created_by=relationHistoryCreator.value.trim()
@@ -1487,6 +1326,7 @@ async function previewAutoRelations() {
 
 async function resetRelationHistoryFilters() {
   relationHistoryQuery.value = ''
+  relationHistoryAssetId.value = ''
   relationHistoryType.value = ''
   relationHistoryStatus.value = ''
   relationHistoryCreator.value = ''
@@ -1565,7 +1405,9 @@ function resetRelationDataset() {
 }
 
 function closeAssetDetail() {
+  assetDetailGeneration++
   mediaViewerOpen.value=false
+  modelParametersAssetId.value=null
   detailId.value=null
   detailAsset.value=null
 }
@@ -1576,7 +1418,9 @@ function closeRelationDetail() {
 }
 
 function closeTopDialog() {
+  if (permissionImpactOpen.value && !permissionImpactBusy.value) return closePermissionImpact()
   if (mediaViewerOpen.value) return closeMediaViewer()
+  if (modelParametersAssetId.value) { modelParametersAssetId.value=null; return }
   if (activeAsset.value) return closeAssetDetail()
   if (activeRelation.value) return closeRelationDetail()
   if (relationPreviewOpen.value && !relationSubmitting.value) { relationPreviewOpen.value=false; return }
@@ -1635,29 +1479,6 @@ async function confirmRelationPreview() {
   finally{ relationSubmitting.value=false }
 }
 
-async function loadJobs() {
-  const requestedPage = jobPage.value
-  const requestedPageSize = jobPageSize.value
-  try {
-    const requestedType = jobTypeFilter.value
-    const requestedState = jobStateFilter.value
-    const requestedFrom = jobCreatedFrom.value
-    const requestedTo = jobCreatedTo.value
-    const result = await api.jobs(requestedPage, requestedPageSize, requestedType, requestedState, requestedFrom ? new Date(requestedFrom).toISOString() : '', requestedTo ? new Date(requestedTo).toISOString() : '')
-    if (requestedPage !== jobPage.value || requestedPageSize !== jobPageSize.value) return
-    if (requestedType !== jobTypeFilter.value || requestedState !== jobStateFilter.value || requestedFrom !== jobCreatedFrom.value || requestedTo !== jobCreatedTo.value) return
-    const lastPage = Math.max(1, Math.ceil(result.total / requestedPageSize))
-    if (requestedPage > lastPage) {
-      jobPage.value = lastPage
-      await loadJobs()
-      return
-    }
-    jobRows.value = result.items
-    jobTotal.value = result.total
-    if (!requestedType && !requestedState && !requestedFrom && !requestedTo) jobAllTotal.value = result.total
-  }
-  catch (error) { notifyError(error instanceof Error ? error.message : '任务加载失败') }
-}
 
 function previewDatasetExport() { void loadJobs() }
 
@@ -1678,12 +1499,15 @@ function startJobPolling() {
   jobPoll = window.setTimeout(poll, jobPollDelay({page:page.value,jobs:jobRows.value,assets:assets.value}))
 }
 
-function overwriteUploadFiles() {
-  if (uploadConflictHasRelations.value) {
-    askConfirmation('覆盖原文件会保留关联关系，是否确定？', () => performUpload('overwrite'))
-    return
-  }
-  void performUpload('overwrite')
+async function overwriteUploadFiles() {
+  const targets = [...new Set((uploadConflictResult.value?.items || [])
+    .map((item:any)=>item.overwrite_target_id).filter(Boolean).map(String))]
+  if (!targets.length) return
+  try {
+    const impact = await api.previewAssetUsage({asset_ids:targets})
+    askConfirmation('覆盖原文件会保留素材 ID 和关联关系；历史版本快照不变。请核对使用影响后确认。',
+      () => performUpload('overwrite'), impact)
+  } catch (error) { notifyError(error instanceof Error?error.message:'使用影响查询失败') }
 }
 
 function openUploadConflictAsset(item:any, index:number) {
@@ -1744,10 +1568,6 @@ onBeforeUnmount(() => {
   document.documentElement.classList.remove('is-scrolling')
 })
 
-async function downloadExport(id:string) {
-  try { window.open((await api.exportDownload(id)).download_url, '_blank', 'noopener') }
-  catch (error) { notifyError(error instanceof Error ? error.message : '下载失败') }
-}
 
 async function loadTags() {
   try { tagRows.value = (await api.tags()).items }
@@ -1776,16 +1596,40 @@ function applyPickerColor() { newTag.value.color=tagPickerColor.value }
 function openNewTag() { editingTagKey.value=null; newTag.value={name:'',key:'',values:'',color:'#64748b',free_input:false}; tagPickerColor.value='#64748b'; setTagValueRows([]); tagOpen.value=true }
 function openEditTag(tag:any) { editingTagKey.value=tag.key; newTag.value={name:tag.name,key:tag.key,values:'',color:tag.color || '#64748b',free_input:Boolean(tag.free_input)}; tagPickerColor.value=tag.color || '#64748b'; setTagValueRows(tag.values||[]); tagOpen.value=true }
 
+async function openProjectTag(draft:any) {
+  if (!canViewMenu('tags') || !can('tag_manage')) { notifyError('当前账号无标签管理权限'); return }
+  if (!tagRows.value.some((tag:any) => tag.key === 'project')) await loadTags()
+  const project = tagRows.value.find((tag:any) => tag.key === 'project')
+  if (!project) { notifyError('项目标签不存在，请联系管理员'); return }
+  datasetResumeDraft.value = draft
+  setPage('tags')
+  openEditTag(project)
+}
+
 function removeTag(key:string, name:string) {
   askConfirmation(`确定要删除标签“${name}”吗？`, async () => {
     await api.deleteTag(key); notify('标签字段已删除'); await loadTags()
   })
 }
 
-function deleteSelectedAssets() {
+async function deleteSelectedAssets() {
   if (!selectedCount.value) return
-  askConfirmation(`确定要删除${selectedCount.value}项吗？`, async () => {
-    const result = await api.batchDelete(selectedPayload())
+  const payload = selectedPayload()
+  let impact:any
+  try { impact = await api.previewAssetUsage(payload) }
+  catch (error) { notifyError(error instanceof Error?error.message:'使用影响查询失败'); return }
+  askConfirmation(`确定要删除${selectedCount.value}项吗？其中共${impact.affected_count}项存在关联关系。`, async () => {
+    let result:any
+    try { result = await api.batchDelete({...payload, confirm_linked:deleteConfirmationStage.value===2}) }
+    catch (error) {
+      if (error instanceof Error && error.message.includes('素材关联关系已变化')) {
+        const currentImpact = await api.previewAssetUsage(payload)
+        confirmUsageImpact.value = currentImpact
+        confirmMessage.value = `确定要删除${selectedCount.value}项吗？其中共${currentImpact.affected_count}项存在关联关系。`
+        deleteConfirmationStage.value = 1
+      }
+      throw error
+    }
     showBatchResult('批量删除结果', result)
     clearSelection()
     detailId.value = null; detailAsset.value = null
@@ -1794,70 +1638,8 @@ function deleteSelectedAssets() {
     const failedCount=result.failed_count ?? result.failed.length
     notify(failedCount ? `已移入回收站 ${successCount} 项，${failedCount} 项失败：${failedMessage}` : `已将 ${successCount} 项素材移入回收站`, failedCount ? 'error' : 'success')
     await loadAssets()
-  })
-}
-
-async function loadTrash() {
-  try {
-    let result = await api.trash(trashPage.value, effectiveTrashPageSize.value)
-    if (trashPageSize.value === 0) {
-      const items = [...result.items]
-      const pageCount = Math.ceil(result.total / 200)
-      for (let pageNumber = 2; pageNumber <= pageCount; pageNumber += 1) {
-        const next = await api.trash(pageNumber, 200)
-        items.push(...next.items)
-      }
-      result = {...result,items}
-    }
-    trashAssets.value = result.items.map(mapAsset)
-    trashTotal.value = result.total
-    trashSelected.value = trashSelected.value.filter(id => trashAssets.value.some(asset => asset.id === id))
-  } catch (error) { notifyError(error instanceof Error ? error.message : '回收站加载失败') }
-}
-
-function toggleTrashSelect(id:AssetId) {
-  trashSelected.value = trashSelected.value.includes(id) ? trashSelected.value.filter(item => item !== id) : [...trashSelected.value,id]
-}
-
-function selectTrashPage() { trashSelected.value = trashAssets.value.map(asset => asset.id) }
-function invertTrashPage() { trashSelected.value = trashAssets.value.filter(asset => !trashSelected.value.includes(asset.id)).map(asset => asset.id) }
-
-function restoreTrashAssets() {
-  const ids=trashSelected.value.map(String)
-  if(!ids.length) return
-  askConfirmation(`确定要还原${ids.length}项吗？`,async()=>{
-    const result=await api.restoreTrash(ids)
-    showBatchResult('批量还原结果', result)
-    trashSelected.value=result.failed.map((item:any)=>item.id)
-    notify(`已还原 ${result.succeeded.length} 项素材`)
-    await Promise.all([loadTrash(),loadAssets()])
-  })
-}
-
-function emptyTrash() {
-  if(!trashTotal.value) return
-  askConfirmation(`确定要清空回收站中的${trashTotal.value}项吗？`,async()=>{
-    const job=await api.emptyTrash()
-    trashSelected.value=[]
-    notify('已提交后台清理')
-    void monitorTrashJob(String(job.id))
-  })
-}
-
-async function monitorTrashJob(jobId:string) {
-  for (let attempt=0;attempt<120;attempt+=1) {
-    await new Promise(resolve=>window.setTimeout(resolve,1000))
-    try {
-      const job=await api.job(jobId)
-      if(job.state==='succeeded') {
-        const failed=job.result?.failed?.length || 0
-        notify(failed?`回收站清理完成，${failed} 项失败`:'回收站已清空', failed ? 'error' : 'success')
-        await Promise.all([loadTrash(),loadAssets()])
-        return
-      }
-      if(job.state==='failed') { notifyError(job.error?.message || '回收站清理失败'); return }
-    } catch { return }
-  }
+  }, impact)
+  deleteConfirmationStage.value = 1
 }
 
 function assetTagValues(asset:any) {
@@ -1874,10 +1656,14 @@ function assetTagEntries(asset:any) {
 
 async function saveAssetRemark() {
   if (!activeAsset.value || remarkSaving.value) return
+  const generation = assetDetailGeneration
+  const assetId = activeAsset.value.id
   remarkSaving.value = true
   try {
-    const updated = await api.updateAssetRemark(String(activeAsset.value.id), remarkDraft.value)
-    detailAsset.value = {...detailAsset.value,remark:updated.remark || '',updatedAt:updated.modified_at ? new Date(updated.modified_at).toLocaleString('zh-CN') : detailAsset.value.updatedAt}
+    const updated = await api.updateAssetRemark(String(assetId), remarkDraft.value)
+    if (generation === assetDetailGeneration && detailId.value === assetId && detailAsset.value) {
+      detailAsset.value = {...detailAsset.value,remark:updated.remark || '',updatedAt:updated.modified_at ? new Date(updated.modified_at).toLocaleString('zh-CN') : detailAsset.value.updatedAt}
+    }
     notify('备注已保存')
     await loadAssets()
   } catch (error) { notifyError(error instanceof Error ? error.message : '备注保存失败') }
@@ -1899,56 +1685,13 @@ function processingStatusText(status:string) {
   return ({queued:'等待处理',processing:'处理中',ready:'已完成',failed:'处理失败',archived:'已删除'} as Record<string,string>)[status] || status || '状态未知'
 }
 
-function jobTypeText(type:string) { return jobTypeLabels[type] || type }
-function jobNameText(job:any) { return job.name || `${jobTypeText(job.type)}任务` }
-function jobSizeText(job:any) {
-  const size=Number(job.result?.size || 0)
-  return size>0 ? `${(size/1024/1024).toFixed(2)} MB` : '—'
-}
-function jobErrorText(message:string) {
-  if (message === 'ZIP does not contain YOLO label files') return '压缩包中没有 YOLO 标注文件'
-  const invalid = message.match(/^YOLO package contains (\d+) invalid label rows$/)
-  if (invalid) return `YOLO 压缩包包含 ${invalid[1]} 行无效标注`
-  return ({'asset not found':'素材不存在','job not found':'任务不存在','export selection expired':'导出选择范围已过期','no exportable assets':'没有可导出的素材'} as Record<string,string>)[message] || message
-}
-function jobStateText(state:string) { return jobStateLabels[state] || state }
 function roleText(role:string) { return roleLabels[role] || role }
 function userRoleText(user:any) {
   if (user.role_template_id) return permissionTemplates.value.find(item=>String(item.id)===String(user.role_template_id))?.name || '自定义角色'
   return (user.roles||[]).map(roleText).join('、')
 }
 function userStatusText(status:string) { return userStatusLabels[status] || status }
-function auditActionText(action:string) { return auditActionLabels[action] || action }
 
-async function retryJob(id:string) {
-  try { await api.retryJob(id); notify('任务已重新提交'); await loadJobs() }
-  catch (error) { notifyError(error instanceof Error ? error.message : '任务重试失败') }
-}
-
-function cancelJob(job:any) {
-  askConfirmation(`确定取消任务“${job.name || jobTypeText(job.type)}”吗？`, async () => {
-    try { await api.cancelJob(job.id); notify('任务已取消'); await loadJobs() }
-    catch (error) { notifyError(error instanceof Error ? error.message : '任务取消失败') }
-  })
-}
-
-function resetJobFilters() {
-  jobTypeFilter.value=''
-  jobStateFilter.value=''
-  jobCreatedFrom.value=''
-  jobCreatedTo.value=''
-  jobPage.value=1
-  void loadJobs()
-}
-
-function applyJobFilters() {
-  if (jobCreatedFrom.value && jobCreatedTo.value && new Date(jobCreatedFrom.value) > new Date(jobCreatedTo.value)) {
-    notifyError('开始时间不能晚于结束时间')
-    return
-  }
-  jobPage.value=1
-  void loadJobs()
-}
 
 async function loadAdmin() {
   try {
@@ -2011,6 +1754,25 @@ function clearAllRoleTemplatePermissions() {
   roleTemplateDraft.value.menu_permissions=[]
   roleTemplateDraft.value.action_permissions=[]
 }
+function permissionMenuName(key:string) { return menuDefinitions.value.find(item=>item.key===key)?.name || key }
+function permissionActionName(key:string) { return actionDefinitions.value.find(item=>item.key===key)?.name || key }
+function closePermissionImpact() {
+  if (permissionImpactBusy.value) return
+  permissionImpactOpen.value=false
+  permissionImpact.value=null
+  pendingPermissionImpactAction=null
+}
+async function confirmPermissionImpact() {
+  if (!pendingPermissionImpactAction) return
+  permissionImpactBusy.value=true
+  try {
+    await pendingPermissionImpactAction()
+    permissionImpactOpen.value=false
+    permissionImpact.value=null
+    pendingPermissionImpactAction=null
+  } catch (error) { notifyError(error instanceof Error?error.message:'角色保存失败') }
+  finally { permissionImpactBusy.value=false }
+}
 async function saveRoleTemplate() {
   if (!roleTemplateDraft.value.menu_permissions.length) { notifyError('请至少选择一个菜单'); return }
   if (roleTemplateDraft.value.name.trim().length<2) { notifyError('请填写角色名称'); return }
@@ -2027,8 +1789,9 @@ async function saveRoleTemplate() {
       const impact=await api.previewRoleImpact(roleRef,body)
       const changed=impact.menus_added.length+impact.menus_removed.length+impact.actions_added.length+impact.actions_removed.length
       if (changed&&impact.affected_count) {
-        const names=(impact.usernames||[]).slice(0,5).join('、')
-        askConfirmation(`本次权限调整将立即影响 ${impact.affected_count} 个用户${names?`（${names}${impact.affected_count>5?'等':''}）`:''}，并使其现有登录会话按新权限执行。确定保存吗？`,persist)
+        permissionImpact.value=impact
+        pendingPermissionImpactAction=persist
+        permissionImpactOpen.value=true
         return
       }
     }
@@ -2044,35 +1807,6 @@ function removeRoleTemplate(template:any) {
   })
 }
 
-async function loadAuditLogs() {
-  if (auditCreatedFrom.value && auditCreatedTo.value && new Date(auditCreatedFrom.value) > new Date(auditCreatedTo.value)) {
-    notifyError('开始时间不能晚于结束时间')
-    return
-  }
-  auditLoading.value=true
-  try {
-    const result=await api.auditLogs({
-      page:auditPage.value,page_size:auditPageSize.value,q:auditQuery.value.trim(),
-      action:auditAction.value,object_type:auditObjectType.value,
-      created_from:auditCreatedFrom.value?new Date(auditCreatedFrom.value).toISOString():'',
-      created_to:auditCreatedTo.value?new Date(auditCreatedTo.value).toISOString():'',
-    })
-    auditRows.value=result.items||[]
-    auditTotal.value=Number(result.total||0)
-  } catch (error) { notifyError(error instanceof Error ? error.message : '系统日志加载失败') }
-  finally { auditLoading.value=false }
-}
-
-async function exportAuditLogs() {
-  try {
-    await api.exportAuditLogs({
-      q:auditQuery.value.trim(),action:auditAction.value,object_type:auditObjectType.value,
-      created_from:auditCreatedFrom.value?new Date(auditCreatedFrom.value).toISOString():'',
-      created_to:auditCreatedTo.value?new Date(auditCreatedTo.value).toISOString():'',
-    })
-    notify('系统日志已导出')
-  } catch (error) { notifyError(error instanceof Error ? error.message : '系统日志导出失败') }
-}
 
 async function checkServiceHealth() {
   const wasUnavailable=serviceStatus.value.state!=='online'
@@ -2087,39 +1821,6 @@ async function checkServiceHealth() {
   } catch { serviceStatus.value={state:'offline',message:'无法连接至 API 服务'} }
 }
 
-function applyAuditFilters() { auditPage.value=1; void loadAuditLogs() }
-function resetAuditFilters() {
-  auditQuery.value='';auditAction.value='';auditObjectType.value='';auditCreatedFrom.value='';auditCreatedTo.value='';auditPage.value=1
-  void loadAuditLogs()
-}
-
-function auditFieldText(key:string) { return auditFieldLabels[key] || key.replaceAll('_',' ') }
-function auditValueText(key:string,value:any):string {
-  if (value === null || value === undefined || value === '') return '无'
-  if (typeof value === 'boolean') return value ? '是' : '否'
-  if (key === 'size' && Number.isFinite(Number(value))) return formatStorageSize(Number(value))
-  if (Array.isArray(value)) {
-    if (key.endsWith('_ids')) return value.length ? `共 ${value.length} 项` : '无'
-    if (key === 'roles') return value.map(item=>roleText(String(item))).join('、') || '无'
-    if (key === 'menu_permissions' || key === 'action_permissions') return value.map(item=>auditPermissionLabels.value[String(item)]||String(item)).join('、') || '无'
-    return value.map(item=>auditValueText(key,item)).join('、') || '无'
-  }
-  if (typeof value === 'object') return Object.entries(value).map(([childKey,childValue])=>`${auditFieldText(childKey)}：${auditValueText(childKey,childValue)}`).join('；') || '无'
-  const text=String(value)
-  return ({active:'正常',disabled:'已停用',queued:'等待处理',running:'处理中',succeeded:'已完成',failed:'失败',cancelled:'已取消',private:'仅自己可见',team:'团队成员可见'} as Record<string,string>)[text] || text
-}
-function auditChangeEntries(changes:any) {
-  return Object.entries(changes||{}).map(([key,value])=>({key,label:auditFieldText(key),value:auditValueText(key,value)}))
-}
-function auditChangesText(changes:any) {
-  const entries=auditChangeEntries(changes)
-  if (!entries.length) return '未记录字段变化'
-  const summary=entries.slice(0,3).map(item=>`${item.label}：${item.value}`).join('；')
-  return entries.length>3?`${summary}；另有 ${entries.length-3} 项`:summary
-}
-function auditObjectText(item:any) { return `${auditObjectLabels[item.object_type]||'其他'}：${item.object_name||'未命名对象'}` }
-function openAuditDetail(item:any) { auditDetail.value=item }
-function closeAuditDetail() { auditDetail.value=null }
 
 async function createUser() {
   if (newUser.value.username.trim().length < 3) { notifyError('用户名至少需要 3 个字符'); return }
@@ -2222,16 +1923,21 @@ async function saveFormat() { try { const body={remark:formatRemark.value.trim()
 function removeFormat(row:any) { askConfirmation(`确定要删除“${assetTypeLabels[row.asset_type]}”格式类别吗？`,async()=>{await api.deleteFormat(row.asset_type);notify('格式类别已删除');await loadFormats()}) }
 
 async function applyBatchTag() {
-  if (!batchTagValue.value.trim()) { notifyError('请输入标签值'); return }
-  if (batchTagTarget.value === 'upload') {
-    const value=batchTagValue.value.trim()
-    const current=uploadTags.value[batchTagKey.value] || []
-    if (!current.includes(value)) uploadTags.value={...uploadTags.value,[batchTagKey.value]:[...current,value]}
-    batchTagOpen.value=false
-    return
-  }
+  if (!batchTagValue.value.trim()) { notifyError('请选择标签值'); return }
   try {
     const value = batchTagValue.value.trim()
+    tagRows.value=(await api.tags()).items
+    if (!selectedTagDefinition(batchTagKey.value)?.values?.includes(value)) {
+      batchTagValue.value=''
+      notifyError('标签值已变化，请选择标签管理中的有效值')
+      return
+    }
+    if (batchTagTarget.value === 'upload') {
+      const current=uploadTags.value[batchTagKey.value] || []
+      if (!current.includes(value)) uploadTags.value={...uploadTags.value,[batchTagKey.value]:[...current,value]}
+      batchTagOpen.value=false
+      return
+    }
     const body = batchTagAction.value === 'add'
       ? {...selectedPayload(),set_tags:{[batchTagKey.value]:value},remove_tags:[],remove_tag_values:{}}
       : {...selectedPayload(),set_tags:{},remove_tags:[],remove_tag_values:{[batchTagKey.value]:[value]}}
@@ -2254,12 +1960,20 @@ function showBatchResult(title:string, result:any) {
   batchResultOpen.value = true
 }
 
-function openBatchTag(target:'library'|'upload', action:'add'|'remove'='add') {
-  batchTagTarget.value=target
-  batchTagAction.value=action
-  batchTagKey.value=tagDefinitions.value[0]?.key || ''
-  batchTagValue.value=''
-  batchTagOpen.value=true
+function changeBatchTagKey() { batchTagValue.value='' }
+async function openBatchTag(target:'library'|'upload', action:'add'|'remove'='add') {
+  if (batchTagLoading.value) return
+  batchTagLoading.value=true
+  try {
+    tagRows.value=(await api.tags()).items
+    if (!tagDefinitions.value.length) { notifyError('暂无可用标签，请先在标签管理中配置'); return }
+    batchTagTarget.value=target
+    batchTagAction.value=action
+    batchTagKey.value=tagDefinitions.value[0].key
+    batchTagValue.value=''
+    batchTagOpen.value=true
+  } catch (error) { notifyError(error instanceof Error ? error.message : '标签加载失败') }
+  finally { batchTagLoading.value=false }
 }
 
 function removeUploadTag(key:string, value:string) {
@@ -2292,14 +2006,7 @@ async function revokeActiveRelation() {
   <div class="prototype variant-a" :class="[`skin-${skin}`, `density-${density}`]" @scroll.capture="showTransientScrollbar">
     <header class="topbar">
       <div class="brand"><span class="brand-mark">VA</span><span>视觉资产库</span></div>
-      <div class="global-search-wrap">
-        <label class="global-search"><span>⌕</span><input v-model="globalQuery" placeholder="全局搜索素材、数据集和任务…" @input="searchGlobally" @focus="globalQuery&&searchGlobally()" @keydown.esc="globalSearchOpen=false" /></label>
-        <section v-if="globalSearchOpen" class="global-search-results">
-          <div v-if="globalSearchLoading" class="global-search-state">正在搜索…</div>
-          <template v-else-if="globalSearchGroups.length"><div v-for="group in globalSearchGroups" :key="group.type" class="global-search-group"><b>{{group.label}}</b><button v-for="item in group.items" :key="item.id" type="button" @click="openGlobalResult(group.type,item)"><span>{{item.name||item.type}}</span><small>{{item.remark||item.status||jobStateText(item.state)}}</small></button></div></template>
-          <div v-else class="global-search-state">没有匹配结果</div>
-        </section>
-      </div>
+      <GlobalSearch :job-state-text="jobStateText" @open="openGlobalResult" @error="notifyError" />
       <div class="header-actions">
         <label class="skin-picker"><span>界面</span><select v-model="skin"><option value="light">白天模式</option><option value="command">夜间模式</option></select></label>
         <button class="icon-button" aria-label="通知">◌</button>
@@ -2315,8 +2022,10 @@ async function revokeActiveRelation() {
 
     <aside class="sidebar">
       <nav>
+        <div v-if="canViewMenu('overview') || canViewMenu('project_overview')" class="nav-label">概览</div>
         <button v-if="canViewMenu('overview')" :class="{ active: page === 'overview' }" @click="setPage('overview')"><span>◈</span>系统概览</button>
-        <div class="nav-label">资产管理</div>
+        <button v-if="canViewMenu('project_overview')" :class="{ active: page === 'project_overview' }" @click="setPage('project_overview')"><span>▦</span>项目概览</button>
+        <div v-if="hasAssetMenuPermission" class="nav-label">资产管理</div>
         <button v-if="canViewMenu('library')" :class="{ active: page === 'library' }" @click="setPage('library')"><span>▦</span>素材库<em>{{assetTotal}}</em></button>
         <button v-if="canViewMenu('datasets')" :class="{ active: page === 'datasets' }" @click="setPage('datasets')"><span>▤</span>数据集</button>
         <button v-if="canViewMenu('relations')" :class="{ active: page === 'relations' }" @click="setPage('relations')"><span>⌁</span>关联关系</button>
@@ -2326,11 +2035,12 @@ async function revokeActiveRelation() {
         <div v-if="hasSystemMenuPermission" class="nav-label">系统管理</div>
         <button v-if="canViewMenu('tags')" :class="{ active: page === 'tags' }" @click="setPage('tags')"><span>◇</span>标签管理</button>
         <button v-if="canViewMenu('formats')" :class="{ active: page === 'formats' }" @click="setPage('formats')"><span>◫</span>格式管理</button>
+        <button v-if="canViewMenu('parameters')" :class="{ active: page === 'parameters' }" @click="setPage('parameters')"><span>▣</span>参数管理</button>
         <button v-if="canViewMenu('admin')" :class="{ active: page === 'admin' }" @click="setPage('admin')"><span>⚙</span>用户管理</button>
         <button v-if="canViewMenu('roles')" :class="{ active: page === 'roles' }" @click="setPage('roles')"><span>♙</span>角色管理</button>
         <button v-if="canViewMenu('logs')" :class="{ active: page === 'logs' }" @click="setPage('logs')"><span>≡</span>系统日志</button>
       </nav>
-      <div class="storage">
+      <div v-if="canViewMenu('library') && hasStorageStats" class="storage">
         <div><span>存储空间</span><b>剩余 {{storageFreePercent}}%</b></div>
         <div class="meter"><i :style="{width:`${storageUsedPercent}%`}"></i></div>
         <small>{{formatStorageSize(storageStats.free)}} 可用 / 共 {{formatStorageSize(storageStats.total)}}</small>
@@ -2339,12 +2049,11 @@ async function revokeActiveRelation() {
 
     <main>
       <template v-if="page === 'overview'">
-        <section class="page-head"><div><h1>系统概览</h1><p>快速查看资产规模、任务状态和近期操作。</p></div><button class="secondary" @click="loadOverview">刷新</button></section>
-        <section v-if="overviewLoading" class="state-panel"><div class="spinner"></div><b>正在加载系统概览</b></section>
-        <div v-else class="overview-shell">
-          <section class="overview-cards"><article><small>素材总数</small><b>{{overviewData.counts?.assets??'—'}}</b><button v-if="canViewMenu('library')" @click="setPage('library')">查看素材</button></article><article><small>数据集</small><b>{{overviewData.counts?.datasets??'—'}}</b><button v-if="canViewMenu('datasets')" @click="setPage('datasets')">查看数据集</button></article><article><small>生效关系</small><b>{{overviewData.counts?.relations??'—'}}</b><button v-if="canViewMenu('relations')" @click="setPage('relations')">查看关系</button></article><article :class="{warning:overviewData.counts?.failed_jobs}"><small>处理中 / 近 7 日失败</small><b>{{overviewData.counts?.running_jobs??0}} / {{overviewData.counts?.failed_jobs??0}}</b><button v-if="canViewMenu('downloads')" @click="setPage('downloads')">查看任务</button></article></section>
-          <section class="overview-panels"><article><h2>素材构成</h2><div v-if="Object.keys(overviewData.asset_types||{}).length" class="overview-types"><div v-for="(count,type) in overviewData.asset_types" :key="type"><span>{{assetTypeLabels[String(type)]||type}}</span><b>{{count}}</b><i :style="{width:`${Math.max(6,Number(count)/Math.max(...Object.values(overviewData.asset_types).map(Number))*100)}%`}"></i></div></div><div v-else class="empty compact"><b>暂无素材统计</b></div></article><article><h2>素材占比</h2><div v-if="overviewAssetShares.length" class="overview-pie-layout"><div class="overview-pie" :style="overviewAssetPieStyle" role="img" aria-label="按素材类型占用空间展示素材占比"><span><b>{{formatStorageSize(overviewAssetShares.reduce((sum,item)=>sum+item.size,0))}}</b><small>总占用空间</small></span></div><div class="overview-pie-legend"><div v-for="item in overviewAssetShares" :key="item.type"><i :style="{background:item.color}"></i><span>{{assetTypeLabels[item.type]||item.type}}</span><b>{{item.percentage.toFixed(1)}}%</b><small>{{item.count}} 项 · {{formatStorageSize(item.size)}}</small></div></div></div><div v-else class="empty compact"><b>暂无素材占比</b></div></article><article><h2>近期操作</h2><div v-if="overviewData.recent_activity?.length" class="overview-activity"><div v-for="item in overviewData.recent_activity" :key="item.id"><span>{{auditActionText(item.action)}}</span><b>{{item.object_name||auditObjectLabels[item.object_type]||'系统对象'}}</b><small>{{new Date(item.created_at).toLocaleString('zh-CN')}}</small></div></div><div v-else class="empty compact"><b>暂无可展示的操作</b></div></article></section>
-        </div>
+        <OverviewView :user-id="currentUser?.id || null" :can-view-menu="canViewMenu" :asset-type-labels="assetTypeLabels" :audit-object-labels="auditObjectLabels" :audit-action-text="auditActionText" :format-storage-size="formatStorageSize" @navigate="setPage" @error="notifyError" />
+      </template>
+
+      <template v-else-if="page === 'project_overview'">
+        <ProjectOverviewView :can-view-menu="canViewMenu" :format-storage-size="formatStorageSize" @dataset="openAssociatedDataset" @asset="openProjectAsset" @error="notifyError" />
       </template>
 
       <template v-else-if="page === 'library'">
@@ -2380,7 +2089,7 @@ async function revokeActiveRelation() {
           <section class="content-panel">
             <div class="toolbar">
               <div>当前页 <b>{{ filtered.length }}</b> 项 <span>· 全部 {{assetFilteredTotal}} 项</span></div>
-              <div><button :class="{active:libraryView==='cards'}" @click="libraryView='cards'">卡片</button><button :class="{active:libraryView==='table'}" @click="libraryView='table'">表格</button><button v-if="libraryView==='table'" @click="columnSettingsOpen=true">列设置</button><button :class="{ active: density === 'compact' }" @click="density='compact'">紧凑</button><button :class="{ active: density === 'comfortable' }" @click="density='comfortable'">舒适</button><select v-model="assetSort" @change="applyAssetFilters"><option value="created_at">最近更新</option><option value="name">名称</option><option value="size">文件大小</option></select><button @click="assetDirection=assetDirection==='desc'?'asc':'desc';applyAssetFilters()">{{assetDirection==='desc'?'降序':'升序'}}</button></div>
+              <div><button :class="{active:libraryView==='cards'}" @click="libraryView='cards'">卡片</button><button :class="{active:libraryView==='table'}" @click="libraryView='table'">表格</button><button v-if="libraryView==='table'" @click="columnSettingsOpen=true">列设置</button><button v-if="libraryView==='cards'" :class="{ active: density === 'compact' }" @click="density='compact'">紧凑</button><button v-if="libraryView==='cards'" :class="{ active: density === 'comfortable' }" @click="density='comfortable'">舒适</button><select v-model="assetSort" @change="applyAssetFilters"><option value="created_at">最近更新</option><option value="name">名称</option><option value="size">文件大小</option></select><button @click="assetDirection=assetDirection==='desc'?'asc':'desc';applyAssetFilters()">{{assetDirection==='desc'?'降序':'升序'}}</button></div>
             </div>
 
             <div v-if="selectedCount" class="batch-bar"><b>已选 {{ selectedCount }} 项</b><button v-if="can('asset_delete')" class="batch-delete" @click="deleteSelectedAssets">删除</button><button v-if="can('asset_edit')" @click="openBatchTag('library','remove')">删除标签</button><button v-if="can('asset_edit')" @click="openBatchTag('library','add')">添加标签</button><button v-if="can('dataset_create_edit')" @click="collectionOpen=true">创建数据集</button><button v-if="can('relation_manage')&&!selectedSetId" @click="setPage('relations')">建立关系</button><button v-if="can('export_create')" @click="exportSelected">导出</button></div>
@@ -2408,7 +2117,7 @@ async function revokeActiveRelation() {
       </template>
 
       <template v-else-if="page === 'datasets'">
-        <DatasetView :status-values="datasetStatusValues" :filter-definitions="filterDefinitions" :open-request="datasetOpenRequest" :can-create-edit="can('dataset_create_edit')" :can-manage-members="can('dataset_members_manage')" :can-publish-version="can('dataset_version_publish')" :can-restore-version="can('dataset_version_restore')" :can-delete="can('dataset_delete')" :can-manage-models="can('dataset_model_manage')" :can-export="can('export_create')" @notify="notify" @export="previewDatasetExport" />
+        <DatasetView :status-values="datasetStatusValues" :project-values="datasetProjectValues" :filter-definitions="filterDefinitions" :open-request="datasetOpenRequest" :list-request-nonce="datasetListRequestNonce" :resume-draft="datasetResumeDraft" :can-create-edit="can('dataset_create_edit')" :can-manage-members="can('dataset_members_manage')" :can-publish-version="can('dataset_version_publish')" :can-restore-version="can('dataset_version_restore')" :can-delete="can('dataset_delete')" :can-manage-models="can('dataset_model_manage')" :can-edit-model-parameters="can('asset_edit')" :can-export="can('export_create')" :can-manage-projects="canViewMenu('tags') && can('tag_manage')" @notify="notify" @export="previewDatasetExport" @add-project="openProjectTag" @resumed="datasetResumeDraft=null" />
       </template>
 
       <template v-else-if="page === 'relations'">
@@ -2423,7 +2132,8 @@ async function revokeActiveRelation() {
         <section v-if="can('relation_manage')&&relationWorkflow==='model'" class="validation"><span>第 3 步</span><b>关系预览</b><div><span>{{selectedModel?.name||'未选择模型'}} → {{relationVersions.find((item:any)=>item.id===relationVersionId)?.version||'未选择版本'}}</span></div><button class="primary" @click="previewModelRelations">确认关系</button></section>
         <section class="relation-history">
           <div class="section-title"><div><h2>历史关联关系</h2></div><label>每页 <select v-model="relationPageSize" @change="relationPage=1;loadRelations()"><option :value="10">10 条</option><option :value="20">20 条</option><option :value="50">50 条</option></select></label></div>
-          <div class="relation-history-filters"><input v-model="relationHistoryQuery" placeholder="搜索素材名称或备注" @keyup.enter="relationPage=1;loadRelations()" /><select v-model="relationHistoryType"><option value="">全部关系</option><option v-for="(label,key) in historyRelationTypeLabels" :key="key" :value="key">{{label}}</option></select><select v-model="relationHistoryStatus"><option value="">全部状态</option><option value="active">生效中</option><option value="revoked">已撤销</option></select><input v-model="relationHistoryCreator" placeholder="创建人" /><label>开始时间<input v-model="relationHistoryFrom" type="datetime-local" step="1" /></label><label>结束时间<input v-model="relationHistoryTo" type="datetime-local" step="1" :min="relationHistoryFrom" /></label><button @click="resetRelationHistoryFilters">重置</button><button @click="relationPage=1;loadRelations()">筛选</button></div>
+          <div class="relation-history-filters"><input v-model="relationHistoryQuery" placeholder="搜索素材名称或备注" @input="relationHistoryAssetId=''" @keyup.enter="relationPage=1;loadRelations()" /><select v-model="relationHistoryType"><option value="">全部关系</option><option v-for="(label,key) in historyRelationTypeLabels" :key="key" :value="key">{{label}}</option></select><select v-model="relationHistoryStatus"><option value="">全部状态</option><option value="active">生效中</option><option value="revoked">已撤销</option></select><input v-model="relationHistoryCreator" placeholder="创建人" /><label>开始时间<input v-model="relationHistoryFrom" type="datetime-local" step="1" /></label><label>结束时间<input v-model="relationHistoryTo" type="datetime-local" step="1" :min="relationHistoryFrom" /></label><button @click="resetRelationHistoryFilters">重置</button><button @click="relationPage=1;loadRelations()">筛选</button></div>
+          <div v-if="relationHistoryAssetId" class="relation-asset-filter">仅显示当前素材的关联关系 <button type="button" @click="resetRelationHistoryFilters">清除筛选</button></div>
           <div class="relation-table"><div class="relation-row head"><span>源资产</span><span>关系</span><span>目标资产</span><span>创建人</span><span>创建时间</span><span>状态</span><span></span></div><button v-for="item in pagedRelations" :key="item.id" class="relation-row" @click="openRelationDetail(item)"><span><i>{{item.sourceType}}</i><b>{{item.source}}</b></span><strong>{{item.relation}}</strong><span><i>{{item.targetType}}</i><b>{{item.target}}</b></span><span>{{item.operator}}</span><span>{{item.createdAt}}</span><em :class="item.status==='生效中'?'active':'revoked'">{{item.status}}</em><u>详情 ›</u></button></div>
           <div class="pagination"><span>共 {{relationTotal}} 条</span><button :disabled="relationPage===1" @click="relationPage--;loadRelations()">‹</button><template v-for="(num,index) in visibleRelationPages" :key="num"><span v-if="index>0&&num-visibleRelationPages[index-1]>1" class="pagination-ellipsis">…</span><button :class="{active:relationPage===num}" @click="relationPage=num;loadRelations()">{{num}}</button></template><button :disabled="relationPage===relationPages" @click="relationPage++;loadRelations()">›</button></div>
         </section>
@@ -2437,35 +2147,23 @@ async function revokeActiveRelation() {
       </template>
 
       <template v-else-if="page === 'downloads'">
-        <section class="page-head"><div><h1>任务中心</h1><p>查看导出和系统清理任务。</p></div></section>
-        <section class="job-toolbar"><div class="job-count">当前页 <b>{{jobRows.length}}</b> 项 <span>· 全部 {{jobTotal}} 项</span></div><div class="job-filters"><select v-model="jobTypeFilter"><option value="">全部类型</option><option v-for="(label,key) in jobTypeLabels" :key="key" :value="key">{{label}}</option></select><select v-model="jobStateFilter"><option value="">全部状态</option><option v-for="(label,key) in jobStateLabels" :key="key" :value="key">{{label}}</option></select><label>开始时间<input v-model="jobCreatedFrom" type="datetime-local" step="1" /></label><label>结束时间<input v-model="jobCreatedTo" type="datetime-local" step="1" :min="jobCreatedFrom" /></label><button @click="resetJobFilters">重置</button><button @click="applyJobFilters">筛选</button></div></section>
-        <section v-if="jobRows.length" class="data-table download-table"><div class="table-row head"><span>任务</span><span>任务创建时间</span><span>内容</span><span>大小</span><span>进度</span><span>类型</span><span>状态</span><span>操作</span></div><div v-for="job in jobRows" :key="job.id" class="table-row"><span class="job-name"><b :title="jobNameText(job)">{{jobNameText(job)}}</b><small v-if="job.error?.message" :title="jobErrorText(job.error.message)">{{jobErrorText(job.error.message)}}</small></span><span>{{job.created_at ? new Date(job.created_at).toLocaleString('zh-CN') : '时间未知'}}</span><span>{{job.input?.asset_count ?? job.input?.asset_ids?.length ?? 0}} 项</span><span>{{jobSizeText(job)}}</span><span class="progress"><i :style="{width:`${job.progress}%`}"></i><small>{{job.progress}}%</small></span><span>{{jobTypeText(job.type)}}</span><span :class="job.state==='failed'?'failed':job.state==='succeeded'?'done':job.state==='cancelled'?'cancelled':''">{{jobStateText(job.state)}}</span><button v-if="jobAction(job)==='download'" class="primary" @click="downloadExport(job.id)">下载</button><button v-else-if="can('export_create')&&jobAction(job)==='retry'" @click="retryJob(job.id)">重试</button><button v-else-if="can('export_create')&&jobAction(job)==='cancel'" class="danger-inline" @click="cancelJob(job)">取消</button></div></section>
-        <div v-if="jobTotal" class="pagination"><span>第 {{jobPage}} / {{jobPages}} 页</span><label>每页 <select v-model="jobPageSize" @change="jobPage=1;loadJobs()"><option :value="20">20</option><option :value="50">50</option><option :value="100">100</option></select> 项</label><button :disabled="jobPage===1" @click="jobPage--;loadJobs()">‹</button><button :disabled="jobPage===jobPages" @click="jobPage++;loadJobs()">›</button></div>
-        <section v-if="!jobTotal" class="empty"><b>暂无符合条件的任务</b><p>导出和系统清理任务会显示在这里。</p><button v-if="jobTypeFilter||jobStateFilter||jobCreatedFrom||jobCreatedTo" @click="resetJobFilters">清除筛选</button><button v-else @click="setPage('library')">返回素材库</button></section>
+        <JobsView :jobs="jobs" :can-export="can('export_create')" @navigate="setPage" />
       </template>
 
       <template v-else-if="page === 'trash'">
-        <section class="page-head">
-          <div><h1>回收站</h1></div>
-          <div class="primary-actions"><button v-if="trashSelected.length" class="secondary" @click="trashSelected=[]">× 取消选择</button><button class="secondary" :disabled="!trashAssets.length || allTrashSelected" @click="selectTrashPage">✓ 全选</button><button class="secondary" :disabled="!trashAssets.length" @click="invertTrashPage">⇄ 反选</button><button v-if="can('trash_manage')" class="secondary danger" :disabled="!trashTotal" @click="emptyTrash">清空回收站</button><button v-if="can('trash_manage')" class="primary" :disabled="!trashSelected.length" @click="restoreTrashAssets">还原</button></div>
-        </section>
-        <section class="trash-shell content-panel">
-          <div class="toolbar"><div>当前页 <b>{{trashAssets.length}}</b> 项 <span>· 全部 {{trashTotal}} 项</span></div></div>
-          <div v-if="trashSelected.length" class="batch-bar"><b>已选 {{trashSelected.length}} 项</b><button v-if="can('trash_manage')" @click="restoreTrashAssets">还原</button></div>
-          <div v-if="trashAssets.length" class="asset-grid"><article v-for="asset in trashAssets" :key="asset.id" class="asset-card" :class="{selected:trashSelected.includes(asset.id)}"><div class="asset-preview" :style="{background:asset.tone}"><img v-if="canDisplayMediaPreview(asset)" :src="asset.preview_url!" :alt="asset.name" /><span v-if="asset.type==='视频' && canDisplayMediaPreview(asset)" class="play-badge">▶</span><span v-if="!canDisplayMediaPreview(asset)" class="visual-code">{{asset.type==='图片'?'IMG':asset.type==='视频'?'VIDEO':asset.type==='模型'?'MODEL':'DATA'}}</span><small>{{asset.mark}}</small></div><button class="selector" :aria-label="`选择 ${asset.name}`" @click="toggleTrashSelect(asset.id)">{{trashSelected.includes(asset.id)?'✓':''}}</button><div class="asset-info"><b :title="asset.name">{{asset.name}}</b><small>{{asset.type}} · 删除于 {{asset.createdAt}}</small></div></article></div>
-          <div v-else class="empty"><b>回收站为空</b><p>从素材库删除的素材会显示在这里。</p></div>
-          <div v-if="trashTotal" class="pagination"><span>第 {{trashPage}} / {{trashPages}} 页</span><label>每页 <select v-model="trashPageSize" @change="trashPage=1;loadTrash()"><option :value="20">20</option><option :value="50">50</option><option :value="100">100</option><option :value="200">200</option><option :value="0">全部</option></select> 项</label><button :disabled="trashPage===1" @click="trashPage--;loadTrash()">‹</button><button :disabled="trashPage===trashPages" @click="trashPage++;loadTrash()">›</button></div>
-        </section>
+        <TrashView :trash="trash" :can-manage="can('trash_manage')" :can-display-media-preview="canDisplayMediaPreview" />
       </template>
 
       <template v-else-if="page === 'tags'">
-        <section class="page-head"><div><h1>标签管理</h1></div><button v-if="can('tag_manage')" class="primary" @click="openNewTag">＋ 新建标签字段</button></section>
-        <section class="tag-admin"><article v-for="tag in tagRows" :key="tag.key"><div><span class="tag-dot" :style="{background:tag.color}"></span><b>{{tag.name}}</b><code>{{tag.key}}</code></div><p>{{(tag.values || []).join(' / ') || '允许自由输入'}}</p><div v-if="can('tag_manage')" class="tag-actions"><button @click="openEditTag(tag)">修改</button><button v-if="canDeleteTag(tag)" @click="removeTag(tag.key,tag.name)">删除</button></div></article></section>
+        <TagsView :rows="tagRows" :can-manage="can('tag_manage')" @create="openNewTag" @edit="openEditTag" @remove="removeTag" />
       </template>
 
       <template v-else-if="page === 'formats'">
-        <section class="page-head"><div><h1>格式管理</h1></div><button v-if="can('format_manage') && formatsLoaded && availableFormatTypes.length" class="primary" @click="openNewFormat">＋ 新增格式</button></section>
-        <section class="tag-admin"><article v-for="row in formatRows" :key="row.asset_type"><div><b>{{assetTypeLabels[row.asset_type] || row.asset_type}}</b><code>{{row.remark || '暂无备注'}}</code></div><p>{{(row.extensions || []).join(' / ') || '暂无文件格式'}}</p><div v-if="can('format_manage')" class="tag-actions"><button @click="openEditFormat(row)">修改</button><button v-if="!row.built_in" @click="removeFormat(row)">删除</button></div></article></section>
+        <FormatsView :rows="formatRows" :can-manage="can('format_manage')" :loaded="formatsLoaded" :available-types="availableFormatTypes" :type-labels="assetTypeLabels" @create="openNewFormat" @edit="openEditFormat" @remove="removeFormat" />
+      </template>
+
+      <template v-else-if="page === 'parameters'">
+        <ParametersView :can-manage="can('parameter_manage')" @notify="notify" />
       </template>
 
       <template v-else-if="page === 'admin'">
@@ -2479,44 +2177,10 @@ async function revokeActiveRelation() {
       </template>
 
       <template v-else-if="page === 'logs'">
-        <section class="page-head"><div><h1>系统日志</h1></div><button class="secondary" @click="exportAuditLogs">导出 CSV</button></section>
-        <section class="content-panel audit-log-shell">
-          <div class="audit-log-filters">
-            <label class="audit-search-field"><span>关键字</span><input v-model="auditQuery" placeholder="搜索用户、对象、操作或请求 ID" @keyup.enter="applyAuditFilters" /></label>
-            <label><span>操作类型</span><select v-model="auditAction"><option value="">全部操作</option><option v-for="(label,key) in auditActionLabels" :key="key" :value="key">{{label}}</option></select></label>
-            <label><span>操作对象</span><select v-model="auditObjectType"><option value="">全部对象</option><option v-for="(label,key) in auditObjectLabels" :key="key" :value="key">{{label}}</option></select></label>
-            <label><span>开始时间</span><input v-model="auditCreatedFrom" type="datetime-local" step="1" /></label>
-            <label><span>结束时间</span><input v-model="auditCreatedTo" type="datetime-local" step="1" :min="auditCreatedFrom" /></label>
-            <button class="secondary" @click="resetAuditFilters">重置</button><button class="primary" @click="applyAuditFilters">筛选</button>
-          </div>
-          <div class="toolbar"><div>当前页 <b>{{auditRows.length}}</b> 项 <span>· 全部 {{auditTotal}} 项</span></div></div>
-          <div v-if="auditLoading" class="state-panel"><b>正在加载系统日志…</b></div>
-          <div v-else-if="auditRows.length" class="data-table audit-log-table">
-            <div class="table-row head"><span>时间</span><span>操作用户</span><span>操作</span><span>操作对象</span><span>变更内容</span><span>请求 ID</span></div>
-            <div v-for="item in auditRows" :key="item.id" class="table-row"><span class="audit-time">{{new Date(item.created_at).toLocaleString('zh-CN')}}</span><b class="audit-actor">{{item.actor_username||item.actor_id||'系统'}}</b><span><i class="audit-action-badge">{{auditActionText(item.action)}}</i></span><span class="audit-object" :title="auditObjectText(item)">{{auditObjectText(item)}}</span><span class="audit-change-summary" :title="auditChangesText(item.changes)">{{auditChangesText(item.changes)}}</span><span class="audit-request"><code :title="item.request_id">{{item.request_id}}</code><button type="button" @click="openAuditDetail(item)">详情</button></span></div>
-          </div>
-          <section v-else class="empty"><b>暂无符合条件的系统日志</b><p>用户、素材、数据集和关联关系的重要操作会显示在这里。</p><button v-if="auditQuery||auditAction||auditObjectType||auditCreatedFrom||auditCreatedTo" @click="resetAuditFilters">清除筛选</button></section>
-          <div v-if="auditTotal" class="pagination"><span>第 {{auditPage}} / {{auditPages}} 页</span><label>每页 <select v-model="auditPageSize" @change="auditPage=1;loadAuditLogs()"><option :value="20">20</option><option :value="50">50</option><option :value="100">100</option></select> 项</label><button :disabled="auditPage===1" @click="auditPage--;loadAuditLogs()">‹</button><button :disabled="auditPage===auditPages" @click="auditPage++;loadAuditLogs()">›</button></div>
-        </section>
+        <AuditLogsView :logs="audit" :presentation="auditPresentation" />
       </template>
     </main>
 
-    <div v-if="auditDetail" class="detail-sheet-stage audit-detail-stage" @click.self="closeAuditDetail">
-      <aside class="detail-sheet audit-detail-sheet">
-        <button class="close" aria-label="关闭日志详情" @click="closeAuditDetail">×</button>
-        <header><small>系统日志详情</small><h2>{{auditActionText(auditDetail.action)}}</h2><p>{{auditObjectText(auditDetail)}}</p></header>
-        <section class="audit-detail-overview">
-          <div><span>操作用户</span><b>{{auditDetail.actor_username||auditDetail.actor_id||'系统'}}</b></div>
-          <div><span>操作时间</span><b>{{new Date(auditDetail.created_at).toLocaleString('zh-CN')}}</b></div>
-          <div><span>操作类型</span><b>{{auditActionText(auditDetail.action)}}</b></div>
-          <div><span>操作对象</span><b>{{auditObjectText(auditDetail)}}</b></div>
-          <div><span>请求结果</span><b>{{auditDetail.outcome==='failed'?'失败':'成功'}}{{auditDetail.response_status?`（${auditDetail.response_status}）`:''}}</b></div>
-          <div><span>客户端 IP</span><b>{{auditDetail.client_ip||'未记录'}}</b></div>
-        </section>
-        <section class="audit-detail-changes"><div class="audit-detail-title"><b>变更内容</b><span>{{auditChangeEntries(auditDetail.changes).length}} 项</span></div><div v-if="auditChangeEntries(auditDetail.changes).length" class="audit-change-list"><div v-for="entry in auditChangeEntries(auditDetail.changes)" :key="entry.key"><span>{{entry.label}}</span><p>{{entry.value}}</p></div></div><p v-else class="audit-no-changes">本次操作未记录字段变化。</p></section>
-        <section class="audit-request-detail"><span>请求 ID</span><code>{{auditDetail.request_id}}</code></section>
-      </aside>
-    </div>
 
     <div v-if="activeAsset" class="detail-sheet-stage" :class="{'upload-conflict-stage':uploadOpen&&uploadConflictResult}" @click.self="closeAssetDetail">
     <aside class="detail-sheet" :class="{'is-scrolling':detailSheetScrolling,'upload-conflict-detail':uploadOpen&&uploadConflictResult}" @scroll.passive="showDetailScrollbar">
@@ -2529,14 +2193,17 @@ async function revokeActiveRelation() {
       <div v-if="assetTagEntries(activeAsset).length" class="detail-tags"><span v-for="tag in assetTagEntries(activeAsset)" :key="`${tag.key}-${tag.value}`" :title="tag.label"><i>{{tag.value}}</i><button v-if="can('asset_edit')" :aria-label="`删除标签 ${tag.label} ${tag.value}`" title="删除标签" @click="removeAssetTag(tag.key,tag.value)">×</button></span></div>
       <section v-if="can('asset_edit')" class="asset-remark"><label>备注<textarea v-model="remarkDraft" rows="3" maxlength="1000" placeholder="请输入素材备注"></textarea></label><button class="secondary" :disabled="remarkSaving" @click="saveAssetRemark">{{remarkSaving?'保存中…':'保存备注'}}</button></section>
       <dl><dt>资产 ID</dt><dd>{{activeAsset.id}}</dd><dt>校验值</dt><dd>{{activeAsset.sha256 || '计算中'}}</dd><dt>对象大小</dt><dd>{{activeAsset.size ? `${(activeAsset.size/1024/1024).toFixed(2)} MB` : '未知'}}</dd><dt>处理状态</dt><dd :class="{failed:activeAsset.status==='failed'}">{{processingStatusText(activeAsset.status)}}</dd><dt>创建时间</dt><dd>{{activeAsset.createdAt}}</dd><dt>修改时间</dt><dd>{{activeAsset.updatedAt || activeAsset.createdAt}}</dd><template v-if="activeAsset.processing_error?.message"><dt>失败原因</dt><dd class="failed">{{activeAsset.processing_error.message}}</dd></template></dl>
-      <div class="relation-mini"><b>关联关系</b><p>当前有效关系 <span>{{activeAsset.relations?.length || 0}}</span></p></div>
-      <section class="operation-history"><b>操作历史</b><p v-if="!assetHistory.length">暂无操作记录</p><ol v-else><li v-for="item in assetHistory" :key="item.id"><span>{{auditActionText(item.action)}}</span><small>{{item.actor_username || '系统'}} · {{new Date(item.created_at).toLocaleString('zh-CN')}}</small><em v-if="item.action==='asset.overwritten'">{{item.changes?.relations_preserved?'已保留原有关联关系':'已替换原文件'}}</em></li></ol></section>
+      <div class="relation-mini"><b>关联关系</b><p>当前有效关系 <button v-if="activeAsset.relations?.length&&canViewMenu('relations')" type="button" :aria-label="`查看 ${activeAsset.name} 的 ${activeAsset.relations.length} 条关联关系`" @click="openAssetRelations">{{activeAsset.relations.length}}</button><span v-else>{{activeAsset.relations?.length || 0}}</span></p></div>
+      <section class="operation-history"><b>操作历史</b><p v-if="!assetHistory.length">暂无操作记录</p><template v-else><ol><li v-for="item in visibleAssetHistory" :key="item.id"><span>{{auditActionText(item.action)}}</span><small>{{item.actor_username || '系统'}} · {{new Date(item.created_at).toLocaleString('zh-CN')}}</small><em v-if="item.action==='asset.overwritten'">{{item.changes?.relations_preserved?'已保留原有关联关系':'已替换原文件'}}</em></li></ol><button v-if="assetHistoryTotal>3" type="button" class="operation-history-toggle" :disabled="assetHistoryLoading" :aria-expanded="assetHistoryExpanded" @click="toggleAssetHistory">{{assetHistoryLoading?'加载中…':assetHistoryExpanded?'收起':'展示全部'}}</button></template></section>
       <div v-if="activeAsset.type==='模型'||activeAsset.download_url" class="detail-actions">
+        <button v-if="activeAsset.type==='模型'" class="secondary full" @click="modelParametersAssetId=String(activeAsset.id)">参数配置</button>
         <button v-if="activeAsset.type==='模型'" class="secondary full" @click="openLineage(activeAsset)">查看模型溯源</button>
         <a v-if="activeAsset.download_url" class="primary full button-link" :href="activeAsset.download_url" :download="activeAsset.name">下载原文件</a>
       </div>
     </aside>
     </div>
+
+    <ModelParametersDialog v-if="modelParametersAssetId&&activeAsset" :asset-id="modelParametersAssetId" :asset-name="activeAsset.name" :can-edit="can('asset_edit')" @close="modelParametersAssetId=null" @notify="notify" />
 
     <div v-if="activeRelation" class="detail-sheet-stage" @click.self="closeRelationDetail">
     <aside class="detail-sheet relation-detail" :class="{'is-scrolling':detailSheetScrolling}" @scroll.passive="showDetailScrollbar">
@@ -2568,7 +2235,7 @@ async function revokeActiveRelation() {
         <label class="file-select-button"><input type="file" multiple @change="chooseFile" /><span>点击选择文件</span></label>
         <div v-if="uploadFiles.length" class="selected-files"><article v-for="file in uploadFiles" :key="uploadFileKey(file)" class="selected-file"><div><b>{{file.name}}</b><small>{{(file.size/1024/1024).toFixed(1)}} MB · {{uploadTypeStatus(file)}}</small></div><select v-model="uploadTypeOverrides[uploadFileKey(file)]" aria-label="选择资产类型" @change="uploadConflictResult=null"><option value="" disabled>选择类型</option><option value="image">图片</option><option value="video">视频</option><option value="annotation">标注</option><option value="model">模型</option><option value="archive">压缩文件</option><option value="image_annotation">图片+标注</option><option value="other">其他</option></select><button type="button" aria-label="移除文件" title="移除" :disabled="uploadBusy" @click="removeUploadFile(file)">×</button></article></div>
         <div v-if="uploadFiles.length" class="upload-tag-tools"><button class="secondary" type="button" @click="openBatchTag('upload')">＋ 添加标签</button><div v-if="uploadTagEntries.length" class="upload-tag-list"><span v-for="tag in uploadTagEntries" :key="`${tag.key}-${tag.value}`"><b>{{tag.label}}</b>：{{tag.value}}<button type="button" :aria-label="`删除${tag.label}标签${tag.value}`" @click="removeUploadTag(tag.key,tag.value)">×</button></span></div></div>
-        <div v-if="uploadConflictResult" class="upload-conflicts"><div class="upload-conflict-tree"><section v-for="group in uploadConflictGroups" :key="group.asset_type"><button class="upload-conflict-group" type="button" @click="uploadConflictExpanded=uploadConflictExpanded===group.asset_type?'':group.asset_type"><span><i>{{uploadTypeLabels[group.asset_type]||group.asset_type}}</i><b>{{uploadTypeLabels[group.asset_type]||group.asset_type}}</b></span><strong>{{group.items?.length||group.count}} 项 {{uploadConflictExpanded===group.asset_type?'⌃':'⌄'}}</strong></button><div v-if="uploadConflictExpanded===group.asset_type" class="upload-conflict-items"><button v-for="(item,index) in group.items" :key="item.id" type="button" @click="openUploadConflictAsset(item,index)"><span><b>{{item.name}}</b><small>{{(Number(item.size||0)/1024/1024).toFixed(1)}} MB · {{item.match_kind==='content'?'内容重复':item.match_kind==='name_and_content'?'名称和内容重复':'名称重复'}}</small></span><em v-if="item.has_active_relations">有关联关系</em><i>详情 ›</i></button></div></section></div><p>存在共{{uploadConflictResult.total}}项同名或内容重复文件，请选择：</p><div class="upload-conflict-actions"><button v-if="can('asset_delete')" class="secondary" type="button" @click="overwriteUploadFiles">覆盖原文件</button><button class="primary" type="button" @click="performUpload('rename')">重命名并上传</button></div><small v-if="!can('asset_delete')">当前角色不能覆盖原文件，请使用重命名并上传。</small></div>
+                <div v-if="uploadConflictResult" class="upload-conflicts"><div class="upload-conflict-tree"><section v-for="group in uploadConflictGroups" :key="group.asset_type"><button class="upload-conflict-group" type="button" @click="uploadConflictExpanded=uploadConflictExpanded===group.asset_type?'':group.asset_type"><span><i>{{uploadTypeLabels[group.asset_type]||group.asset_type}}</i><b>{{uploadTypeLabels[group.asset_type]||group.asset_type}}</b></span><strong>{{group.items?.length||group.count}} 项 {{uploadConflictExpanded===group.asset_type?'⌃':'⌄'}}</strong></button><div v-if="uploadConflictExpanded===group.asset_type" class="upload-conflict-items"><button v-for="(item,index) in group.items" :key="item.id" type="button" @click="openUploadConflictAsset(item,index)"><span><b>{{item.name}}</b><small>{{(Number(item.size||0)/1024/1024).toFixed(1)}} MB · {{item.match_kind==='content'?'内容重复':item.match_kind==='name_and_content'?'名称和内容重复':'名称重复'}}</small></span><em v-if="item.has_active_relations">有关联关系</em><i>详情 ›</i></button></div></section></div><p>存在共{{uploadConflictResult.total}}项同名或内容重复文件，请选择：</p><div class="upload-conflict-actions"><button v-if="can('asset_delete')&&uploadConflictResult.items?.some((item:any)=>item.overwrite_target_id)" class="secondary" type="button" @click="overwriteUploadFiles">覆盖原文件</button><button class="primary" type="button" @click="performUpload('rename')">重命名并上传</button></div><small v-if="!can('asset_delete')">当前角色不能覆盖原文件，请使用重命名并上传。</small></div>
         <div v-if="uploadBusy" class="upload-meter"><i :style="{width:`${uploadProgress}%`}"></i></div><p v-if="uploadBusy" class="upload-count">{{uploadPaused?'上传已暂停':'正在上传'}} · 已处理 {{uploadCompleted}} / {{uploadFiles.length}} 项</p><p v-if="uploadError" class="form-error">{{uploadError}}</p>
         <p v-if="uploadFiles.length" class="upload-file-total">共{{uploadFiles.length}}项文件</p><div class="dialog-actions"><button class="secondary" @click="hideUpload">{{uploadBusy?'转入后台':'取消'}}</button><button v-if="uploadBusy" class="secondary" @click="uploadPaused?resumeUpload():pauseUpload()">{{uploadPaused?'继续上传':'暂停上传'}}</button><button v-if="!uploadConflictResult" class="primary" :disabled="uploadBusy||uploadConflictChecking" @click="uploadAsset">{{uploadBusy?'正在上传…':uploadConflictChecking?'正在检查…':uploadError&&uploadFiles.length?'仅重试失败项':'开始上传'}}</button></div>
       </section>
@@ -2577,15 +2244,16 @@ async function revokeActiveRelation() {
     <div v-if="myPermissionsOpen" class="modal-stage"><section class="upload-dialog compact-dialog permission-summary-dialog"><button class="close" @click="myPermissionsOpen=false">×</button><h2>我的权限</h2><p>当前角色：{{roleText(myPermissionSummary?.role||'')}}</p><section><b>可访问菜单</b><div><span v-for="item in myPermissionSummary?.menus||[]" :key="item.key">{{item.name}}</span></div></section><section><b>可执行操作</b><div><span v-for="item in myPermissionSummary?.actions||[]" :key="item.key">{{item.name}}</span><small v-if="!myPermissionSummary?.actions?.length">当前角色仅可查看</small></div></section><small>权限更新时间：{{myPermissionSummary?.updated_at?new Date(myPermissionSummary.updated_at).toLocaleString('zh-CN'):'使用角色默认权限'}}</small><div class="dialog-actions"><button class="primary" @click="myPermissionsOpen=false">关闭</button></div></section></div>
     <div v-if="permissionTemplateOpen" class="modal-stage"><section class="upload-dialog compact-dialog permission-template-dialog"><button class="close" @click="permissionTemplateOpen=false">×</button><div class="dialog-title-actions"><div><h2>可复用角色</h2><p>选择角色快速创建用户，也可以维护团队自己的角色。</p></div><button v-if="can('role_manage')" class="primary" @click="openNewRoleTemplate">＋ 新建角色</button></div><div class="permission-template-list"><article v-for="template in permissionTemplates" :key="template.id||template.key"><button @click="openNewUserFromTemplate(template)"><b>{{template.name}}</b><small>{{template.description||`${template.menu_permissions.length} 个菜单 · ${template.action_permissions.length} 项操作`}}</small></button><div v-if="!template.built_in&&can('role_manage')"><button @click="openEditRoleTemplate(template)">编辑</button><button class="danger-inline" @click="removeRoleTemplate(template)">删除</button></div></article></div><div class="dialog-actions"><button class="secondary" @click="permissionTemplateOpen=false">关闭</button></div></section></div>
     <div v-if="roleEditorOpen" class="modal-stage"><section class="upload-dialog compact-dialog role-editor-dialog"><button class="close" @click="roleEditorOpen=false">×</button><h2>{{editingRoleTemplateId?'编辑角色':'新建角色'}}</h2><div class="form-stack"><label>角色名称<input v-model="roleTemplateDraft.name" maxlength="50" placeholder="例如：质检负责人" /></label><label>角色说明<input v-model="roleTemplateDraft.description" maxlength="200" placeholder="说明适用人员和职责" /></label></div><fieldset class="permission-groups" aria-label="菜单与操作权限"><div class="permission-section-head"><strong>菜单与操作权限</strong><div class="permission-bulk-toolbar"><button type="button" class="secondary" @click="selectAllRoleTemplatePermissions">全选</button><button type="button" class="secondary" @click="clearAllRoleTemplatePermissions">取消全选</button></div></div><div class="permission-groups-list"><section v-for="group in permissionGroups" :key="group.key" class="permission-menu-group" :class="{enabled:roleTemplateMenuEnabled(group.key)}"><button type="button" class="permission-menu-title" :class="{allowed:roleTemplateMenuEnabled(group.key)}" @click="toggleRoleTemplateMenu(group.key)"><span>{{group.name}}</span><b>{{roleTemplateMenuEnabled(group.key)?'✓':'×'}}</b></button><div v-if="group.actions.length" class="permission-menu-actions"><button v-for="action in group.actions" :key="action.key" type="button" :class="{allowed:roleTemplateActionEnabled(action.key)}" :disabled="!roleTemplateMenuEnabled(group.key)" @click="toggleRoleTemplateAction(action)"><span>{{action.name}}</span><b>{{roleTemplateActionEnabled(action.key)?'✓':'×'}}</b></button></div><small v-else>此菜单没有单独的操作权限</small></section></div></fieldset><div class="dialog-actions"><button class="secondary" @click="roleEditorOpen=false">取消</button><button class="primary" @click="saveRoleTemplate">保存角色</button></div></section></div>
+    <PermissionImpactDialog v-if="permissionImpactOpen" :impact="permissionImpact" :busy="permissionImpactBusy" :menu-name="permissionMenuName" :action-name="permissionActionName" @cancel="closePermissionImpact" @confirm="confirmPermissionImpact" />
     <div v-if="columnSettingsOpen" class="modal-stage"><section class="upload-dialog compact-dialog column-settings-dialog"><button class="close" @click="columnSettingsOpen=false">×</button><h2>素材库列设置</h2><p>选择表格中需要展示的信息，名称列固定显示。</p><div class="column-option-list"><button v-for="column in assetColumnDefinitions" :key="column.key" type="button" :disabled="column.required" :class="{active:assetColumns.includes(column.key)}" @click="toggleAssetColumn(column.key)"><span>{{column.label}}</span><b>{{assetColumns.includes(column.key)?'✓':'×'}}</b></button></div><div class="dialog-actions"><button class="primary" @click="columnSettingsOpen=false">完成</button></div></section></div>
     <div v-if="batchTagOpen" class="modal-stage">
-      <section class="upload-dialog compact-dialog"><button class="close" @click="batchTagOpen=false">×</button><h2>为 {{batchTagTarget==='upload'?uploadFiles.length:selectedCount}} 项素材{{batchTagAction==='add'?'添加':'删除'}}标签</h2><div class="upload-fields"><label>标签<select v-model="batchTagKey" @change="batchTagValue='' "><option v-for="tag in tagDefinitions" :key="tag.key" :value="tag.key">{{tag.label}}</option></select></label><label>标签值<select v-if="selectedTagDefinition(batchTagKey)?.values?.length && !selectedTagDefinition(batchTagKey)?.free_input" v-model="batchTagValue"><option value="" disabled>请选择</option><option v-for="value in selectedTagDefinition(batchTagKey)?.values" :key="value" :value="value">{{value}}</option></select><input v-else v-model="batchTagValue" placeholder="请输入标签值" /></label></div><div class="dialog-actions"><button class="secondary" @click="batchTagOpen=false">取消</button><button class="primary" @click="applyBatchTag">{{batchTagAction==='add'?'添加标签':'删除标签'}}</button></div></section>
+      <section class="upload-dialog compact-dialog"><button class="close" @click="batchTagOpen=false">×</button><h2>为 {{batchTagTarget==='upload'?uploadFiles.length:selectedCount}} 项素材{{batchTagAction==='add'?'添加':'删除'}}标签</h2><div class="upload-fields"><label>标签<select v-model="batchTagKey" @change="changeBatchTagKey"><option v-for="tag in tagDefinitions" :key="tag.key" :value="tag.key">{{tag.label}}</option></select></label><div class="batch-tag-value-field"><label for="batch-tag-value">标签值</label><select v-if="selectedTagDefinition(batchTagKey)?.values?.length" id="batch-tag-value" v-model="batchTagValue"><option value="" disabled>请选择</option><option v-for="value in selectedTagDefinition(batchTagKey)?.values" :key="value" :value="value">{{value}}</option></select><p v-else class="batch-tag-no-values">暂无可用标签值，请先在标签管理中配置。</p></div></div><div class="dialog-actions"><button class="secondary" @click="batchTagOpen=false">取消</button><button class="primary" :disabled="!batchTagValue.trim()" @click="applyBatchTag">{{batchTagAction==='add'?'添加标签':'删除标签'}}</button></div></section>
     </div>
     <div v-if="collectionOpen" class="modal-stage"><section class="upload-dialog compact-dialog"><button class="close" @click="collectionOpen=false">×</button><h2>用 {{selectedCount}} 项素材创建数据集</h2><div class="form-stack"><label>名称<input v-model="collectionName" placeholder="例如 helmet_train_v1" /></label><label>说明<textarea v-model="collectionDescription" rows="3" /></label><label class="inline-check"><input v-model="collectionFreeze" type="checkbox" /> 创建后冻结，作为不可变训练集快照</label></div><div class="dialog-actions"><button class="secondary" @click="collectionOpen=false">取消</button><button class="primary" @click="createCollection">创建数据集</button></div></section></div>
     <div v-if="savedViewOpen" class="modal-stage"><section class="upload-dialog compact-dialog"><button class="close" @click="savedViewOpen=false">×</button><h2>{{editingViewId?'修改保存视图':'保存视图'}}</h2><div class="form-stack"><label>视图名称<input v-model="savedViewName" autofocus @keyup.enter="saveCurrentView" /></label><label>共享范围<select v-model="savedViewScope"><option value="private">仅自己可见</option><option value="team">团队成员可见</option></select></label></div><div class="dialog-actions"><button class="secondary" @click="savedViewOpen=false">取消</button><button class="primary" @click="saveCurrentView">{{editingViewId?'保存修改':'保存视图'}}</button></div></section></div>
     <div v-if="batchResultOpen" class="modal-stage"><section class="upload-dialog batch-result-dialog"><button class="close" @click="batchResultOpen=false">×</button><h2>{{batchResultTitle}}</h2><div class="batch-result-summary"><span class="success">成功 {{batchResult.succeeded_count}} 项</span><span :class="{failed:batchResult.failed_count}">失败 {{batchResult.failed_count}} 项</span></div><div class="batch-result-list"><div v-for="item in batchResult.details" :key="`${item.id}-${item.status}`" :class="item.status"><b :title="item.name">{{item.name}}</b><span>{{item.status==='succeeded'?'成功':'失败'}}</span><small>{{item.message}}</small></div><p v-if="!batchResult.details.length">暂无可展示的结果明细</p></div><small v-if="batchResult.details_truncated" class="result-truncated">数据量较大，仅展示前 1000 项明细</small><div class="dialog-actions"><button class="primary" @click="batchResultOpen=false">完成</button></div></section></div>
     <div v-if="tagOpen" class="modal-stage"><section class="upload-dialog compact-dialog tag-dialog"><button class="close" @click="tagOpen=false">×</button><h2>{{editingTagKey?'修改标签字段':'新建标签字段'}}</h2><div class="form-stack"><label>标签名称<input v-model="newTag.name" placeholder="例如 天气" /></label><label>备注<input v-model="newTag.key" :disabled="Boolean(editingTagKey)" placeholder="例如 weather" /></label><div class="tag-values-editor"><div class="field-label"><span>标签值</span><button class="add-value" type="button" @click="addTagValue">＋ 新增</button></div><p v-if="!tagValueRows.length" class="value-empty">暂无标签值，点击“新增”添加</p><div v-for="row in tagValueRows" :key="row.id" class="tag-value-row"><input v-model="row.value" :disabled="!row.editing" placeholder="请输入标签值" @keyup.enter="row.editing=false" /><button type="button" @click="toggleTagValueEdit(row)">{{row.editing?'完成':'修改'}}</button><button class="remove-value" type="button" @click="removeTagValue(row.id)">删除</button></div></div><label class="color-field">颜色<div class="color-control"><label class="color-picker-button" title="点击选择颜色"><span class="color-swatch large" :style="{background:newTag.color}"></span><span>选择颜色</span><input v-model="tagPickerColor" type="color" aria-label="选择颜色" @change="applyPickerColor" /></label><input v-model="newTag.color" class="color-code" aria-label="颜色值" maxlength="7" placeholder="#64748B" /></div></label><label class="inline-check"><input v-model="newTag.free_input" type="checkbox" /> 允许输入枚举以外的值</label></div><div class="dialog-actions"><button class="secondary" @click="tagOpen=false">取消</button><button class="primary" @click="createTag">保存标签</button></div></section></div>
-    <div v-if="confirmOpen" class="modal-stage confirm-stage"><section class="upload-dialog compact-dialog confirm-dialog"><h2>{{confirmTitle}}</h2><p>{{confirmMessage}}</p><div class="dialog-actions"><button class="secondary" :disabled="confirmBusy" @click="cancelConfirmation">取消</button><button :class="confirmMessage.includes('覆盖原文件')?'confirm-primary':'confirm-delete'" :disabled="confirmBusy" @click="runConfirmedAction">{{confirmBusy?'正在处理…':confirmActionText}}</button></div></section></div>
+    <ConfirmationDialog v-if="confirmOpen" :title="confirmTitle" :message="confirmMessage" :action-text="confirmActionText" :busy="confirmBusy" :usage-impact="confirmUsageImpact" :delete-stage="deleteConfirmationStage" @cancel="cancelConfirmation" @confirm="runConfirmedAction" />
     <div v-if="userOpen" class="modal-stage"><section class="upload-dialog compact-dialog user-dialog"><button class="close" @click="userOpen=false">×</button><h2>{{editingUserId?'编辑用户':'新增用户'}}</h2><div class="form-stack"><label>用户名<input v-model="newUser.username" autocomplete="off" placeholder="至少 3 个字符" /></label><label>{{editingUserId?'新密码（留空则不修改）':'初始密码'}}<input v-model="newUser.password" type="password" autocomplete="new-password" placeholder="至少 8 个字符" /></label><label>角色<select v-model="newUser.role" @change="onUserRoleChange"><option v-for="role in roleDefinitions" :key="role.key" :value="role.key">{{role.name}}</option><option v-for="role in permissionTemplates.filter(item=>!item.built_in)" :key="role.id" :value="`template:${role.id}`">{{role.name}}</option><option value="custom">临时自定义</option></select></label></div><fieldset class="permission-groups" aria-label="菜单与操作权限"><div class="permission-section-head"><strong>菜单与操作权限</strong><div v-if="newUser.role==='custom'" class="permission-bulk-toolbar"><button type="button" class="secondary" @click="selectAllUserPermissions">全选</button><button type="button" class="secondary" @click="clearAllUserPermissions">取消全选</button></div></div><p>{{newUser.role==='custom'?'点击菜单和操作权限可进行调整':'当前角色的权限明细'}}</p><div class="permission-groups-list"><section v-for="group in permissionGroups" :key="group.key" class="permission-menu-group" :class="{enabled:userMenuEnabled(group.key)}"><button type="button" class="permission-menu-title" :class="{allowed:userMenuEnabled(group.key)}" :disabled="newUser.role!=='custom'" @click="toggleUserMenu(group.key)"><span>{{group.name}}</span><b :aria-label="userMenuEnabled(group.key)?'有权限':'无权限'">{{userMenuEnabled(group.key)?'✓':'×'}}</b></button><div v-if="group.actions.length" class="permission-menu-actions"><button v-for="action in group.actions" :key="action.key" type="button" :class="{allowed:userActionEnabled(action.key)}" :disabled="newUser.role!=='custom'||!userMenuEnabled(group.key)" @click="toggleUserAction(action)"><span>{{action.name}}</span><b :aria-label="userActionEnabled(action.key)?'有权限':'无权限'">{{userActionEnabled(action.key)?'✓':'×'}}</b></button></div><small v-else>此菜单没有单独的操作权限</small></section></div></fieldset><label v-if="editingUserId" class="user-status-field">账号状态<select v-model="newUser.status"><option value="active">正常</option><option value="disabled">已停用</option></select></label><div class="dialog-actions"><button class="secondary" @click="userOpen=false">取消</button><button class="primary" @click="createUser">{{editingUserId?'保存修改':'创建用户'}}</button></div></section></div>
     <div v-if="mediaViewerOpen && viewerAsset" class="media-viewer" @click.self="closeMediaViewer"><div class="media-viewer-tools"><button aria-label="缩小" title="缩小" :disabled="mediaViewerZoom<=.25" @click="changeMediaViewerZoom(-.25)">−</button><b>{{Math.round(mediaViewerZoom*100)}}%</b><button aria-label="放大" title="放大" :disabled="mediaViewerZoom>=4" @click="changeMediaViewerZoom(.25)">＋</button><button v-if="viewerAsset.type==='图片' && !pickerPreviewAsset" class="annotation-toggle" :class="{active:mediaViewerAnnotations}" @click="mediaViewerAnnotations=!mediaViewerAnnotations">{{mediaViewerAnnotations?'隐藏标注':'显示标注'}}</button></div><button class="media-viewer-close" aria-label="关闭大图" @click="closeMediaViewer">×</button><div class="media-viewer-scroll"><div v-if="viewerAsset.type==='图片'" class="original-media" :style="originalMediaStyle"><img :src="viewerAsset.download_url||viewerAsset.preview_url" :alt="viewerAsset.name" /><svg v-if="!pickerPreviewAsset && mediaViewerAnnotations && activeAnnotationSource?.items?.length" class="annotation-layer" viewBox="0 0 100 100" preserveAspectRatio="none"><g v-for="item in activeAnnotationSource.items" :key="item.id"><polygon v-for="(polygon,index) in item.polygons || []" :key="`${item.id}-${index}`" :points="polygonPoints(polygon)" :fill="annotationColor(item.label)" fill-opacity=".18" :stroke="annotationColor(item.label)" vector-effect="non-scaling-stroke" /><rect :x="item.bbox.x*100" :y="item.bbox.y*100" :width="item.bbox.width*100" :height="item.bbox.height*100" fill="none" :stroke="annotationColor(item.label)" vector-effect="non-scaling-stroke" /><text :x="item.bbox.x*100" :y="Math.max(3,item.bbox.y*100)" :fill="annotationColor(item.label)" vector-effect="non-scaling-stroke">{{item.label}}</text></g></svg></div><video v-else :src="viewerAsset.download_url" :poster="viewerAsset.preview_url" :style="originalMediaStyle" controls autoplay>当前浏览器不支持播放此视频</video></div></div>
     <div v-if="formatOpen" class="modal-stage"><section class="upload-dialog compact-dialog tag-dialog"><button class="close" @click="formatOpen=false">×</button><h2>{{editingFormatType?'修改格式':'新增格式'}}</h2><div class="form-stack"><label>素材类型<select v-if="!editingFormatType" v-model="newFormatType"><option v-for="type in availableFormatTypes" :key="type" :value="type">{{assetTypeLabels[type]}}</option></select><input v-else :value="assetTypeLabels[editingFormatType]" disabled /></label><label>备注<input v-model="formatRemark" placeholder="请输入备注" /></label><div class="tag-values-editor"><div class="field-label"><span>文件格式</span><button class="add-value" type="button" @click="addFormatValue">＋ 新增</button></div><p v-if="!formatValueRows.length" class="value-empty">暂无文件格式，点击“新增”添加</p><div v-for="row in formatValueRows" :key="row.id" class="tag-value-row"><input v-model="row.value" :disabled="row.protected || !row.editing" placeholder="例如 .jpg" @keyup.enter="row.editing=false" /><template v-if="!row.protected"><button type="button" @click="toggleFormatValueEdit(row)">{{row.editing?'完成':'修改'}}</button><button class="remove-value" type="button" @click="removeFormatValue(row.id)">删除</button></template></div></div></div><div class="dialog-actions"><button class="secondary" @click="formatOpen=false">取消</button><button class="primary" @click="saveFormat">保存格式</button></div></section></div>

@@ -109,10 +109,21 @@ def test_tag_update_rejects_invalid_color():
 
 
 def test_dataset_contracts_support_snapshot_workflow():
-    dataset = DatasetCreate(name="训练集", status="待整理")
+    dataset = DatasetCreate(name="训练集", status="待整理", projects=["烟火检测"])
     assert dataset.remark == ""
+    assert dataset.projects == ["烟火检测"]
+    assert not hasattr(dataset, "algorithms")
     assert DatasetMembersRequest(asset_ids=["a1", "a2"]).asset_ids == ["a1", "a2"]
     assert DatasetPublishRequest(version="v1.1").release_note == ""
+
+
+def test_dataset_projects_are_required_and_unique():
+    with pytest.raises(ValidationError):
+        DatasetCreate(name="训练集", status="待整理")
+    with pytest.raises(ValidationError):
+        DatasetCreate(name="训练集", projects=[])
+    with pytest.raises(ValidationError):
+        DatasetCreate(name="训练集", projects=["烟火检测", "烟火检测"])
 
 
 def test_dataset_members_cannot_be_empty():

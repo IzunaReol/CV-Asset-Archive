@@ -31,6 +31,7 @@ from ..schemas import (
     DatasetExportRequest,
     DatasetMembersRequest,
     DatasetModelLinkRequest,
+    DatasetModelRemarkUpdate,
     DatasetPublishRequest,
     DatasetRestoreRequest,
     DatasetUpdate,
@@ -159,6 +160,15 @@ async def _validate_status(value: str) -> None:
         raise AppError(400, "DATASET_STATUS_INVALID", "状态不在标签管理的可选值中")
 
 
+async def _validate_projects(values: list[str]) -> None:
+    definition = await db.tag_definitions.find_one({"key": "project"})
+    options = (definition or {}).get("values", [])
+    if not options:
+        raise AppError(400, "DATASET_PROJECT_UNAVAILABLE", "请先在标签管理中添加项目")
+    if any(value not in options for value in values):
+        raise AppError(400, "DATASET_PROJECT_INVALID", "所属项目不在标签管理的可选值中")
+
+
 async def _get_dataset(dataset_id: str) -> dict[str, Any]:
     dataset = await db.datasets.find_one({"id": dataset_id, "deleted_at": None})
     if dataset is None:
@@ -236,6 +246,8 @@ async def _dataset_summary(dataset: dict[str, Any]) -> dict[str, Any]:
         counts[row["_id"]] = row["count"]
         total_size += row["size"]
     result = public_document(dataset) or {}
+    result.pop("algorithms", None)
+    result.setdefault("projects", [])
     result.update({"member_count": sum(counts.values()), "counts": counts, "total_size": total_size})
     return result
 
@@ -260,6 +272,8 @@ async def _dataset_summaries(datasets: list[dict[str, Any]]) -> list[dict[str, A
     result = []
     for item in datasets:
         summary = public_document(item) or {}
+        summary.pop("algorithms", None)
+        summary.setdefault("projects", [])
         summary.update({"member_count": sum(counts[item["id"]].values()),
                         "counts": counts[item["id"]], "total_size": sizes[item["id"]]})
         result.append(summary)
@@ -269,10 +283,12 @@ async def _dataset_summaries(datasets: list[dict[str, Any]]) -> list[dict[str, A
 @router.post("", status_code=201)
 async def create_dataset(body: DatasetCreate, request: Request, user: DatasetCreateEditUser) -> dict[str, Any]:
     await _validate_status(body.status)
+    await _validate_projects(body.projects)
     timestamp = now()
     dataset = {
         "id": new_id(), "name": body.name.strip(), "remark": body.remark,
-        "status": body.status, "current_version_id": None, "current_version": None,
+        "status": body.status, "projects": body.projects,
+        "current_version_id": None, "current_version": None,
         "created_by": user["id"], "created_by_name": user.get("username", user["id"]),
         "created_at": timestamp, "updated_at": timestamp, "deleted_at": None,
     }
@@ -354,7 +370,12 @@ async def copy_dataset(dataset_id: str, body: DatasetCopyRequest, request: Reque
     name = body.name.strip()
     if not name:
         raise AppError(400, "DATASET_NAME_EMPTY", "请输入数据集名称")
-    copied = await create_dataset(DatasetCreate(name=name, remark=original.get("remark", ""), status=original["status"]), request, user)
+    if not original.get("projects"):
+        raise AppError(400, "DATASET_PROJECT_REQUIRED", "请先编辑原数据集并补全所属项目")
+    copied = await create_dataset(DatasetCreate(
+        name=name, remark=original.get("remark", ""), status=original["status"],
+        projects=original["projects"],
+    ), request, user)
     try:
         if body.include_assets:
             cursor = await db.dataset_memberships.aggregate([
@@ -408,7 +429,8 @@ async def get_dataset(dataset_id: str, user: DatasetReadUser) -> dict[str, Any]:
 async def update_dataset(dataset_id: str, body: DatasetUpdate, request: Request, user: DatasetCreateEditUser) -> dict[str, Any]:
     await _get_dataset(dataset_id)
     await _validate_status(body.status)
-    await db.datasets.update_one({"id": dataset_id}, {"$set": {"name": body.name.strip(), "remark": body.remark, "status": body.status, "updated_at": now()}})
+    await _validate_projects(body.projects)
+    await db.datasets.update_one({"id": dataset_id}, {"$set": {"name": body.name.strip(), "remark": body.remark, "status": body.status, "projects": body.projects, "updated_at": now()}})
     await record_audit(actor=user, action="dataset.updated", object_type="dataset", object_id=dataset_id, request_id=request.state.request_id)
     return await _dataset_summary(await _get_dataset(dataset_id))
 
@@ -645,6 +667,22 @@ async def list_dataset_models(dataset_id: str, user: DatasetReadUser) -> dict[st
             else []
         )
     }
+    configured_metric_ids = {
+        metric_id
+        for model in models.values()
+        for metric_id, value in (model.get("metric_values") or {}).items()
+        if value is not None and str(value).strip()
+    }
+    metric_definitions = {
+        item["id"]: item
+        for item in (
+            await db.metric_definitions.find(
+                {"id": {"$in": list(configured_metric_ids)}}
+            ).to_list(length=len(configured_metric_ids))
+            if configured_metric_ids
+            else []
+        )
+    }
     versions = {
         item["id"]: item
         for item in (
@@ -661,6 +699,19 @@ async def list_dataset_models(dataset_id: str, user: DatasetReadUser) -> dict[st
                 "relation": public_document(relation),
                 "model": models.get(relation["source_id"]),
                 "version": public_document(versions.get(relation["target_id"])),
+                "configured_parameters": sorted(
+                    [
+                        {
+                            "id": metric_id,
+                            "name": metric_definitions[metric_id]["name"],
+                            "category": metric_definitions[metric_id]["category"],
+                            "value": str(value),
+                        }
+                        for metric_id, value in (models[relation["source_id"]].get("metric_values") or {}).items()
+                        if metric_id in metric_definitions and value is not None and str(value).strip()
+                    ],
+                    key=lambda item: (item["category"], item["name"]),
+                ),
             }
             for relation in relations
             if relation["source_id"] in models
@@ -762,6 +813,42 @@ async def add_dataset_model(
         "existing": len(existing),
         "member_relations": 0,
     }
+
+
+@router.patch("/{dataset_id}/models/{relation_id}")
+@serialize_dataset_write
+async def update_dataset_model_remark(
+    dataset_id: str, relation_id: str, body: DatasetModelRemarkUpdate,
+    request: Request, user: DatasetModelUser,
+) -> dict[str, Any]:
+    await _get_dataset(dataset_id)
+    relation = await db.relations.find_one(
+        {"id": relation_id, "relation_type": "trained_on", "status": "active"}
+    )
+    if relation is None:
+        raise AppError(404, "RELATION_NOT_FOUND", "模型关联关系不存在")
+    version = await db.dataset_versions.find_one(
+        {"id": relation["target_id"], "dataset_id": dataset_id}
+    )
+    if version is None:
+        raise AppError(400, "DATASET_MODEL_LINK_INVALID", "该关系不属于当前数据集")
+    previous_remark = (relation.get("provenance") or {}).get("remark", "")
+    remark = body.remark.strip()
+    result = await db.relations.update_one(
+        {"id": relation_id, "relation_type": "trained_on", "status": "active"},
+        {"$set": {"provenance.remark": remark}},
+    )
+    if not result.matched_count:
+        raise AppError(404, "RELATION_NOT_FOUND", "模型关联关系不存在")
+    await record_audit(
+        actor=user, action="dataset.model_link_remark_updated",
+        object_type="relation", object_id=relation_id,
+        request_id=request.state.request_id,
+        changes={"dataset_id": dataset_id, "version_id": relation["target_id"],
+                 "previous_remark": previous_remark, "remark": remark},
+    )
+    relation.setdefault("provenance", {})["remark"] = remark
+    return {"relation": public_document(relation)}
 
 
 @router.delete("/{dataset_id}/models/{relation_id}")

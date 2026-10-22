@@ -115,18 +115,27 @@ async def preview_role_impact(role_ref: str, body: RoleTemplateBody, user: RoleM
         current = await db.role_overrides.find_one({"key": role_key}) or {}
         current_menus = current.get("menu_permissions", ROLE_MENU_PERMISSIONS[role_key])
         current_actions = current.get("action_permissions", ROLE_ACTION_PERMISSIONS[role_key])
-        query = {"roles": role_key, "status": "active"}
+        query = {"roles": role_key}
     else:
         current = await db.role_templates.find_one({"id": role_ref})
         if current is None:
             raise AppError(404, "ROLE_TEMPLATE_NOT_FOUND", "角色不存在")
         current_menus = current.get("menu_permissions", [])
         current_actions = current.get("action_permissions", [])
-        query = {"role_template_id": role_ref, "status": "active"}
-    users = await db.users.find(query, {"_id": 0, "username": 1}).sort("username", 1).limit(50).to_list(length=50)
+        query = {"role_template_id": role_ref}
+    users = await db.users.find(
+        query, {"_id": 0, "username": 1, "status": 1},
+    ).sort("username", 1).limit(100).to_list(length=100)
+    affected_count = await db.users.count_documents(query)
+    active_count = await db.users.count_documents({**query, "status": "active"})
+    disabled_count = await db.users.count_documents({**query, "status": "disabled"})
     return {
-        "affected_count": await db.users.count_documents(query),
+        "affected_count": affected_count,
         "usernames": [item["username"] for item in users],
+        "users": users,
+        "active_count": active_count,
+        "disabled_count": disabled_count,
+        "users_truncated": affected_count > len(users),
         "menus_added": sorted(set(body.menu_permissions) - set(current_menus)),
         "menus_removed": sorted(set(current_menus) - set(body.menu_permissions)),
         "actions_added": sorted(set(body.action_permissions) - set(current_actions)),

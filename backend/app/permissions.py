@@ -3,22 +3,24 @@ from typing import Any, Literal
 from .schemas import Role
 
 MenuPermission = Literal[
-    "overview", "library", "datasets", "relations", "lineage", "downloads", "trash",
-    "tags", "formats", "admin", "roles", "logs",
+    "overview", "project_overview", "library", "datasets", "relations", "lineage", "downloads", "trash",
+    "tags", "formats", "parameters", "admin", "roles", "logs",
 ]
 ActionPermission = Literal[
     "asset_upload", "asset_edit", "asset_delete", "saved_view_manage",
     "dataset_create_edit", "dataset_members_manage", "dataset_version_publish",
     "dataset_version_restore", "dataset_delete", "dataset_model_manage", "dataset_manage",
     "relation_manage", "relation_revoke", "export_create", "trash_manage",
-    "tag_manage", "format_manage", "user_manage", "role_manage",
+    "tag_manage", "format_manage", "parameter_manage", "user_manage", "role_manage",
 ]
 
 MENU_DEFINITIONS = [
-    {"key": "overview", "name": "系统概览"}, {"key": "library", "name": "素材库"}, {"key": "datasets", "name": "数据集"},
+    {"key": "overview", "name": "系统概览"}, {"key": "project_overview", "name": "项目概览"},
+    {"key": "library", "name": "素材库"}, {"key": "datasets", "name": "数据集"},
     {"key": "relations", "name": "关联关系"}, {"key": "lineage", "name": "模型溯源"},
     {"key": "downloads", "name": "任务中心"}, {"key": "trash", "name": "回收站"},
     {"key": "tags", "name": "标签管理"}, {"key": "formats", "name": "格式管理"},
+    {"key": "parameters", "name": "参数管理"},
     {"key": "admin", "name": "用户管理"}, {"key": "roles", "name": "角色管理"}, {"key": "logs", "name": "系统日志"},
 ]
 ACTION_DEFINITIONS = [
@@ -38,6 +40,7 @@ ACTION_DEFINITIONS = [
     {"key": "trash_manage", "name": "管理回收站", "menu": "trash"},
     {"key": "tag_manage", "name": "管理标签", "menu": "tags"},
     {"key": "format_manage", "name": "管理格式", "menu": "formats"},
+    {"key": "parameter_manage", "name": "管理模型指标参数", "menu": "parameters"},
     {"key": "user_manage", "name": "管理用户", "menu": "admin"},
     {"key": "role_manage", "name": "管理角色", "menu": "roles"},
 ]
@@ -47,10 +50,10 @@ ALL_ACTION_PERMISSIONS = [item["key"] for item in ACTION_DEFINITIONS]
 
 ROLE_MENU_PERMISSIONS = {
     Role.ADMIN.value: ALL_MENU_PERMISSIONS,
-    Role.DATA_MANAGER.value: ["overview", "library", "datasets", "relations", "lineage", "downloads", "trash"],
-    Role.ANNOTATOR.value: ["overview", "library", "datasets", "relations", "downloads"],
-    Role.ML_ENGINEER.value: ["overview", "library", "datasets", "relations", "lineage", "downloads"],
-    Role.VIEWER.value: ["overview", "library", "datasets", "relations", "lineage", "downloads"],
+    Role.DATA_MANAGER.value: ["overview", "project_overview", "library", "datasets", "relations", "lineage", "downloads", "trash"],
+    Role.ANNOTATOR.value: ["overview", "project_overview", "library", "datasets", "relations", "downloads"],
+    Role.ML_ENGINEER.value: ["overview", "project_overview", "library", "datasets", "relations", "lineage", "downloads"],
+    Role.VIEWER.value: ["overview", "project_overview", "library", "datasets", "relations", "lineage", "downloads"],
     Role.CUSTOM.value: [],
 }
 ROLE_ACTION_PERMISSIONS = {

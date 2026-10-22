@@ -84,6 +84,7 @@ class UploadInitRequest(BaseModel):
     project: str = Field(default="未分类", min_length=1, max_length=100)
     sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
     name_conflict: Literal["reject", "overwrite", "rename"] = "reject"
+    expected_overwrite_asset_id: str | None = None
 
 
 class UploadConflictCheckRequest(BaseModel):
@@ -128,6 +129,7 @@ class BatchAssetDeleteRequest(BaseModel):
     asset_ids: list[str] = Field(default_factory=list, max_length=5000)
     selection_id: str | None = None
     excluded_ids: list[str] = Field(default_factory=list, max_length=5000)
+    confirm_linked: bool = False
 
 
 class AssetSelectionCreate(BaseModel):
@@ -179,12 +181,25 @@ class DatasetCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     remark: str = Field(default="", max_length=1000)
     status: str = Field(default="待整理", min_length=1, max_length=50)
+    projects: list[str] = Field(min_length=1, max_length=50)
+    @field_validator("projects")
+    @classmethod
+    def validate_projects(cls, values: list[str]) -> list[str]:
+        cleaned = [value.strip() for value in values]
+        if any(not value or len(value) > 100 for value in cleaned) or len(set(cleaned)) != len(cleaned):
+            raise ValueError("所属项目不能为空、重复或超过100字")
+        return cleaned
 
 
 class DatasetUpdate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     remark: str = Field(default="", max_length=1000)
     status: str = Field(min_length=1, max_length=50)
+    projects: list[str] = Field(min_length=1, max_length=50)
+    @field_validator("projects")
+    @classmethod
+    def validate_projects(cls, values: list[str]) -> list[str]:
+        return DatasetCreate.validate_projects(values)
 
 
 class DatasetMembersRequest(BaseModel):
@@ -218,6 +233,58 @@ class DatasetModelLinkRequest(BaseModel):
     model_id: str
     version_id: str
     remark: str = Field(default="", max_length=1000)
+
+
+class DatasetModelRemarkUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    remark: str = Field(max_length=1000)
+
+
+class MetricDefinitionWrite(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=100)
+    category: str = Field(min_length=1, max_length=100)
+    description: str = Field(min_length=1, max_length=1000)
+
+    @field_validator("name", "category", "description")
+    @classmethod
+    def strip_required_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("内容不能为空")
+        return value
+
+
+class MetricCategoryCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=100)
+
+    @field_validator("name")
+    @classmethod
+    def strip_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("分类名称不能为空")
+        return value
+
+
+class ModelParameterUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    values: dict[str, str | None]
+
+    @field_validator("values")
+    @classmethod
+    def validate_values(cls, values: dict[str, str | None]) -> dict[str, str | None]:
+        if len(values) > 500:
+            raise ValueError("指标数量不能超过 500 项")
+        cleaned: dict[str, str | None] = {}
+        for metric_id, value in values.items():
+            if not metric_id or len(metric_id) > 100:
+                raise ValueError("指标编号无效")
+            if value is not None and len(value.strip()) > 200:
+                raise ValueError("指标值不能超过 200 字符")
+            cleaned[metric_id] = value.strip() or None if value is not None else None
+        return cleaned
 
 
 class SavedViewCreate(BaseModel):

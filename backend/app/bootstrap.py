@@ -30,6 +30,53 @@ DEFAULT_FORMATS = {
     "image_annotation": [".rar", ".zip", ".7z"],
 }
 
+DEFAULT_METRICS = [
+    ("accuracy", "准确率 (Accuracy)", "图像分类", "分类正确的样本比例"),
+    ("precision", "精确率 (Precision)", "图像分类", "正确识别为正类的样本比例"),
+    ("recall", "召回率 (Recall)", "图像分类", "实际为正类的样本中被正确识别的比例"),
+    ("f1", "F1分数 (F1 Score)", "图像分类", "精确率和召回率的调和平均值"),
+    ("map", "mAP (mean Average Precision)", "目标检测", "各类别平均精度的均值，用于衡量目标检测模型的整体性能"),
+    ("iou", "IoU (Intersection over Union)", "目标检测", "预测框与真实框的交并比"),
+    ("ap", "AP (Average Precision)", "目标检测", "基于不同置信度阈值形成的精确率－召回率曲线计算的平均精度"),
+    ("pixel_accuracy", "Pixel Accuracy", "语义分割", "正确分类的像素比例"),
+    ("miou", "Mean Intersection over Union (mIoU)", "语义分割", "所有类别交并比的平均值"),
+    ("dice", "Dice Coefficient", "语义分割", "衡量预测与真实标签的重合程度"),
+    ("instance_map", "mAP (mean Average Precision)", "实例分割", "与目标检测类似，但针对实例级别的预测"),
+    ("instance_iou", "IoU (Intersection over Union)", "实例分割", "实例级别的交并比"),
+    ("cer", "CER (Character Error Rate)", "OCR", "字符错误率，衡量OCR模型的字符识别准确率"),
+    ("wer", "WER (Word Error Rate)", "OCR", "单词错误率，衡量OCR模型的单词识别准确率"),
+    ("pck", "PCK (Percentage of Correct Keypoints)", "姿态和关键点", "关键点正确率，衡量姿态估计模型的准确性"),
+    ("oks", "OKS (Object Keypoint Similarity)", "姿态和关键点", "对象关键点相似度，用于姿态估计任务"),
+]
+
+DEFAULT_METRIC_CATEGORIES = ["图像分类", "目标检测", "语义分割", "实例分割", "OCR", "姿态和关键点"]
+
+
+async def ensure_default_metric_categories() -> None:
+    for order, name in enumerate(DEFAULT_METRIC_CATEGORIES):
+        await db.metric_categories.update_one(
+            {"name": name},
+            {"$setOnInsert": {
+                "id": f"metric-category-{order}", "name": name,
+                "order": order, "built_in": True,
+                "created_at": now(), "updated_at": now(),
+            }},
+            upsert=True,
+        )
+
+
+async def ensure_default_metrics() -> None:
+    for key, name, category, description in DEFAULT_METRICS:
+        await db.metric_definitions.update_one(
+            {"id": f"metric-{key}"},
+            {"$setOnInsert": {
+                "id": f"metric-{key}", "name": name, "category": category,
+                "description": description, "built_in": True,
+                "created_at": now(), "updated_at": now(),
+            }},
+            upsert=True,
+        )
+
 
 async def bootstrap() -> None:
     await run_migrations()
@@ -71,5 +118,7 @@ async def bootstrap() -> None:
             {"$set": {"built_in": True, "protected_extensions": extensions}, "$setOnInsert": {"id": new_id(), "asset_type": asset_type, "remark": "", "extensions": extensions, "created_at": now(), "updated_at": now()}},
             upsert=True,
         )
+    await ensure_default_metric_categories()
+    await ensure_default_metrics()
     await db.format_definitions.delete_one({"asset_type": "other"})
     await asyncio.to_thread(ensure_bucket)

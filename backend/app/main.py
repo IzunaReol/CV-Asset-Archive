@@ -13,7 +13,7 @@ from .bootstrap import bootstrap
 from .config import get_settings
 from .database import db, ping_database
 from .errors import AppError, app_error_handler
-from .routers import admin, assets, auth, collections, datasets, jobs, relations, system, tags
+from .routers import admin, assets, auth, collections, datasets, jobs, model_parameters, parameters, projects, relations, system, tags
 from .storage import storage
 from .utils import new_id
 
@@ -105,7 +105,7 @@ async def lifespan(_: FastAPI):
             pass
 
 
-app = FastAPI(title="CV Archive API", version="1.6.1", lifespan=lifespan)
+app = FastAPI(title="CV Archive API", version="2.0.0", lifespan=lifespan)
 app.add_exception_handler(AppError, app_error_handler)
 app.add_middleware(
     CORSMiddleware,
@@ -216,7 +216,11 @@ app.include_router(assets.router, prefix="/api/v1")
 app.include_router(relations.router, prefix="/api/v1")
 app.include_router(collections.router, prefix="/api/v1")
 app.include_router(datasets.router, prefix="/api/v1")
+app.include_router(projects.router, prefix="/api/v1")
 app.include_router(jobs.router, prefix="/api/v1")
 app.include_router(tags.router, prefix="/api/v1")
+app.include_router(parameters.router, prefix="/api/v1")
+app.include_router(parameters.category_router, prefix="/api/v1")
+app.include_router(model_parameters.router, prefix="/api/v1")
 app.include_router(admin.router, prefix="/api/v1")
 app.include_router(system.router, prefix="/api/v1")

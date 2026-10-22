@@ -75,7 +75,8 @@ def backup(project: str, destination: Path) -> None:
         print(f"备份完成：{destination}（{len(manifest['files'])} 个文件）")
     finally:
         if stopped:
-            compose(project, "up", "-d", *stopped)
+            # Restart exactly the containers stopped above; never resolve or pull images.
+            compose(project, "start", *stopped)
 
 
 def restore(project: str, source: Path, confirmed: bool) -> None:

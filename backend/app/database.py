@@ -17,6 +17,7 @@ async def ensure_indexes() -> None:
     await db.assets.create_index([("archived_at", ASCENDING), ("created_at", DESCENDING)])
     await db.assets.create_index([("archived_at", ASCENDING), ("type", ASCENDING), ("created_at", DESCENDING), ("id", ASCENDING)])
     await db.assets.create_index([("type", ASCENDING), ("normalized_name", ASCENDING), ("archived_at", ASCENDING), ("created_at", DESCENDING)])
+    await db.assets.create_index([("tags.project", ASCENDING), ("archived_at", ASCENDING), ("type", ASCENDING)])
     await db.assets.create_index([("name", "text"), ("project", "text")])
     await db.relations.create_index(
         [
@@ -32,6 +33,7 @@ async def ensure_indexes() -> None:
     await db.collections.create_index([("name", ASCENDING), ("revision", ASCENDING)], unique=True)
     await db.datasets.create_index([("name", ASCENDING)], unique=True)
     await db.datasets.create_index([("status", ASCENDING), ("updated_at", DESCENDING)])
+    await db.datasets.create_index([("projects", ASCENDING), ("deleted_at", ASCENDING)])
     await db.dataset_memberships.create_index(
         [("dataset_id", ASCENDING), ("asset_id", ASCENDING)], unique=True
     )
@@ -64,6 +66,10 @@ async def ensure_indexes() -> None:
     await db.asset_selection_sets.create_index("expires_at", expireAfterSeconds=0)
     await db.upload_sessions.create_index("expires_at", expireAfterSeconds=0)
     await db.tag_definitions.create_index("key", unique=True)
+    await db.metric_definitions.create_index([("category", ASCENDING), ("name", ASCENDING)], unique=True)
+    await db.metric_definitions.create_index("id", unique=True)
+    await db.metric_categories.create_index("name", unique=True)
+    await db.metric_categories.create_index("id", unique=True)
     await db.audit_logs.create_index([("created_at", DESCENDING)])
     await db.audit_logs.create_index("expires_at", expireAfterSeconds=0)
     await db.audit_logs.create_index(

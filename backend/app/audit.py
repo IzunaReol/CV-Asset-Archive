@@ -14,6 +14,8 @@ AUDIT_OBJECT_SOURCES = {
     "role_template": ("role_templates", "name"),
     "tag_definition": ("tag_definitions", "name"),
     "format_definition": ("format_definitions", "asset_type"),
+    "metric_definition": ("metric_definitions", "name"),
+    "metric_category": ("metric_categories", "name"),
     "collection": ("collections", "name"),
     "saved_view": ("saved_views", "name"),
 }

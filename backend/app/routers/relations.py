@@ -401,6 +401,7 @@ async def preview_annotation_matches(
 async def list_relations(
     user: RelationReadUser,
     q: str = "",
+    asset_id: str = "",
     relation_type: RelationFilterType | None = None,
     created_by: str = "",
     status: RelationStatus | None = Query(None),
@@ -415,6 +416,10 @@ async def list_relations(
     ]}]
     if status:
         clauses.append({"status": getattr(status, "value", status)})
+    if asset_id.strip():
+        clauses.append({"$or": [
+            {"source_id": asset_id.strip()}, {"target_id": asset_id.strip()},
+        ]})
     if relation_type:
         clauses.append({"relation_type": getattr(relation_type, "value", relation_type)})
     if created_by.strip():

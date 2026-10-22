@@ -220,7 +220,7 @@ async def test_list_relations_applies_filters_and_resolves_names(monkeypatch):
     ))
 
     result = await relations.list_relations(
-        user(), q="训练", relation_type="trained_on", created_by="管理", status="active",
+        user(), q="训练", asset_id="a1", relation_type="trained_on", created_by="管理", status="active",
         created_from="2026-01-01T00:00:00", created_to="2026-12-31T23:59:59",
         page=1, page_size=10,
     )
@@ -228,6 +228,7 @@ async def test_list_relations_applies_filters_and_resolves_names(monkeypatch):
     assert result["total"] == 1
     assert result["items"][0]["source_name"] == "模型"
     assert result["items"][0]["target_name"] == "训练集 v1"
+    assert {"$or": [{"source_id": "a1"}, {"target_id": "a1"}]} in relation_store.count_documents.call_args.args[0]["$and"]
 
 
 @pytest.mark.asyncio

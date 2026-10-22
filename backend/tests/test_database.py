@@ -14,7 +14,7 @@ async def test_ensure_indexes_creates_all_required_indexes(monkeypatch):
             "users", "refresh_sessions", "assets", "relations", "collections", "datasets",
             "dataset_memberships", "dataset_versions", "dataset_version_memberships",
             "dataset_restore_backups", "jobs",
-            "asset_selection_sets", "upload_sessions", "tag_definitions", "audit_logs",
+            "asset_selection_sets", "upload_sessions", "tag_definitions", "metric_definitions", "metric_categories", "audit_logs",
             "maintenance_runs", "saved_views", "role_templates", "role_overrides",
         )
     }
@@ -23,7 +23,8 @@ async def test_ensure_indexes_creates_all_required_indexes(monkeypatch):
     await database.ensure_indexes()
 
     assert collections["users"].create_index.await_count == 1
-    assert collections["assets"].create_index.await_count == 5
+    assert collections["assets"].create_index.await_count == 6
+    assert collections["datasets"].create_index.await_count == 3
     assert collections["relations"].create_index.await_count == 3
     assert collections["jobs"].create_index.await_count == 6
     assert collections["maintenance_runs"].create_index.await_count == 2

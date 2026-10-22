@@ -23,7 +23,11 @@
 .\start-windows.cmd
 ```
 
-需要重新构建时再次运行 `deploy-windows.cmd`。停止服务：
+需要重新构建时再次运行 `deploy-windows.cmd`。
+
+API 镜像的 Python 依赖在独立层安装：首次采用新 Dockerfile 构建仍需下载依赖；之后仅修改 `backend/app` 时会复用该层。修改 `backend/pyproject.toml` 或基础镜像时会重新安装依赖。
+
+停止服务：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\stop.ps1
@@ -87,6 +91,21 @@ powershell -ExecutionPolicy Bypass -File scripts/import-offline.ps1 -Bundle cv-a
 ```
 
 ## 发布前检查
+
+### v2.0.0 升级准备
+
+先备份 MongoDB、MinIO 与独立保存的部署配置，保留旧镜像。用户确认发布后，在仓库根目录执行：
+
+```powershell
+docker compose --env-file .env -f deploy/docker-compose.yml build api worker frontend
+docker compose --env-file .env -f deploy/docker-compose.yml up -d --no-deps --no-build --pull never api worker frontend
+```
+
+以上启动命令仅使用已构建的本地应用镜像，要求基础服务已运行；缺失镜像时应明确报错，不临时拉取。版本号修改位于 `pyproject.toml`，因此此次构建可能使 Python 依赖层失效，不能承诺首次升级不安装依赖。备份结束后的服务恢复使用 `compose start`，只启动先前停止的容器；恢复到全新 Compose 项目的脚本仍使用 `up`，不能视为严格离线恢复。
+
+启动时补齐默认指标；旧数据集编辑或复制前补齐所属项目。验证项目概览、参数保存、数据集返回列表、使用影响及服务健康。回滚镜像不会恢复已删除的关联，数据恢复须使用对应备份。版本范围及未完成验收见 [v2.0.0 发布说明](../docs/releases/v2.0.0.md)。
+
+### 通用检查
 
 1. 验证 `/health/ready` 返回 MongoDB、MinIO、Redis 全部正常。
 2. 验证登录、上传、预览、后台任务、回收站和导出。

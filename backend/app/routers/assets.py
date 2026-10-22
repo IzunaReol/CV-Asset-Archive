@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import json
 import logging
 import re
 import shutil
@@ -12,6 +13,7 @@ from fastapi import APIRouter, Query, Request
 from pymongo import ASCENDING, DESCENDING, UpdateOne
 
 from ..annotation_overlay import parse_annotation_overlay
+from ..asset_impact import usage_impact
 from ..audit import record_audit
 from ..config import get_settings
 from ..database import db
@@ -251,6 +253,7 @@ async def check_upload_conflicts(
             "asset_type": asset_type,
             "existing_count": len(matches),
             "existing_asset_id": matches[0]["id"],
+            "overwrite_target_id": name_matches[0]["id"] if name_matches else None,
             "has_active_relations": any(match["id"] in related_ids for match in matches),
             "match_kind": match_kind,
             "items": conflict_items,
@@ -289,6 +292,10 @@ async def initialize_upload(body: UploadInitRequest, user: AssetUploadUser) -> d
     overwrite_asset = name_matches[0] if name_matches and body.name_conflict == "overwrite" else None
     if body.name_conflict == "overwrite":
         ensure_action_access(user, "asset_delete")
+        if body.expected_overwrite_asset_id and (
+            not overwrite_asset or overwrite_asset["id"] != body.expected_overwrite_asset_id
+        ):
+            raise AppError(409, "OVERWRITE_TARGET_CHANGED", "待覆盖素材已变化，请重新检查使用影响")
     if name_matches and body.name_conflict == "reject":
         raise AppError(409, "ASSET_NAME_CONFLICT", "素材库中已存在同名同类型文件")
     if name_matches and body.name_conflict == "rename":
@@ -599,13 +606,18 @@ async def complete_upload(
 
 
 @router.get("/{asset_id}/history")
-async def asset_operation_history(asset_id: str, user: AssetReadUser) -> dict[str, Any]:
+async def asset_operation_history(
+    asset_id: str, user: AssetReadUser,
+    page: int = Query(1, ge=1), page_size: int = Query(100, ge=1, le=200),
+) -> dict[str, Any]:
     if await db.assets.find_one({"id": asset_id}, {"id": 1}) is None:
         raise AppError(404, "ASSET_NOT_FOUND", "素材不存在")
-    cursor = db.audit_logs.find({"object_type": "asset", "object_id": asset_id}).sort(
-        "created_at", DESCENDING
-    ).limit(100)
-    return {"items": [public_document(item) async for item in cursor]}
+    query = {"object_type": "asset", "object_id": asset_id}
+    cursor = db.audit_logs.find(query).sort(
+        [("created_at", DESCENDING), ("id", DESCENDING)]
+    ).skip((page - 1) * page_size).limit(page_size)
+    return {"items": [public_document(item) async for item in cursor],
+            "total": await db.audit_logs.count_documents(query), "page": page, "page_size": page_size}
 
 
 async def run_upload_windows(items: list[Any], worker: Any) -> list[dict[str, Any]]:
@@ -780,6 +792,16 @@ async def list_assets(
         item["has_annotation"] = item["id"] in annotated_ids
     return {"items": items, "page": page, "page_size": page_size, "total": total,
             "next_cursor": items[-1]["id"] if len(items) == page_size else None}
+
+
+@router.post("/usage-impact")
+async def preview_usage_impact(
+    body: BatchAssetDeleteRequest, user: AssetReadUser
+) -> dict[str, Any]:
+    ids = await resolve_selection_ids(user, body.asset_ids, body.selection_id, body.excluded_ids)
+    if not ids:
+        raise AppError(400, "SELECTION_EMPTY", "没有可查询的素材")
+    return await usage_impact(ids)
 
 
 @router.get("/{asset_id}")
@@ -968,6 +990,15 @@ async def batch_delete(
     requested_ids = await resolve_selection_ids(user, body.asset_ids, body.selection_id, body.excluded_ids)
     if not requested_ids:
         raise AppError(400, "SELECTION_EMPTY", "没有可删除的素材")
+    if not body.confirm_linked:
+        linked_query = {"asset_id": {"$in": requested_ids}}
+        relation_query = {"status": "active", "$or": [
+            {"source_id": {"$in": requested_ids}}, {"target_id": {"$in": requested_ids}},
+        ]}
+        if (await db.dataset_memberships.find_one(linked_query)
+                or await db.dataset_version_memberships.find_one(linked_query)
+                or await db.relations.find_one(relation_query)):
+            raise AppError(409, "ASSET_RELATIONS_CONFIRM_REQUIRED", "素材关联关系已变化，请重新查看使用影响并确认")
     if len(requested_ids) > 5000:
         succeeded_count = failed_count = 0
         failures: list[dict[str, str]] = []
@@ -975,7 +1006,8 @@ async def batch_delete(
         details_truncated = False
         for offset in range(0, len(requested_ids), 5000):
             result = await batch_delete(
-                BatchAssetDeleteRequest(asset_ids=requested_ids[offset:offset + 5000]), request, user
+                BatchAssetDeleteRequest(asset_ids=requested_ids[offset:offset + 5000],
+                                        confirm_linked=body.confirm_linked), request, user
             )
             succeeded_count += len(result["succeeded"])
             failed_count += len(result["failed"])
@@ -985,52 +1017,66 @@ async def batch_delete(
         return {"succeeded": [], "succeeded_count": succeeded_count,
                 "failed": failures, "failed_count": failed_count, "details": details,
                 "details_truncated": details_truncated or succeeded_count + failed_count > len(details)}
-    current_member_ids = set(
-        await db.dataset_memberships.distinct("asset_id", {"asset_id": {"$in": requested_ids}})
-    )
-    protected_version_cursor = await db.dataset_version_memberships.aggregate(
-        [
-            {"$match": {"asset_id": {"$in": requested_ids}}},
-            {"$lookup": {"from": "dataset_versions", "localField": "version_id", "foreignField": "id", "as": "version"}},
-            {"$unwind": "$version"},
-            {"$lookup": {"from": "datasets", "localField": "version.dataset_id", "foreignField": "id", "as": "dataset"}},
-            {"$unwind": "$dataset"},
-            {"$match": {"dataset.deleted_at": None}},
-            {"$project": {"asset_id": 1}},
-        ]
-    )
-    protected_version_rows = await protected_version_cursor.to_list(length=len(requested_ids))
-    version_member_ids = {item["asset_id"] for item in protected_version_rows}
-    protected_ids = current_member_ids | version_member_ids
     asset_names = {item["id"]: item.get("name", item["id"]) async for item in db.assets.find(
         {"id": {"$in": requested_ids}}, {"id": 1, "name": 1}
     )}
-    deletable_ids = [asset_id for asset_id in requested_ids if asset_id not in protected_ids]
     timestamp = now()
     result = await db.assets.update_many(
-        {"id": {"$in": deletable_ids}, "archived_at": None},
+        {"id": {"$in": requested_ids}, "archived_at": None},
         {"$set": {"archived_at": timestamp, "updated_at": timestamp}},
     )
     existing = set(
-        await db.assets.distinct("id", {"id": {"$in": deletable_ids}, "archived_at": timestamp})
+        await db.assets.distinct("id", {"id": {"$in": requested_ids}, "archived_at": timestamp})
     )
     succeeded = [asset_id for asset_id in requested_ids if asset_id in existing]
     failed = [
-        {"id": asset_id, "code": "ASSET_IN_DATASET", "message": "该素材已添加到数据集，无法删除"}
-        for asset_id in requested_ids
-        if asset_id in protected_ids
-    ] + [
         {"id": asset_id, "code": "ASSET_NOT_FOUND", "message": "素材不存在"}
         for asset_id in requested_ids
-        if asset_id not in existing and asset_id not in protected_ids
+        if asset_id not in existing
     ]
+    current_members_deleted = version_members_deleted = relations_deleted = 0
+    if succeeded:
+        succeeded_query = {"asset_id": {"$in": succeeded}}
+        dataset_ids = await db.dataset_memberships.distinct("dataset_id", succeeded_query)
+        version_ids = await db.dataset_version_memberships.distinct("version_id", succeeded_query)
+        current_members_deleted = (await db.dataset_memberships.delete_many(succeeded_query)).deleted_count
+        version_members_deleted = (await db.dataset_version_memberships.delete_many(succeeded_query)).deleted_count
+        relations_deleted = (await db.relations.delete_many({"$or": [
+            {"source_id": {"$in": succeeded}}, {"target_id": {"$in": succeeded}},
+        ]})).deleted_count
+        if version_ids:
+            versions = await db.dataset_versions.find(
+                {"id": {"$in": version_ids}}, {"id": 1, "dataset_id": 1}
+            ).to_list(length=len(version_ids))
+            dataset_ids.extend(version["dataset_id"] for version in versions)
+            for version in versions:
+                members = await db.dataset_version_memberships.find(
+                    {"version_id": version["id"]}, {"asset_id": 1, "snapshot": 1}
+                ).sort("asset_id", ASCENDING).to_list(length=None)
+                content = [{"asset_id": member["asset_id"], "snapshot": member["snapshot"]}
+                           for member in members]
+                digest = hashlib.sha256(json.dumps(
+                    content, ensure_ascii=False, sort_keys=True, default=str,
+                ).encode()).hexdigest()
+                await db.dataset_versions.update_one({"id": version["id"]}, {"$set": {
+                    "member_count": len(members),
+                    "total_size": sum(int(member["snapshot"].get("size") or 0) for member in members),
+                    "content_digest": digest,
+                }})
+        if dataset_ids:
+            await db.datasets.update_many(
+                {"id": {"$in": list(set(dataset_ids))}}, {"$set": {"updated_at": timestamp}},
+            )
     await record_audit(
         actor=user,
         action="asset.batch_deleted",
         object_type="asset",
         object_id="batch",
         request_id=request.state.request_id,
-        changes={"asset_ids": succeeded, "count": result.modified_count},
+        changes={"asset_ids": succeeded, "count": result.modified_count,
+                 "current_members_deleted": current_members_deleted,
+                 "version_members_deleted": version_members_deleted,
+                 "relations_deleted": relations_deleted},
     )
     details = [
         {"id": asset_id, "name": asset_names.get(asset_id, asset_id), "status": "succeeded", "message": "已移入回收站"}
@@ -1048,12 +1094,15 @@ async def batch_delete(
 
 
 @router.post("/{asset_id}/archive")
-async def archive_asset(asset_id: str, request: Request, user: AssetDeleteUser) -> dict[str, str]:
-    result = await batch_delete(BatchAssetDeleteRequest(asset_ids=[asset_id]), request, user)
+async def archive_asset(
+    asset_id: str, request: Request, user: AssetDeleteUser, confirm_linked: bool = False
+) -> dict[str, str]:
+    result = await batch_delete(
+        BatchAssetDeleteRequest(asset_ids=[asset_id], confirm_linked=confirm_linked), request, user
+    )
     if result["failed"]:
         failure = result["failed"][0]
-        status_code = 409 if failure["code"] in {"ASSET_PROCESSING", "ASSET_IN_DATASET"} else 404
-        raise AppError(status_code, failure["code"], failure["message"])
+        raise AppError(404, failure["code"], failure["message"])
     return {"id": asset_id, "status": "archived"}
 
 

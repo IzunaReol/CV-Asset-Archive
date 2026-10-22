@@ -132,8 +132,11 @@ export const api = {
   createAssetSelection: (body:Record<string,unknown>) => request<{selection_id:string;total:number}>('/assets/selection-sets', {method:'POST',body:JSON.stringify(body)}),
   assetStats: () => request<AssetStats>('/assets/stats'),
   asset: (id:string) => request<any>(`/assets/${id}`),
-  assetHistory: (id:string) => request<any>(`/assets/${id}/history`),
+  previewAssetUsage: (body:Record<string,unknown>) => request<any>('/assets/usage-impact', {method:'POST',body:JSON.stringify(body)}),
+  assetHistory: (id:string, page=1) => request<any>(`/assets/${id}/history${page>1?`?page=${page}`:''}`),
   updateAssetRemark: (id:string, remark:string) => request<any>(`/assets/${id}/remark`, {method:'PATCH',body:JSON.stringify({remark})}),
+  modelParameters: (id:string) => request<{asset_id:string;items:Array<{id:string;name:string;category:string;description:string;value:string|null}>}>(`/assets/${encodeURIComponent(id)}/parameters`),
+  updateModelParameters: (id:string, values:Record<string,string|null>) => request<{asset_id:string;items:Array<{id:string;name:string;category:string;description:string;value:string|null}>}>(`/assets/${encodeURIComponent(id)}/parameters`, {method:'PATCH',body:JSON.stringify({values})}),
   annotationOverlays: (id:string) => request<any>(`/assets/${id}/annotation-overlays`),
   archiveAsset: (id:string) => request<any>(`/assets/${id}/archive`, {method:'POST'}),
   initUpload: (body:Record<string, unknown>) => request<any>('/assets/upload-sessions', {method:'POST',body:JSON.stringify(body)}),
@@ -181,6 +184,7 @@ export const api = {
   datasetVersions: (id:string) => request<any>(`/datasets/${id}/versions`),
   datasetModels: (id:string) => request<any>(`/datasets/${id}/models`),
   addDatasetModel: (id:string, body:Record<string,unknown>) => request<any>(`/datasets/${id}/models`, {method:'POST',body:JSON.stringify(body)}),
+  updateDatasetModelRemark: (id:string, relationId:string, remark:string) => request<any>(`/datasets/${id}/models/${relationId}`, {method:'PATCH',body:JSON.stringify({remark})}),
   removeDatasetModel: (id:string, relationId:string) => request<any>(`/datasets/${id}/models/${relationId}`, {method:'DELETE'}),
   publishDatasetVersion: (id:string, version:string, releaseNote:string) => request<any>(`/datasets/${id}/versions`, {method:'POST',body:JSON.stringify({version,release_note:releaseNote})}),
   compareDatasetVersions: (id:string, fromId:string, toId:string) => request<any>(`/datasets/${id}/compare?from_version_id=${encodeURIComponent(fromId)}&to_version_id=${encodeURIComponent(toId)}`),
@@ -215,6 +219,14 @@ export const api = {
   createFormat: (body:Record<string, unknown>) => request<any>('/format-definitions', {method:'POST',body:JSON.stringify(body)}),
   updateFormat: (type:string, body:Record<string, unknown>) => request<any>(`/format-definitions/${encodeURIComponent(type)}`, {method:'PATCH',body:JSON.stringify(body)}),
   deleteFormat: (type:string) => request<void>(`/format-definitions/${encodeURIComponent(type)}`, {method:'DELETE'}),
+  metrics: () => request<{items:Array<{id:string;name:string;category:string;description:string;built_in:boolean}>}>('/metric-definitions'),
+  metricCategories: () => request<{items:Array<{id:string;name:string;built_in:boolean}>}>('/metric-categories'),
+  createMetricCategory: (name:string) => request<{id:string;name:string;built_in:boolean}>('/metric-categories', {method:'POST',body:JSON.stringify({name})}),
+  updateMetricCategory: (id:string, name:string) => request<{id:string;name:string;built_in:boolean}>(`/metric-categories/${encodeURIComponent(id)}`, {method:'PATCH',body:JSON.stringify({name})}),
+  deleteMetricCategory: (id:string) => request<void>(`/metric-categories/${encodeURIComponent(id)}`, {method:'DELETE'}),
+  createMetric: (body:{name:string;category:string;description:string}) => request<any>('/metric-definitions', {method:'POST',body:JSON.stringify(body)}),
+  updateMetric: (id:string, body:{name:string;category:string;description:string}) => request<any>(`/metric-definitions/${encodeURIComponent(id)}`, {method:'PATCH',body:JSON.stringify(body)}),
+  deleteMetric: (id:string) => request<void>(`/metric-definitions/${encodeURIComponent(id)}`, {method:'DELETE'}),
   auditLogs: (filters:Record<string,string|number>={}) => {
     const params=new URLSearchParams()
     for (const [key,value] of Object.entries(filters)) if (value !== '') params.set(key,String(value))
@@ -227,5 +239,10 @@ export const api = {
   },
   health: () => request<any>('/system/health', {}, false),
   overview: () => request<any>('/system/overview'),
+  projectOverview: (projects:string[]) => {
+    const params = new URLSearchParams()
+    projects.forEach(project => params.append('projects', project))
+    return request<any>(`/projects/overview?${params}`)
+  },
   globalSearch: (q:string) => request<any>(`/system/search?q=${encodeURIComponent(q)}`),
 }

@@ -1,5 +1,7 @@
 # 异步任务服务
 
+当前版本与 API、前端统一为 **2.0.0**。本版模型参数作为 MongoDB 元数据由 API 维护，Worker 不计算指标或连接 MLflow。升级与验证边界见[发布说明](../docs/releases/v2.0.0.md)。
+
 Celery Worker 当前负责：
 
 - SHA-256 校验、图片信息和缩略图；
