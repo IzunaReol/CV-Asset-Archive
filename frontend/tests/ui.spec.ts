@@ -17,6 +17,21 @@ const tokens = {
   user: { id: 'admin', username: 'admin', roles: ['admin'] },
 }
 
+test('品牌图标在页头、登录页和浏览器标签中保持一致', async ({ page }) => {
+  await mockApi(page)
+  await page.goto('/')
+  const logo = page.locator('.brand img.brand-mark')
+  await expect(logo).toBeVisible()
+  await expect(page.locator('.login-brand img.brand-mark')).toHaveAttribute('src', await logo.getAttribute('src') || '')
+  const iconPath = await page.locator('link[rel="icon"]').getAttribute('href')
+  expect(iconPath?.split('?')[0]).toBe((await logo.getAttribute('src'))?.split('?')[0])
+  const icon = await page.request.get(iconPath!)
+  expect(icon.ok()).toBeTruthy()
+  expect(icon.headers()['content-type']).toContain('image/svg+xml')
+  await expect(logo).toHaveJSProperty('naturalWidth', 64)
+  await page.locator('.login-brand').screenshot({ path: 'test-results/brand-preview.png' })
+})
+
 test('系统概览独立页面可加载、刷新并跳转', async ({ page }) => {
   let loads = 0
   await mockApi(page)

@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api } from './api'
 import DatasetView from './DatasetView.vue'
+import brandLogoUrl from './assets/brand-logo.svg?no-inline'
 import { UploadPauseController } from './uploadPause'
 import { jobPollDelay } from './sessionPolicy'
 import { useDialogAccessibility } from './dialogAccessibility'
@@ -2005,7 +2006,7 @@ async function revokeActiveRelation() {
 <template>
   <div class="prototype variant-a" :class="[`skin-${skin}`, `density-${density}`]" @scroll.capture="showTransientScrollbar">
     <header class="topbar">
-      <div class="brand"><span class="brand-mark">VA</span><span>视觉资产库</span></div>
+      <div class="brand"><img class="brand-mark" :src="brandLogoUrl" alt="" width="31" height="31" /><span>视觉资产库</span></div>
       <GlobalSearch :job-state-text="jobStateText" @open="openGlobalResult" @error="notifyError" />
       <div class="header-actions">
         <label class="skin-picker"><span>界面</span><select v-model="skin"><option value="light">白天模式</option><option value="command">夜间模式</option></select></label>
@@ -2219,7 +2220,7 @@ async function revokeActiveRelation() {
     <div v-if="toast" class="toast" :class="`toast-${toastKind}`"><template v-if="toastKind==='success'">✓ </template>{{ toast }}</div>
     <div v-if="showLogin" class="login-stage">
       <section class="login-card" role="dialog" aria-modal="true" aria-labelledby="login-title">
-        <div class="login-brand"><span class="brand-mark">VA</span><b>视觉资产库</b></div>
+        <div class="login-brand"><img class="brand-mark" :src="brandLogoUrl" alt="" width="31" height="31" /><b>视觉资产库</b></div>
         <h1 id="login-title">登录</h1>
         <label>用户名<input v-model="loginUsername" autofocus autocomplete="username" @keyup.enter="login" /></label><label>密码<input v-model="loginPassword" type="password" autocomplete="current-password" @keyup.enter="login" /></label>
         <div class="login-option"><label><input v-model="loginRemember" type="checkbox" /> 保持登录</label></div>

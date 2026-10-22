@@ -1,4 +1,5 @@
 .logout-button { border:0; background:transparent; color:var(--muted); font-size:12px; }
+img.brand-mark { display:block; flex-shrink:0; object-fit:contain; background:transparent; }
 .apply-filter { width:100%; border:0; border-radius:6px; background:var(--accent); color:#fff; padding:9px; margin-top:10px; font-weight:700; }
 .skin-command .apply-filter { color:#092018; }
 .modal-stage { position:fixed; z-index:90; inset:0; background:#0d1718aa; display:grid; place-items:center; padding:20px; overflow-y:auto; overscroll-behavior:contain; backdrop-filter:blur(3px); }
