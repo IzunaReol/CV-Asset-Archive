@@ -2,7 +2,7 @@
 
 English | [简体中文](README.md)
 
-Pending release: **v2.1.0**. See the [release notes](docs/releases/v2.1.0.md) and [release checklist](docs/release-checklist.md) for changes and remaining validation limits.
+Current version: **v2.1.0**. See the [release notes](docs/releases/v2.1.0.md) and [release checklist](docs/release-checklist.md) for changes and remaining validation limits.
 
 CV Asset Archive is an asset and relationship management system for computer vision teams. It stores images, videos, annotations, models, and archives in one place, with search, annotation preview, lineage tracking, recycle-bin recovery, and asynchronous exports.
 
@@ -138,7 +138,7 @@ The isolated API workflow test is available at `scripts/runtime-e2e.py`. See the
 
 ## Preparing to upgrade to v2.1.0
 
-Back up MongoDB, MinIO, and deployment configuration and retain old images before upgrading from v2.0.0. Verify publication quality checks, image splits, version restoration, exports, and model parameter revisions. Legacy images default to unassigned; existing one-to-many annotation links remain. Older clients must adopt the publication token and parameter revision. Rolling back images does not undo data changes. This is release preparation only; nothing has been pushed to Git.
+Back up MongoDB, MinIO, and deployment configuration and retain old images before upgrading from v2.0.0. Verify publication quality checks, image splits, version restoration, exports, and model parameter revisions. Legacy images default to unassigned; existing one-to-many annotation links remain. Older clients must adopt the publication token and parameter revision. Rolling back images does not undo data changes. Publishing to Git does not deploy Docker containers.
 
 See the [dataset guide](docs/datasets.md), [model parameters](docs/model-parameters.md), and [v2.1.0 release notes](docs/releases/v2.1.0.md). MLflow integration is not implemented.
 
