@@ -105,7 +105,7 @@ async def lifespan(_: FastAPI):
             pass
 
 
-app = FastAPI(title="CV Archive API", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="CV Archive API", version="2.1.0", lifespan=lifespan)
 app.add_exception_handler(AppError, app_error_handler)
 app.add_middleware(
     CORSMiddleware,

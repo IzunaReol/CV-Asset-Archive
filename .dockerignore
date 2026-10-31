@@ -1,5 +1,10 @@
 .git
 .runtime
+backend/.venv
+backend/.pytest_cache
+backend/.ruff_cache
+backend/test-tmp
+backend/test-tmp-external
 .pytest_cache
 .pytest-tmp
 .ruff_cache
@@ -16,3 +21,4 @@ frontend/playwright-report
 docs
 *.docx
 *.zip
+*.tar

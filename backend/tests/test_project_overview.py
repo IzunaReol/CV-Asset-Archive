@@ -35,7 +35,13 @@ async def test_project_overview_groups_current_members_and_deduplicates_models(m
             [model] if query.get("type") == "model" else [file]
         )),
         count_documents=AsyncMock(return_value=1),
-        aggregate=AsyncMock(return_value=Cursor([{"_id": {"type": "image"}, "count": 1}])),
+        aggregate=AsyncMock(return_value=Cursor([{
+            "counts": [
+                {"_id": {"project": "A", "type": "image"}, "count": 1},
+                {"_id": {"project": "B", "type": "image"}, "count": 1},
+            ],
+            "previews": [{"_id": "A", "items": [file]}, {"_id": "B", "items": [file]}],
+        }])),
     )
     database = SimpleNamespace(
         tag_definitions=SimpleNamespace(find_one=AsyncMock(return_value={"values": ["A", "B"]})),
@@ -65,7 +71,11 @@ async def test_project_overview_groups_current_members_and_deduplicates_models(m
     assert b["dataset_count"] == 1
     assert b["dataset_counts"]["image"] == 2
     database.dataset_memberships.aggregate.assert_awaited_once()
-    assets.aggregate.assert_awaited()
+    assets.aggregate.assert_awaited_once()
+    assert assets.count_documents.await_count == 1
+    assert a["files"] == b["files"] == [file]
+    file_pipeline = assets.aggregate.await_args.args[0]
+    assert file_pipeline[-1]["$facet"]["previews"][0]["$group"]["items"]["$topN"]["n"] == 50
     assert a["models"][0]["sources"] == ["数据集关联", "项目标签"]
     assert b["models"][0]["sources"] == ["数据集关联"]
     assert a["file_count"] == b["file_count"] == 1

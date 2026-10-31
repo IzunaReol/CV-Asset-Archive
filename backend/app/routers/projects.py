@@ -3,7 +3,6 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Query
-from pymongo import ASCENDING, DESCENDING
 
 from ..database import db
 from ..dependencies import ProjectOverviewReadUser
@@ -81,6 +80,10 @@ async def project_overview(
                 counts = counts_by_dataset.setdefault(dataset_id, _asset_counts([]))
                 asset_type = row["_id"]["type"]
                 counts[asset_type if asset_type in counts else "other"] += row["count"]
+    datasets_by_project: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for dataset in datasets:
+        for project in set(dataset.get("projects") or []).intersection(selected):
+            datasets_by_project[project].append(dataset)
 
     model_by_id: dict[str, dict[str, Any]] = {}
     model_project_sources: dict[str, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
@@ -146,12 +149,37 @@ async def project_overview(
             {"archived_at": None, "type": {"$ne": "model"}, "tags.project": {"$in": selected}}
         )
 
+    file_stats_by_project: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    file_previews_by_project: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    if "library" in menus:
+        file_cursor = await db.assets.aggregate([
+            {"$match": {"archived_at": None, "type": {"$ne": "model"}, "tags.project": {"$in": selected}}},
+            {"$set": {"_projects": {"$setUnion": [{"$cond": [
+                {"$isArray": "$tags.project"}, "$tags.project", ["$tags.project"],
+            ]}, []]}}},
+            {"$unwind": "$_projects"},
+            {"$match": {"_projects": {"$in": selected}}},
+            {"$facet": {
+                "counts": [{"$group": {"_id": {"project": "$_projects", "type": "$type"}, "count": {"$sum": 1}}}],
+                "previews": [{"$group": {
+                    "_id": "$_projects",
+                    "items": {"$topN": {"n": FILE_PREVIEW_LIMIT,
+                        "sortBy": {"updated_at": -1, "id": 1},
+                        "output": {"id": "$id", "name": "$name", "type": "$type", "size": "$size",
+                                   "tags": {"algorithm": "$tags.algorithm"}, "updated_at": "$updated_at"}}},
+                }}],
+            }},
+        ], allowDiskUse=True)
+        file_rows = await file_cursor.to_list(length=1)
+        file_result = file_rows[0] if file_rows else {"counts": [], "previews": []}
+        for row in file_result["counts"]:
+            file_stats_by_project[row["_id"]["project"]].append({"_id": {"type": row["_id"]["type"]}, "count": row["count"]})
+        file_previews_by_project = {row["_id"]: row["items"] for row in file_result["previews"]}
+
     for project in selected:
         project_datasets: list[dict[str, Any]] = []
         dataset_counts = _asset_counts([])
-        for dataset in datasets:
-            if project not in dataset.get("projects", []):
-                continue
+        for dataset in datasets_by_project[project]:
             entry = {
                 "id": dataset["id"], "name": dataset["name"],
                 "current_version": dataset.get("current_version"),
@@ -186,22 +214,9 @@ async def project_overview(
         for item in models:
             item.pop("latest_version_created_at")
 
-        file_counts = _asset_counts([])
-        files = []
-        file_total = 0
-        if "library" in menus:
-            file_query = {"archived_at": None, "type": {"$ne": "model"}, "tags.project": project}
-            file_total = await db.assets.count_documents(file_query)
-            grouped_files_cursor = await db.assets.aggregate([
-                {"$match": file_query},
-                {"$group": {"_id": {"type": "$type"}, "count": {"$sum": 1}}},
-            ])
-            grouped_files = await grouped_files_cursor.to_list(length=None)
-            file_counts = _asset_counts(grouped_files)
-            files = await db.assets.find(file_query, {
-                "_id": 0, "id": 1, "name": 1, "type": 1, "size": 1,
-                "tags.algorithm": 1, "updated_at": 1,
-            }).sort([("updated_at", DESCENDING), ("id", ASCENDING)]).limit(FILE_PREVIEW_LIMIT).to_list(length=FILE_PREVIEW_LIMIT)
+        file_counts = _asset_counts(file_stats_by_project[project])
+        files = file_previews_by_project.get(project, [])
+        file_total = sum(file_counts.values())
 
         result["projects"].append({
             "name": project,

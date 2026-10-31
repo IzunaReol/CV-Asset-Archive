@@ -1,6 +1,6 @@
 # 异步任务服务
 
-当前版本与 API、前端统一为 **2.0.0**。本版模型参数作为 MongoDB 元数据由 API 维护，Worker 不计算指标或连接 MLflow。升级与验证边界见[发布说明](../docs/releases/v2.0.0.md)。
+当前版本与 API、前端统一为 **2.1.0**。Worker 按导出任务创建时固定的成员、图片分类和标注归属生成 ZIP；模型参数仍由 API 作为 MongoDB 元数据维护。升级与验证边界见[发布说明](../docs/releases/v2.1.0.md)。
 
 Celery Worker 当前负责：
 

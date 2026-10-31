@@ -75,6 +75,7 @@ const assetColumnDefinitions = [
 const detailId = ref<AssetId | null>(null)
 const detailAsset = ref<any>(null)
 const modelParametersAssetId = ref<string|null>(null)
+const modelParametersDialog = ref<InstanceType<typeof ModelParametersDialog>|null>(null)
 const assetHistory = ref<any[]>([])
 const assetHistoryExpanded = ref(false)
 const visibleAssetHistory = computed(() => assetHistoryExpanded.value ? assetHistory.value : assetHistory.value.slice(0, 3))
@@ -661,6 +662,19 @@ async function openProjectAsset(assetId:string) {
   setPage('library')
   try { await openAsset(mapAsset(await api.asset(assetId), 0)) }
   catch (error) { notifyError(error instanceof Error ? error.message : '素材详情加载失败') }
+}
+
+function openProjectFiles(project:string) {
+  if (!canViewMenu('library')) return
+  query.value = ''
+  noTags.value = false
+  selectedAssetTypes.value = ['image','video','annotation','archive','other']
+  matchMode.value = 'all'
+  filterRules.value = [{id:nextRuleId++,tag:'project',operator:'equals',value:project}]
+  appliedMatchMode.value = 'all'
+  appliedFilterRules.value = filterRules.value.map(rule=>({...rule}))
+  assetPage.value = 1
+  setPage('library')
 }
 
 function relationOriginText(source:string) {
@@ -1421,7 +1435,7 @@ function closeRelationDetail() {
 function closeTopDialog() {
   if (permissionImpactOpen.value && !permissionImpactBusy.value) return closePermissionImpact()
   if (mediaViewerOpen.value) return closeMediaViewer()
-  if (modelParametersAssetId.value) { modelParametersAssetId.value=null; return }
+  if (modelParametersAssetId.value) { modelParametersDialog.value?.requestClose(); return }
   if (activeAsset.value) return closeAssetDetail()
   if (activeRelation.value) return closeRelationDetail()
   if (relationPreviewOpen.value && !relationSubmitting.value) { relationPreviewOpen.value=false; return }
@@ -2054,7 +2068,7 @@ async function revokeActiveRelation() {
       </template>
 
       <template v-else-if="page === 'project_overview'">
-        <ProjectOverviewView :can-view-menu="canViewMenu" :format-storage-size="formatStorageSize" @dataset="openAssociatedDataset" @asset="openProjectAsset" @error="notifyError" />
+        <ProjectOverviewView :can-view-menu="canViewMenu" :format-storage-size="formatStorageSize" @dataset="openAssociatedDataset" @asset="openProjectAsset" @files="openProjectFiles" @error="notifyError" />
       </template>
 
       <template v-else-if="page === 'library'">
@@ -2204,7 +2218,7 @@ async function revokeActiveRelation() {
     </aside>
     </div>
 
-    <ModelParametersDialog v-if="modelParametersAssetId&&activeAsset" :asset-id="modelParametersAssetId" :asset-name="activeAsset.name" :can-edit="can('asset_edit')" @close="modelParametersAssetId=null" @notify="notify" />
+    <ModelParametersDialog v-if="modelParametersAssetId&&activeAsset" ref="modelParametersDialog" :asset-id="modelParametersAssetId" :asset-name="activeAsset.name" :can-edit="can('asset_edit')" @close="modelParametersAssetId=null" @notify="notify" />
 
     <div v-if="activeRelation" class="detail-sheet-stage" @click.self="closeRelationDetail">
     <aside class="detail-sheet relation-detail" :class="{'is-scrolling':detailSheetScrolling}" @scroll.passive="showDetailScrollbar">

@@ -114,7 +114,7 @@ def test_dataset_contracts_support_snapshot_workflow():
     assert dataset.projects == ["烟火检测"]
     assert not hasattr(dataset, "algorithms")
     assert DatasetMembersRequest(asset_ids=["a1", "a2"]).asset_ids == ["a1", "a2"]
-    assert DatasetPublishRequest(version="v1.1").release_note == ""
+    assert DatasetPublishRequest(version="v1.1", quality_token="a" * 64).release_note == ""
 
 
 def test_dataset_projects_are_required_and_unique():

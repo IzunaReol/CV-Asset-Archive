@@ -33,6 +33,20 @@ def request(path: str, method: str = "GET", body: Any = None, token: str = "") -
         raise RuntimeError(f"{method} {path}: {exc.code} {exc.read().decode()}") from exc
 
 
+def expect_error(path: str, method: str, body: Any, token: str, status: int, code: str) -> None:
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(
+        f"{BASE_URL}{path}", data=data,
+        headers={"content-type": "application/json", "authorization": f"Bearer {token}"}, method=method,
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20):
+            raise AssertionError(f"Expected {status}/{code} for {method} {path}")
+    except urllib.error.HTTPError as exc:
+        payload = json.loads(exc.read())
+        assert exc.code == status and payload.get("error", {}).get("code") == code, (exc.code, payload)
+
+
 def upload(token: str, filename: str, content: bytes, asset_type: str) -> dict[str, Any]:
     session = request(
         "/assets/upload-sessions",
@@ -145,6 +159,31 @@ def main() -> None:
     assert model_preview["counts"]["ready"] == 1
     model_create = request("/relations/batch", "POST", model_body, token)
     model_relation = model_create["succeeded"][0]
+    overview = request("/projects/overview?projects=e2e-isolated", token=token)
+    assert overview["summary"]["dataset_count"] == 1
+    assert overview["summary"]["model_count"] == 1
+    metric = request("/metric-definitions", "POST", {
+        "name": "E2E 检测分数", "category": "目标检测", "description": "隔离测试指标",
+    }, token)
+    metric_id = metric["id"]
+    parameters_path = f"/assets/{model['id']}/parameters"
+    before_parameters = request(parameters_path, token=token)
+    first_revision = before_parameters["revision"]
+    request(parameters_path, "PATCH", {"revision": first_revision, "values": {metric_id: "0.91"}}, token)
+    configured = request(parameters_path, token=token)
+    assert configured["revision"] == first_revision + 1
+    assert next(item for item in configured["items"] if item["id"] == metric_id)["value"] == "0.91"
+    expect_error(parameters_path, "PATCH", {"revision": first_revision, "values": {metric_id: "0.42"}},
+                 token, 409, "MODEL_PARAMETERS_CONFLICT")
+    usage = request(f"/metric-definitions/{metric_id}/usage", token=token)
+    assert usage["model_count"] == 1
+    expect_error(f"/metric-definitions/{metric_id}", "DELETE", None, token, 409, "METRIC_DEFINITION_IN_USE")
+    overview_configured = request("/projects/overview?projects=e2e-isolated", token=token)
+    assert any(item["id"] == metric_id and item["value"] == "0.91"
+               for item in overview_configured["projects"][0]["models"][0]["configured_parameters"])
+    request(parameters_path, "PATCH", {"revision": configured["revision"], "values": {metric_id: None}}, token)
+    assert request(f"/metric-definitions/{metric_id}/usage", token=token)["model_count"] == 0
+    request(f"/metric-definitions/{metric_id}", "DELETE", token=token)
     repeated = request("/relations/preview", "POST", model_body, token)
     assert repeated["counts"]["existing"] == 1
     graph = request(f"/relations/graph/{model['id']}?depth=4", token=token)
@@ -209,6 +248,9 @@ def main() -> None:
         "graph_edges_after_revoke": len(graph_after["edges"]),
         "history_active": history["total"],
         "type_validation": mismatch["invalid"][0]["code"],
+        "model_parameter_conflict": "MODEL_PARAMETERS_CONFLICT",
+        "metric_delete_guard": "METRIC_DEFINITION_IN_USE",
+        "project_overview_model_count": overview["summary"]["model_count"],
     }, ensure_ascii=False))
 
 

@@ -11,7 +11,7 @@ type Project = { name:string; dataset_count:number; dataset_counts:Counts; datas
 type Overview = { available_projects:string[]; selected_projects:string[]; summary:{project_count:number;dataset_count:number;model_count:number;file_count:number}; projects:Project[] }
 
 const props = defineProps<{ canViewMenu:(menu:MenuKey)=>boolean; formatStorageSize:(bytes:number)=>string }>()
-const emit = defineEmits<{ dataset:[id:string]; asset:[id:string]; error:[message:string] }>()
+const emit = defineEmits<{ dataset:[id:string]; asset:[id:string]; files:[project:string]; error:[message:string] }>()
 const data = ref<Overview|null>(null)
 const selected = ref<string[]>([])
 const pickerOpen = ref(false)
@@ -56,7 +56,7 @@ onMounted(() => { void load(true) })
 
 <template>
   <section class="page-head project-head">
-    <div><h1>项目概览</h1><p>按项目查看数据集、模型与文件。</p></div>
+    <div><h1>项目概览</h1></div>
     <div class="project-picker">
       <button class="secondary project-picker-trigger" type="button" :aria-expanded="pickerOpen" @click="pickerOpen=!pickerOpen"><span class="project-picker-label" :title="selected.join('、')">所属项目：{{selected.length===1?selected[0]:selected.length===available.length&&available.length?'全部项目':selected.length?`已选 ${selected.length} 个`:'请选择项目'}}</span><span>⌄</span></button>
       <div v-if="pickerOpen" class="project-picker-panel">
@@ -108,7 +108,7 @@ onMounted(() => { void load(true) })
             <div class="project-file-row heading"><span>文件名</span><span>类型</span><span>大小</span><span>所属算法</span><span>更新时间</span></div>
             <button v-for="file in project.files" :key="file.id" type="button" class="project-file-row" @click="emit('asset',file.id)"><b :title="file.name">{{file.name}}</b><span>{{fileTypeLabels[file.type]||file.type}}</span><span>{{formatStorageSize(Number(file.size||0))}}</span><span>{{algorithmText(file.tags?.algorithm)}}</span><small>{{dateText(file.updated_at)}}</small></button>
           </div></div>
-          <p v-if="project.files_truncated" class="project-preview-note">当前展示最近 50 项，共 {{project.file_count}} 项。</p>
+          <p v-if="project.files_truncated" class="project-preview-note">当前展示最近 50 项，共 {{project.file_count}} 项。<button type="button" @click="emit('files',project.name)">查看全部文件 →</button></p>
         </div>
       </section>
     </div>
@@ -126,4 +126,5 @@ button.project-dataset-row{cursor:pointer}
 .project-sections,.project-empty{margin-top:24px}
 .project-head,.project-picker{min-width:0}.project-picker{max-width:100%}.project-picker-trigger{max-width:min(420px,100%);min-width:0}.project-picker-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.project-picker-options label{overflow-wrap:anywhere}.project-picker-options input{flex-shrink:0}
 .project-model-parameters{display:flex;flex-wrap:wrap;gap:6px}.project-model-parameters span{max-width:100%;padding:5px 8px;border:1px solid var(--line);border-radius:6px;background:var(--accent-soft);color:var(--ink);font-size:12px;overflow-wrap:anywhere}.project-model-parameters b{font-weight:700}
+.project-preview-note button{margin-left:8px;border:0;background:none;color:var(--accent);font:inherit;font-weight:700;cursor:pointer}
 </style>

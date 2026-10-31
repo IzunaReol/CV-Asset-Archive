@@ -2,6 +2,7 @@ name: cv-archive
 
 services:
   frontend:
+    image: cv-archive-frontend:${APP_IMAGE_TAG:-2.1.0}
     build:
       context: ..
       dockerfile: deploy/frontend.Dockerfile
@@ -12,6 +13,7 @@ services:
     restart: unless-stopped
 
   api:
+    image: cv-archive-api:${APP_IMAGE_TAG:-2.1.0}
     build:
       context: ..
       dockerfile: deploy/api.Dockerfile
@@ -40,6 +42,7 @@ services:
     restart: unless-stopped
 
   worker:
+    image: cv-archive-worker:${APP_IMAGE_TAG:-2.1.0}
     build:
       context: ..
       dockerfile: deploy/worker.Dockerfile

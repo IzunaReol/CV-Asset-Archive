@@ -148,6 +148,7 @@ test('参数管理分组展示预置指标并可维护自定义指标', async ({
     { id:'metric-oks', name:'OKS (Object Keypoint Similarity)', category:'姿态和关键点', description:'对象关键点相似度', built_in:true },
   ]
   const writes: Array<{method:string;body?:unknown}> = []
+  await page.route(/\/api\/v1\/metric-definitions\/[^/?]+\/usage$/, route => json(route, {metric_id:'metric-custom',model_count:0}))
   await page.route(/\/api\/v1\/metric-definitions(?:\/[^/?]+)?(?:\?.*)?$/, route => {
     const request = route.request()
     const method = request.method()
@@ -335,6 +336,167 @@ test('项目概览进入数据集详情后返回会加载数据集列表', async
   expect(listLoads).toBe(3)
 })
 
+test('数据集发布前展示质量提醒并要求确认', async ({ page }) => {
+  await mockApi(page)
+  const dataset = { id: 'dataset-1', name: '烟火训练集', remark: '', status: '待整理', projects: ['烟火检测'], member_count: 1, counts: { image: 1 } }
+  const published: unknown[] = []
+  await page.route(/\/api\/v1\/datasets(?:\/.*)?(?:\?.*)?$/, route => {
+    const path = new URL(route.request().url()).pathname
+    if (path.endsWith('/creators')) return json(route, { items: [] })
+    if (path.endsWith('/publication-quality')) return json(route, { token: 'a'.repeat(64), member_count: 1, counts: { image: 1 }, blockers: [], warnings: ['unlabeled_images'], issues: { invalid_assets: [], unlabeled_images: [{ id: 'image-1', name: 'one.jpg' }], duplicate_assets: [] }, missing_hash_count: 0 })
+    if (path.endsWith('/versions') && route.request().method() === 'POST') { published.push(route.request().postDataJSON()); return json(route, { id: 'version-1', version: 'v1' }) }
+    if (path.endsWith('/versions') || path.endsWith('/members') || path.endsWith('/models') || path.endsWith('/tag-distribution')) return json(route, { items: [], total: 0 })
+    if (path.endsWith('/datasets')) return json(route, { items: [dataset], total: 1 })
+    return json(route, dataset)
+  })
+  await page.addInitScript(value => localStorage.setItem('cv-archive-session', JSON.stringify(value)), tokens)
+  await page.goto('/')
+  await page.locator('.sidebar nav').getByRole('button', { name: /数据集/ }).click()
+  await page.locator('.dataset-table').getByRole('button', { name: /烟火训练集/ }).click()
+  await page.getByRole('button', { name: '版本记录' }).click()
+  await page.getByRole('button', { name: /发布新版本/ }).click()
+  await expect(page.locator('.publish-quality')).toContainText('1 张图片未关联有效标注')
+  await expect(page.getByRole('button', { name: '确认发布' })).toBeDisabled()
+  await page.getByLabel('已了解上述风险，继续发布').check()
+  await page.getByRole('button', { name: '确认发布' }).click()
+  await expect.poll(() => published.length).toBe(1)
+  expect(published[0]).toMatchObject({ quality_token: 'a'.repeat(64), acknowledge_warnings: true })
+})
+
+test('数据集图片可批量设置用途、自动分配并选择导出类型', async ({ page }) => {
+  await mockApi(page)
+  const dataset = { id:'dataset-1', name:'烟火训练集', status:'待整理', projects:['烟火检测'], member_count:2, counts:{image:2}, current_version:'v2' }
+  const splits:Record<string,string> = {a:'unassigned',b:'unassigned'}
+  const exports:unknown[] = []
+  const previewRatios:unknown[] = []
+  await page.route(/\/api\/v1\/datasets(?:\/.*)?(?:\?.*)?$/, route => {
+    const url = new URL(route.request().url())
+    const path = url.pathname
+    if (path.endsWith('/creators')) return json(route,{items:[]})
+    if (path.endsWith('/split-stats')) return json(route,{image_count:2,counts:{train:Object.values(splits).filter(x=>x==='train').length,val:0,test:Object.values(splits).filter(x=>x==='test').length,unassigned:Object.values(splits).filter(x=>x==='unassigned').length}})
+    if (path.endsWith('/members/split')) { const body=route.request().postDataJSON();body.asset_ids.forEach((id:string)=>splits[id]=body.split);return json(route,{updated:body.asset_ids.length,split:body.split}) }
+    if (path.endsWith('/auto-split/preview')) { previewRatios.push(route.request().postDataJSON());return json(route,{token:'a'.repeat(64),unassigned_count:1,allocated_count:1,counts:{train:0,val:0,test:1},skipped:[{asset_ids:['a'],reason:'existing_split_conflict',assets:[{id:'a',name:'one-very-long-image-filename.jpg',split:'train'},{id:'b',name:'two.jpg',split:'test'}]}]}) }
+    if (path.endsWith('/auto-split')) { splits.b='test';return json(route,{allocated_count:1,counts:{train:0,val:0,test:1},skipped:[]}) }
+    if (path.endsWith('/export')) {exports.push(route.request().postDataJSON());return json(route,{id:'job-1'})}
+    if (path.endsWith('/members')) {const selected=url.searchParams.getAll('split');const items=[{id:'a',name:'one-very-long-image-filename.jpg',type:'image',size:10,dataset_split:splits.a,has_annotation:true},{id:'b',name:'two.jpg',type:'image',size:10,dataset_split:splits.b,has_annotation:false}].filter(item=>!selected.length||selected.includes(item.dataset_split));return json(route,{items,total:items.length})}
+    if (path.endsWith('/versions')||path.endsWith('/models')||path.endsWith('/tag-distribution')) return json(route,{items:[],total:0})
+    if (path.endsWith('/datasets')) return json(route,{items:[dataset],total:1})
+    return json(route,dataset)
+  })
+  await page.addInitScript(value=>localStorage.setItem('cv-archive-session',JSON.stringify(value)),tokens)
+  await page.goto('/')
+  await page.locator('.sidebar nav').getByRole('button',{name:/数据集/}).click()
+  await page.locator('.dataset-table').getByRole('button',{name:/烟火训练集/}).click()
+  await expect(page.locator('.dataset-split-chart .split-pie')).toBeVisible()
+  await expect(page.locator('.dataset-split-chart')).toContainText('素材分类')
+  await expect(page.locator('.dataset-split-chart')).toContainText('未划分')
+  await expect(page.locator('.dataset-split-chart')).toContainText('2 张')
+  await expect(page.locator('.dataset-overview').getByRole('heading',{name:'最近修改'})).toHaveCount(0)
+  await page.getByRole('button',{name:'版本对比'}).click()
+  const comparisonPadding = await page.locator('.compare-selectors select').evaluateAll(items => items.map(item => parseFloat(getComputedStyle(item).paddingLeft)))
+  expect(comparisonPadding).toHaveLength(2)
+  expect(comparisonPadding.every(value=>value>=11)).toBe(true)
+  await page.getByRole('button',{name:'关闭'}).click()
+  await page.getByRole('button',{name:'数据管理'}).click()
+  const visibleSelectPadding = await page.locator('select:visible').evaluateAll(items => items.map(item => parseFloat(getComputedStyle(item).paddingLeft)))
+  expect(visibleSelectPadding.every(value=>value>=11)).toBe(true)
+  const firstCard = page.locator('.member-grid article').first()
+  await expect(firstCard.locator('small')).toHaveText('图片 · 10 B')
+  await expect(firstCard.locator('.member-card-badge-row')).toHaveCount(2)
+  await expect(firstCard.locator('.member-card-badge-row').first()).toHaveText('未划分')
+  await expect(firstCard.locator('.member-card-badge-row').last()).toHaveText('已关联标注')
+  await expect(page.getByLabel('图片用途筛选')).toHaveCount(0)
+  await expect(page.locator('.split-filter-reset')).toHaveCount(0)
+  await firstCard.locator('.member-preview').click()
+  await expect(firstCard).toHaveAttribute('aria-checked','true')
+  const titleGap = await firstCard.evaluate(card => {
+    const title = card.querySelector('div:last-child > b') as HTMLElement
+    const box = card.querySelector('.member-select') as HTMLElement
+    return box.getBoundingClientRect().left - (title.getBoundingClientRect().right - parseFloat(getComputedStyle(title).paddingRight))
+  })
+  expect(titleGap).toBeGreaterThanOrEqual(2)
+  expect(titleGap).toBeLessThanOrEqual(8)
+  await expect(page.locator('.batch-split')).toContainText('批量设置图片分类')
+  await page.getByRole('button',{name:'应用分类'}).click()
+  await expect(page.locator('.member-grid')).toContainText('训练集')
+  await expect(page.locator('.member-grid .split-train')).toHaveCount(1)
+  await page.getByRole('button',{name:'自动分配类型'}).click()
+  const dialog = page.getByRole('dialog',{name:'自动分配类型'})
+  await expect(dialog.getByRole('button',{name:'预览分配'})).toHaveCount(0)
+  const previewGap = await dialog.locator('.auto-split-ratios').evaluate(element=>parseFloat(getComputedStyle(element).marginBottom))
+  expect(previewGap).toBeGreaterThanOrEqual(12)
+  await expect(dialog.locator('input[type="number"]')).toHaveCount(3)
+  const spinnerStyle = await dialog.locator('input[type="number"]').first().evaluate(input => getComputedStyle(input).appearance)
+  expect(spinnerStyle).toBe('textfield')
+  await expect(page.locator('.auto-split-preview')).toContainText('待分配 1 张')
+  await dialog.locator('input[type="number"]').first().fill('6')
+  await expect.poll(()=>previewRatios.length).toBe(2)
+  expect(previewRatios[1]).toMatchObject({train:6,val:1,test:1})
+  await expect(page.locator('.auto-split-preview')).toContainText('待分配 1 张')
+  await page.getByRole('button',{name:'确认分配'}).click()
+  await expect(page.locator('.split-summary')).toContainText('测试集 1项（50%）')
+  await page.getByRole('button',{name:'概览',exact:true}).click()
+  await expect(page.locator('.split-pie-legend')).toContainText('训练集')
+  await expect(page.locator('.split-pie-legend')).toContainText('测试集')
+  await expect(page.locator('.split-pie-legend')).toContainText('50.0%')
+  await page.getByRole('button',{name:'数据管理'}).click()
+  await expect(page.locator('.member-grid .split-test')).toHaveCount(1)
+  const trainColor = await page.locator('.member-grid .split-train').evaluate(element => getComputedStyle(element).color)
+  const testColor = await page.locator('.member-grid .split-test').evaluate(element => getComputedStyle(element).color)
+  expect(trainColor).not.toBe(testColor)
+  await page.locator('.split-filter-chip.split-test').click()
+  await expect(page.locator('.member-grid article')).toHaveCount(1)
+  await expect(page.locator('.split-filter-chip.split-test')).toHaveAttribute('aria-pressed','true')
+  await expect(page.locator('.split-filter-chip.split-test .split-check')).toHaveText('✓')
+  await page.locator('.split-filter-chip.split-train').click()
+  await expect(page.locator('.member-grid article')).toHaveCount(2)
+  await expect(page.locator('.split-selected-total')).toHaveCount(0)
+  await expect(page.locator('.split-filter-chip.split-train')).toHaveAttribute('aria-pressed','true')
+  const lastChip = await page.locator('.split-filter-chip.split-unassigned').boundingBox()
+  const resetChip = await page.locator('.split-filter-reset').boundingBox()
+  expect(lastChip && resetChip && resetChip.x - (lastChip.x + lastChip.width)).toBeLessThan(260)
+  await page.locator('.skin-picker select').selectOption('command')
+  const darkChip = await page.locator('.split-filter-chip.split-train').evaluate(element => ({background:getComputedStyle(element).backgroundColor,color:getComputedStyle(element).color}))
+  expect(darkChip.background).not.toBe('rgb(232, 240, 255)')
+  expect(darkChip.color).not.toBe(darkChip.background)
+  await page.locator('.split-filter-reset').click()
+  await expect(page.locator('.member-grid article')).toHaveCount(2)
+  await expect(page.locator('.split-filter-reset')).toHaveCount(0)
+  await expect(page.locator('.dataset-detail-actions').getByRole('button',{name:'导出'})).toHaveCount(0)
+  await page.locator('.member-toolbar').getByRole('button',{name:'导出'}).click()
+  await expect(page.getByRole('dialog',{name:'导出数据集'}).getByRole('radio',{name:/导出当前/})).toHaveCount(0)
+  await expect(page.getByRole('dialog',{name:'导出数据集'})).not.toContainText('当前数据集全部成员')
+  await expect(page.getByRole('dialog',{name:'导出数据集'})).not.toContainText('导出当前建设中的实时数据')
+  await page.getByRole('dialog',{name:'导出数据集'}).getByRole('button',{name:'取消'}).click()
+  await page.locator('.member-grid article').first().click()
+  await page.getByRole('button',{name:'导出',exact:true}).click()
+  const exportDialog = page.getByRole('dialog',{name:'导出数据集'})
+  await expect(exportDialog.getByRole('radio',{name:/导出当前/})).toBeChecked()
+  await expect(exportDialog).toContainText('已选 1 项')
+  await expect(exportDialog).not.toContainText('已选 1 项成员')
+  await page.getByRole('button',{name:'确认导出'}).click()
+  await expect.poll(()=>exports.length).toBe(1)
+  expect(exports[0]).toMatchObject({export_type:'current',asset_ids:['a']})
+  await page.getByRole('button',{name:'导出',exact:true}).click()
+  await exportDialog.getByRole('radio',{name:/导出全部/}).check()
+  await page.getByRole('button',{name:'确认导出'}).click()
+  await expect.poll(()=>exports.length).toBe(2)
+  expect(exports[1]).toMatchObject({export_type:'all'})
+  await page.getByRole('button',{name:'导出',exact:true}).click()
+  await exportDialog.getByRole('radio',{name:'导出指定分类'}).check()
+  await expect(exportDialog.getByRole('button',{name:'确认导出'})).toBeDisabled()
+  await exportDialog.locator('.export-split-options .split-train').click()
+  await exportDialog.locator('.export-split-options .split-test').click()
+  await exportDialog.getByRole('button',{name:'确认导出'}).click()
+  await expect.poll(()=>exports.length).toBe(3)
+  expect(exports[2]).toMatchObject({export_type:'categories',splits:['train','test']})
+  await page.getByRole('button',{name:'自动分配类型'}).click()
+  await page.locator('.split-conflicts summary').click()
+  await page.locator('.split-conflicts').getByRole('button',{name:/one-very-long-image-filename.jpg/}).click()
+  await expect(page.locator('.member-location-label')).toContainText('one-very-long-image-filename.jpg')
+  await expect(page.locator('.member-grid article').first()).toHaveAttribute('aria-checked','true')
+})
+
 test('已有关联只能编辑备注并保持模型和版本不变', async ({ page }) => {
   await mockApi(page)
   const dataset = { id: 'dataset-1', name: '烟火训练集', remark: '', status: '待整理', projects: ['烟火检测'], member_count: 0, counts: {} }
@@ -405,14 +567,16 @@ test('添加模型关联时按模型备注自动填写且空备注不覆盖手�
     if (path.endsWith('/models')) return json(route, { items: [] })
     return json(route, dataset)
   })
-  await page.route(/\/api\/v1\/assets(?:\?.*)?$/, route => {
+  const modelRequests:string[] = []
+  await page.route(/\/api\/v1\/assets\/model-options(?:\?.*)?$/, route => {
     const params = new URL(route.request().url()).searchParams
-    if (params.get('asset_type') !== 'model') return route.fallback()
-    if (params.get('page') === '1') return json(route, {items:Array.from({length:200},(_,i)=>({id:`filler-${i}`,name:`模型 ${i}`,type:'model',remark:''})),total:202})
+    modelRequests.push(route.request().url())
+    if (params.get('q')) return json(route, {items:[{id:'model-1',name:'有备注模型',remark:'模型原备注'}],total:1})
+    if (params.get('page') === '1') return json(route, {items:Array.from({length:50},(_,i)=>({id:`filler-${i}`,name:`模型 ${i}`,remark:''})),total:52})
     return json(route, { items: [
-      { id: 'model-1', name: '有备注模型', type: 'model', remark: '模型原备注' },
-      { id: 'model-2', name: '无备注模型', type: 'model', remark: '' },
-    ], total: 202 })
+      { id: 'model-1', name: '有备注模型', remark: '模型原备注' },
+      { id: 'model-2', name: '无备注模型', remark: '' },
+    ], total: 52 })
   })
   await page.addInitScript(value => localStorage.setItem('cv-archive-session', JSON.stringify(value)), tokens)
   await page.goto('/')
@@ -421,8 +585,12 @@ test('添加模型关联时按模型备注自动填写且空备注不覆盖手�
   await page.getByRole('button', { name: '模型管理' }).click()
   await page.getByRole('button', { name: /添加模型关联/ }).click()
   const dialog = page.getByRole('heading', { name: '添加模型关联' }).locator('..')
-  const modelSelect = dialog.getByLabel('模型')
+  const modelSelect = dialog.getByRole('combobox',{name:'选择模型'})
   const remark = dialog.getByRole('textbox', { name: '备注' })
+  await expect(modelSelect.getByRole('option')).toHaveCount(51)
+  await dialog.getByRole('button', {name:'下一页'}).click()
+  await expect(modelSelect.getByRole('option')).toHaveCount(3)
+  expect(modelRequests.map(url=>new URL(url).searchParams.get('page'))).toEqual(['1','2'])
   await modelSelect.selectOption('model-1')
   await expect(remark).toHaveValue('模型原备注')
   await modelSelect.selectOption('model-2')
@@ -431,6 +599,9 @@ test('添加模型关联时按模型备注自动填写且空备注不覆盖手�
   await remark.fill('手动关联备注')
   await modelSelect.selectOption('model-2')
   await expect(remark).toHaveValue('手动关联备注')
+  await dialog.getByRole('textbox',{name:'搜索模型'}).fill('有备注')
+  await expect(modelSelect.getByRole('option')).toHaveCount(2)
+  expect(new URL(modelRequests.at(-1) || '').searchParams.get('q')).toBe('有备注')
 })
 
 test('数据集详情响应延迟时返回列表不会被旧响应覆盖', async ({ page }) => {
@@ -501,7 +672,7 @@ test('数据集所属项目必选、支持多选并跳转到项目修改弹窗',
   await mockApi(page)
   await page.route('**/api/v1/tag-definitions', route => json(route, { items: [
     { key: 'project', name: '项目', values: ['烟火检测', '安全帽'], color: '#2764c6', built_in: true },
-    { key: 'status', name: '状态', values: ['待整理'], built_in: true },
+    { key: 'status', name: '状态', values: ['待整理', '已标注'], built_in: true },
   ] }))
   await page.route('**/api/v1/datasets', route => json(route, { items: [], total: 0 }))
   await page.addInitScript(value => localStorage.setItem('cv-archive-session', JSON.stringify(value)), tokens)
@@ -529,16 +700,16 @@ test('数据集新增和编辑均保存所属项目', async ({ page }) => {
   await mockApi(page)
   await page.route('**/api/v1/tag-definitions', route => json(route, { items: [
     { key: 'project', name: '项目', values: ['烟火检测', '安全帽'], built_in: true },
-    { key: 'status', name: '状态', values: ['待整理'], built_in: true },
+    { key: 'status', name: '状态', values: ['待整理', '已标注'], built_in: true },
   ] }))
   let created: any = null
   let updated: any = null
   await page.route(/\/api\/v1\/datasets(?:\/.*)?(?:\?.*)?$/, route => {
     const path = new URL(route.request().url()).pathname
-    const dataset = { id: 'dataset-1', name: '测试数据集', remark: '', status: '待整理', projects: updated?.projects || created?.projects || [], member_count: 0, counts: {} }
+    const dataset = { id: 'dataset-1', name: '测试数据集', remark: '', status: updated?.status || created?.status || '待整理', projects: updated?.projects || created?.projects || [], member_count: 0, counts: {} }
     if (path.endsWith('/creators')) return json(route, { items: [] })
     if (path.endsWith('/members') || path.endsWith('/versions') || path.endsWith('/models') || path.endsWith('/tag-distribution')) return json(route, { items: [], total: 0 })
-    if (route.request().method() === 'POST') { created = route.request().postDataJSON(); return json(route, { ...dataset, projects: created.projects }, 201) }
+    if (route.request().method() === 'POST') { created = route.request().postDataJSON(); return json(route, { ...dataset, status: created.status, projects: created.projects }, 201) }
     if (route.request().method() === 'PATCH') { updated = route.request().postDataJSON(); return json(route, { ...dataset, ...updated }) }
     if (path.endsWith('/datasets')) return json(route, { items: [], total: 0 })
     return json(route, dataset)
@@ -551,8 +722,15 @@ test('数据集新增和编辑均保存所属项目', async ({ page }) => {
   await dialog.getByPlaceholder('请输入名称').fill('测试数据集')
   await dialog.getByRole('group', { name: '所属项目' }).getByLabel('烟火检测').check()
   await dialog.getByRole('group', { name: '所属项目' }).getByLabel('安全帽').check()
+  await dialog.getByLabel('状态').selectOption('已标注')
   await dialog.getByRole('button', { name: '保存', exact: true }).click()
   await expect.poll(() => created?.projects).toEqual(['烟火检测', '安全帽'])
+  expect(created?.status).toBe('已标注')
+  await expect(page.locator('.dataset-summary')).toContainText('状态')
+  await expect(page.locator('.dataset-summary .dataset-status')).toHaveText('已标注')
+  await expect(page.locator('.dataset-title .dataset-status')).toHaveCount(0)
+  const summaryRows = await page.locator('.dataset-summary > div').evaluateAll(items => items.map(item => Math.round(item.getBoundingClientRect().top)))
+  expect(new Set(summaryRows).size).toBe(1)
   expect(created).not.toHaveProperty('algorithms')
   await page.locator('.dataset-detail-actions').getByRole('button', { name: '编辑' }).click()
   await expect(dialog.getByRole('group', { name: '所属项目' }).getByLabel('烟火检测')).toBeChecked()

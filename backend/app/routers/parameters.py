@@ -168,13 +168,24 @@ async def delete_metric(
         raise AppError(404, "METRIC_DEFINITION_NOT_FOUND", "指标参数不存在")
     if current.get("built_in"):
         raise AppError(409, "BUILT_IN_METRIC_PROTECTED", "预置指标不允许删除")
-    await db.metric_definitions.delete_one({"id": metric_id, "built_in": False})
-    await db.assets.update_many(
-        {"type": "model", f"metric_values.{metric_id}": {"$exists": True}},
-        {"$unset": {f"metric_values.{metric_id}": ""}},
+    affected = await db.assets.count_documents(
+        {"type": "model", f"metric_values.{metric_id}": {"$exists": True}}
     )
+    if affected:
+        raise AppError(409, "METRIC_DEFINITION_IN_USE", f"已有 {affected} 个模型配置该指标，请先移除模型参数")
+    await db.metric_definitions.delete_one({"id": metric_id, "built_in": False})
     await record_audit(
         actor=user, action="metric_definition.deleted", object_type="metric_definition",
         object_id=metric_id, object_name=current["name"],
         request_id=request.state.request_id,
     )
+
+
+@router.get("/{metric_id}/usage")
+async def metric_usage(metric_id: str, user: ParameterReadUser) -> dict[str, Any]:
+    metric = await db.metric_definitions.find_one({"id": metric_id})
+    if metric is None:
+        raise AppError(404, "METRIC_DEFINITION_NOT_FOUND", "指标参数不存在")
+    return {"metric_id": metric_id, "model_count": await db.assets.count_documents(
+        {"type": "model", f"metric_values.{metric_id}": {"$exists": True}}
+    )}

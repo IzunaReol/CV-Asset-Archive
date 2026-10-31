@@ -804,6 +804,27 @@ async def preview_usage_impact(
     return await usage_impact(ids)
 
 
+@router.get("/model-options")
+async def model_options(
+    user: AssetReadUser,
+    q: str = Query("", max_length=100),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
+) -> dict[str, Any]:
+    query: dict[str, Any] = {"type": "model", "archived_at": None}
+    if q.strip():
+        keyword = re.escape(q.strip())
+        query["$or"] = [
+            {"name": {"$regex": keyword, "$options": "i"}},
+            {"remark": {"$regex": keyword, "$options": "i"}},
+        ]
+    total = await db.assets.count_documents(query)
+    rows = await db.assets.find(
+        query, {"_id": 0, "id": 1, "name": 1, "remark": 1},
+    ).sort([("name", ASCENDING), ("id", ASCENDING)]).skip((page - 1) * page_size).limit(page_size).to_list(length=page_size)
+    return {"items": rows, "total": total, "page": page, "page_size": page_size}
+
+
 @router.get("/{asset_id}")
 async def get_asset(asset_id: str, user: AssetReadUser) -> dict[str, Any]:
     asset = await db.assets.find_one({"id": asset_id, "archived_at": None})

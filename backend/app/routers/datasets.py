@@ -20,6 +20,7 @@ from ..dataset_versioning import (
     compare_version_memberships,
     cursor_batches,
 )
+from ..dataset_splits import SPLITS, SPLIT_LABELS, allocation_preview, split_of
 from ..dependencies import (
     DatasetCreateEditUser, DatasetDeleteUser, DatasetExportUser, DatasetMembersUser,
     DatasetModelUser, DatasetReadUser, DatasetVersionPublishUser,
@@ -33,6 +34,8 @@ from ..schemas import (
     DatasetModelLinkRequest,
     DatasetModelRemarkUpdate,
     DatasetPublishRequest,
+    DatasetSplitUpdate,
+    DatasetAutoSplitRequest,
     DatasetRestoreRequest,
     DatasetUpdate,
 )
@@ -93,6 +96,7 @@ async def _restore_memberships_from_version(dataset_id: str, version_id: str, ac
         workset_members = [
             {
                 "id": new_id(), "dataset_id": dataset_id, "asset_id": item["asset_id"],
+                "split": split_of(item["snapshot"]) if item["snapshot"].get("type") == "image" else None,
                 "created_by": actor_id, "created_at": now(),
             }
             for item in members if item["snapshot"].get("type") != "annotation"
@@ -142,6 +146,7 @@ async def _resume_pending_restore(dataset_id: str) -> None:
     if version is None:
         raise AppError(409, "DATASET_RESTORE_INVALID", "未完成的版本恢复指向无效版本")
     await _restore_memberships_from_version(dataset_id, version_id, dataset.get("restore_actor_id") or "system")
+    await db.datasets.update_one({"id": dataset_id}, {"$set": {"current_version_id": version_id, "current_version": version["version"]}})
     if dataset.get("restore_backup_id"):
         with suppress(Exception):
             await db.dataset_restore_backups.delete_many({"restore_id": dataset["restore_backup_id"]})
@@ -177,7 +182,7 @@ async def _get_dataset(dataset_id: str) -> dict[str, Any]:
 
 
 def _asset_snapshot(asset: dict[str, Any]) -> dict[str, Any]:
-    return {
+    snapshot = {
         "name": asset.get("name", ""),
         "type": asset.get("type", "other"),
         "size": int(asset.get("size") or 0),
@@ -186,6 +191,9 @@ def _asset_snapshot(asset: dict[str, Any]) -> dict[str, Any]:
         "remark": asset.get("remark") or "",
         "updated_at": asset.get("updated_at"),
     }
+    if asset.get("type") == "image":
+        snapshot["split"] = asset.get("_dataset_split", "unassigned")
+    return snapshot
 
 
 def _content_digest(items: list[dict[str, Any]]) -> str:
@@ -229,6 +237,62 @@ async def sync_annotation_memberships(dataset_id: str, actor_id: str) -> dict[st
     if changes["added"] or changes["removed"]:
         await db.datasets.update_one({"id": dataset_id}, {"$set": {"updated_at": now()}})
     return changes
+
+
+async def _publication_quality(dataset_id: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    member_ids = await db.dataset_memberships.distinct("asset_id", {"dataset_id": dataset_id})
+    assets = await db.assets.find({"id": {"$in": member_ids}, "archived_at": None, "type": {"$ne": "model"}}).sort("id", ASCENDING).to_list(length=len(member_ids)) if member_ids else []
+    image_ids_for_splits = [item["id"] for item in assets if item.get("type") == "image"]
+    split_rows = await db.dataset_memberships.find({"dataset_id": dataset_id, "asset_id": {"$in": image_ids_for_splits}}, {"asset_id": 1, "split": 1}).to_list(length=None) if image_ids_for_splits else []
+    splits = {item["asset_id"]: split_of(item) for item in split_rows}
+    for asset in assets:
+        if asset.get("type") == "image":
+            asset["_dataset_split"] = splits.get(asset["id"], "unassigned")
+    valid_ids = {item["id"] for item in assets}
+    invalid_ids = sorted(set(member_ids) - valid_ids)
+    images = [item for item in assets if item.get("type") == "image"]
+    image_ids = [item["id"] for item in images]
+    relations = await db.relations.find({"relation_type": "annotates", "status": "active", "target_id": {"$in": image_ids}}, {"source_id": 1, "target_id": 1}).to_list(length=None) if image_ids else []
+    annotation_ids = list({item["source_id"] for item in relations})
+    valid_annotations = {item["id"] for item in await db.assets.find({"id": {"$in": annotation_ids}, "type": "annotation", "archived_at": None}, {"id": 1}).to_list(length=None)} if annotation_ids else set()
+    labeled_images = {item["target_id"] for item in relations if item["source_id"] in valid_annotations}
+    unlabeled = [item for item in images if item["id"] not in labeled_images]
+    hashes: dict[tuple[str, int], list[dict[str, Any]]] = {}
+    for asset in assets:
+        if asset.get("sha256"):
+            hashes.setdefault((asset["sha256"].lower(), int(asset.get("size") or 0)), []).append(asset)
+    duplicates = [item for group in hashes.values() for item in group[1:]]
+    cross_split = [item for group in hashes.values() if len({item.get("_dataset_split") for item in group if item.get("type") == "image" and item.get("_dataset_split") in SPLITS}) > 1 for item in group if item.get("type") == "image"]
+    unassigned = [item for item in images if item["_dataset_split"] == "unassigned"]
+    annotation_targets: dict[str, set[str]] = {}
+    for relation in relations:
+        if relation["source_id"] in valid_annotations:
+            annotation_targets.setdefault(relation["source_id"], set()).add(relation["target_id"])
+    shared_annotations = [{"id": annotation_id, "image_ids": sorted(targets), "cross_split": len({splits.get(image_id, "unassigned") for image_id in targets}) > 1} for annotation_id, targets in annotation_targets.items() if len(targets) > 1]
+    counts: dict[str, int] = {}
+    for asset in assets:
+        kind = asset.get("type", "other")
+        counts[kind] = counts.get(kind, 0) + 1
+    issues = {
+        "invalid_assets": [{"id": item} for item in invalid_ids],
+        "unlabeled_images": [{"id": item["id"], "name": item.get("name", "")} for item in unlabeled],
+        "duplicate_assets": [{"id": item["id"], "name": item.get("name", "")} for item in duplicates],
+        "unassigned_images": [{"id": item["id"], "name": item.get("name", "")} for item in unassigned],
+        "cross_split_duplicates": [{"id": item["id"], "name": item.get("name", "")} for item in cross_split],
+        "shared_annotations": shared_annotations,
+    }
+    blockers = (["empty_dataset"] if not assets else []) + (["invalid_assets"] if invalid_ids else [])
+    warnings = [key for key in ("unlabeled_images", "duplicate_assets", "unassigned_images", "cross_split_duplicates", "shared_annotations") if issues[key]]
+    evidence = {"members": sorted(member_ids), "assets": [{"id": item["id"], "snapshot": _asset_snapshot(item)} for item in assets], "relations": sorted((item["source_id"], item["target_id"]) for item in relations if item["source_id"] in valid_annotations)}
+    token = hashlib.sha256(json.dumps(evidence, sort_keys=True, default=str).encode()).hexdigest()
+    return {"token": token, "member_count": len(assets), "counts": counts, "blockers": blockers, "warnings": warnings, "issues": issues, "missing_hash_count": sum(not item.get("sha256") for item in assets)}, assets
+
+
+@router.get("/{dataset_id}/publication-quality")
+async def publication_quality(dataset_id: str, user: DatasetVersionPublishUser) -> dict[str, Any]:
+    await _get_dataset(dataset_id)
+    report, _ = await _publication_quality(dataset_id)
+    return report
 
 
 async def _dataset_summary(dataset: dict[str, Any]) -> dict[str, Any]:
@@ -386,7 +450,7 @@ async def copy_dataset(dataset_id: str, body: DatasetCopyRequest, request: Reque
             ])
             batch = []
             async for item in cursor:
-                batch.append({"id": new_id(), "dataset_id": copied["id"], "asset_id": item["asset_id"], "created_by": user["id"], "created_at": now()})
+                batch.append({"id": new_id(), "dataset_id": copied["id"], "asset_id": item["asset_id"], "split": split_of(item) if item["asset"]["type"] == "image" else None, "created_by": user["id"], "created_at": now()})
                 if len(batch) == 1000:
                     await db.dataset_memberships.insert_many(batch)
                     batch = []
@@ -461,14 +525,19 @@ async def delete_dataset(dataset_id: str, request: Request, user: DatasetDeleteU
 
 
 @router.get("/{dataset_id}/members")
-async def list_members(dataset_id: str, user: DatasetReadUser, page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200), q: str = "", asset_type: list[str] = Query(default=[]), tag: list[str] = Query(default=[]), match: str = Query("all", pattern="^(all|any)$"), no_tags: bool = False, ids_only: bool = False) -> dict[str, Any]:
+async def list_members(dataset_id: str, user: DatasetReadUser, page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200), q: str = "", asset_type: list[str] = Query(default=[]), tag: list[str] = Query(default=[]), match: str = Query("all", pattern="^(all|any)$"), no_tags: bool = False, ids_only: bool = False, split: list[str] = Query(default=[])) -> dict[str, Any]:
     await _get_dataset(dataset_id)
+    if any(value not in {"all", "unassigned", *SPLITS} for value in split):
+        raise AppError(400, "INVALID_SPLIT_FILTER", "图片用途筛选条件不正确")
+    selected_splits = set(split) - {"all"} if "all" not in split else set()
     clauses = [{"archived_at": None}, {"type": {"$ne": "annotation"}}]
     if q:
         import re
         clauses.append({"$or": [{"name": {"$regex": re.escape(q), "$options": "i"}}, {"remark": {"$regex": re.escape(q), "$options": "i"}}]})
     if asset_type:
         clauses.append({"type": {"$in": asset_type}})
+    if selected_splits:
+        clauses.append({"type": "image", "dataset_split": {"$in": sorted(selected_splits)}})
     if no_tags:
         clauses.append({"$or": [{"tags": {}}, {"tags": None}]})
     rules = []
@@ -483,11 +552,15 @@ async def list_members(dataset_id: str, user: DatasetReadUser, page: int = Query
         {"$match": {"dataset_id": dataset_id}},
         {"$lookup": {"from": "assets", "localField": "asset_id", "foreignField": "id", "as": "asset"}},
         {"$unwind": "$asset"},
+        {"$addFields": {"asset.dataset_split": {"$cond": [{"$eq": ["$asset.type", "image"]}, {"$ifNull": ["$split", "unassigned"]}, None]}}},
         {"$replaceRoot": {"newRoot": "$asset"}},
         {"$match": {"$and": clauses}},
         {"$sort": {"created_at": -1, "id": 1}},
 
     ]
+    if selected_splits:
+        membership_splits = sorted(selected_splits | ({None} if "unassigned" in selected_splits else set()), key=lambda value: value or "")
+        pipeline.insert(1, {"$match": {"split": {"$in": membership_splits}}})
     count_cursor = await db.dataset_memberships.aggregate([*pipeline, {"$count": "count"}])
     counts = await count_cursor.to_list(length=1)
     total = counts[0]["count"] if counts else 0
@@ -526,6 +599,74 @@ async def member_status(dataset_id: str, body: DatasetMembersRequest, user: Data
     return {"existing_ids": existing}
 
 
+async def _split_images(dataset_id: str) -> list[dict[str, Any]]:
+    rows = await db.dataset_memberships.find({"dataset_id": dataset_id}, {"asset_id": 1, "split": 1}).to_list(length=None)
+    if not rows:
+        return []
+    assets = await db.assets.find({"id": {"$in": [row["asset_id"] for row in rows]}, "type": "image", "archived_at": None}, {"id": 1, "name": 1, "sha256": 1, "size": 1}).to_list(length=None)
+    members = {row["asset_id"]: row for row in rows}
+    return [{**asset, "split": split_of(members[asset["id"]])} for asset in assets]
+
+
+@router.get("/{dataset_id}/split-stats")
+async def split_stats(dataset_id: str, user: DatasetReadUser) -> dict[str, Any]:
+    await _get_dataset(dataset_id)
+    images = await _split_images(dataset_id)
+    counts = {split: sum(split_of(item) == split for item in images) for split in (*SPLITS, "unassigned")}
+    return {"image_count": len(images), "counts": counts}
+
+
+@router.patch("/{dataset_id}/members/split")
+@serialize_dataset_write
+async def update_member_split(dataset_id: str, body: DatasetSplitUpdate, request: Request, user: DatasetMembersUser) -> dict[str, Any]:
+    await _get_dataset(dataset_id)
+    ids = list(dict.fromkeys(body.asset_ids))
+    images = await _split_images(dataset_id)
+    valid = {item["id"] for item in images}
+    if len(ids) != len(body.asset_ids) or not set(ids) <= valid:
+        raise AppError(400, "DATASET_SPLIT_ASSETS_INVALID", "只能为当前数据集的图片设置用途")
+    result = await db.dataset_memberships.update_many(
+        {"dataset_id": dataset_id, "asset_id": {"$in": ids}},
+        {"$set": {"split": body.split, "split_updated_at": now()}},
+    )
+    await db.datasets.update_one({"id": dataset_id}, {"$set": {"updated_at": now()}})
+    await record_audit(actor=user, action="dataset.split_updated", object_type="dataset", object_id=dataset_id, request_id=request.state.request_id, changes={"split": body.split, "count": result.matched_count})
+    return {"updated": result.matched_count, "split": body.split}
+
+
+async def _auto_split_report(dataset_id: str, body: DatasetAutoSplitRequest) -> dict[str, Any]:
+    images = await _split_images(dataset_id)
+    ratios = {"train": body.train, "val": body.val, "test": body.test}
+    preview = allocation_preview(dataset_id, images, ratios)
+    evidence = {"dataset_id": dataset_id, "ratios": ratios, "images": sorted((item["id"], item.get("sha256"), item.get("size"), item["split"]) for item in images)}
+    preview["token"] = hashlib.sha256(json.dumps(evidence, sort_keys=True, default=str).encode()).hexdigest()
+    return preview
+
+
+@router.post("/{dataset_id}/auto-split/preview")
+async def preview_auto_split(dataset_id: str, body: DatasetAutoSplitRequest, user: DatasetMembersUser) -> dict[str, Any]:
+    await _get_dataset(dataset_id)
+    preview = await _auto_split_report(dataset_id, body)
+    return {key: value for key, value in preview.items() if key != "assignments"}
+
+
+@router.post("/{dataset_id}/auto-split")
+@serialize_dataset_write
+async def apply_auto_split(dataset_id: str, body: DatasetAutoSplitRequest, request: Request, user: DatasetMembersUser) -> dict[str, Any]:
+    await _get_dataset(dataset_id)
+    preview = await _auto_split_report(dataset_id, body)
+    if body.preview_token != preview["token"]:
+        raise AppError(409, "DATASET_SPLIT_CHANGED", "图片或用途已变化，请重新预览")
+    for split in SPLITS:
+        ids = [asset_id for asset_id, value in preview["assignments"].items() if value == split]
+        if ids:
+            await db.dataset_memberships.update_many({"dataset_id": dataset_id, "asset_id": {"$in": ids}, "split": {"$in": [None, "unassigned"]}}, {"$set": {"split": split, "split_updated_at": now()}})
+    if preview["allocated_count"]:
+        await db.datasets.update_one({"id": dataset_id}, {"$set": {"updated_at": now()}})
+    await record_audit(actor=user, action="dataset.auto_split", object_type="dataset", object_id=dataset_id, request_id=request.state.request_id, changes={"counts": preview["counts"], "skipped_count": len(preview["skipped"])})
+    return {key: value for key, value in preview.items() if key != "assignments"}
+
+
 @router.post("/{dataset_id}/members")
 @serialize_dataset_write
 async def add_members(dataset_id: str, body: DatasetMembersRequest, request: Request, user: DatasetMembersUser) -> dict[str, Any]:
@@ -540,7 +681,7 @@ async def add_members(dataset_id: str, body: DatasetMembersRequest, request: Req
     for asset in valid:
         result = await db.dataset_memberships.update_one(
             {"dataset_id": dataset_id, "asset_id": asset["id"]},
-            {"$setOnInsert": {"id": new_id(), "dataset_id": dataset_id, "asset_id": asset["id"], "created_by": user["id"], "created_at": timestamp}},
+            {"$setOnInsert": {"id": new_id(), "dataset_id": dataset_id, "asset_id": asset["id"], "split": "unassigned" if asset["type"] == "image" else None, "created_by": user["id"], "created_at": timestamp}},
             upsert=True,
         )
         added += int(result.upserted_id is not None)
@@ -605,19 +746,17 @@ async def remove_members(dataset_id: str, body: DatasetMembersRequest, request: 
 @serialize_dataset_write
 async def publish_version(dataset_id: str, body: DatasetPublishRequest, request: Request, user: DatasetVersionPublishUser) -> dict[str, Any]:
     dataset = await _get_dataset(dataset_id)
+    report, assets = await _publication_quality(dataset_id)
+    if body.quality_token != report["token"]:
+        raise AppError(409, "DATASET_QUALITY_CHANGED", "数据集质量检查结果已变化，请刷新后重试")
     member_ids = await db.dataset_memberships.distinct("asset_id", {"dataset_id": dataset_id})
-    assets = (
-        await db.assets.find({"id": {"$in": member_ids}, "archived_at": None, "type": {"$ne": "model"}})
-        .sort("id", ASCENDING)
-        .to_list(length=len(member_ids))
-        if member_ids
-        else []
-    )
     invalid_ids = sorted(set(member_ids) - {item["id"] for item in assets})
     if invalid_ids:
         raise AppError(409, "DATASET_HAS_INVALID_ASSETS", "数据集中包含已删除或失效素材", {"asset_ids": invalid_ids})
     if not assets:
         raise AppError(400, "DATASET_EMPTY", "数据集中没有可发布的素材")
+    if report["warnings"] and not body.acknowledge_warnings:
+        raise AppError(409, "DATASET_QUALITY_ACK_REQUIRED", "请先确认数据集质量风险")
     members = [{"asset_id": asset["id"], "snapshot": _asset_snapshot(asset)} for asset in assets]
     digest = _content_digest(members)
     previous = await db.dataset_versions.find_one({"dataset_id": dataset_id}, sort=[("version_number", DESCENDING)])
@@ -628,7 +767,7 @@ async def publish_version(dataset_id: str, body: DatasetPublishRequest, request:
     if await db.dataset_versions.find_one({"dataset_id": dataset_id, "version": version_name}):
         raise AppError(409, "DATASET_VERSION_EXISTS", "该版本号已存在")
     timestamp = now()
-    version = {"id": new_id(), "dataset_id": dataset_id, "name": f"{dataset['name']} {version_name}", "kind": "dataset_version", "version": version_name, "version_number": number, "release_note": body.release_note, "member_count": len(members), "total_size": sum(m["snapshot"]["size"] for m in members), "content_digest": digest, "created_by": user["id"], "created_by_name": user.get("username", user["id"]), "created_at": timestamp}
+    version = {"id": new_id(), "dataset_id": dataset_id, "name": f"{dataset['name']} {version_name}", "kind": "dataset_version", "version": version_name, "version_number": number, "release_note": body.release_note, "member_count": len(members), "total_size": sum(m["snapshot"]["size"] for m in members), "content_digest": digest, "quality_summary": {"warnings": {key: len(report["issues"][key]) for key in report["warnings"]}, "missing_hash_count": report["missing_hash_count"], "acknowledged": body.acknowledge_warnings}, "created_by": user["id"], "created_by_name": user.get("username", user["id"]), "created_at": timestamp}
     try:
         await db.dataset_versions.insert_one(version)
         if members:
@@ -639,7 +778,7 @@ async def publish_version(dataset_id: str, body: DatasetPublishRequest, request:
         await db.dataset_versions.delete_one({"id": version["id"]})
         await db.datasets.update_one({"id": dataset_id, "current_version_id": version["id"]}, {"$set": {"current_version_id": dataset.get("current_version_id"), "current_version": dataset.get("current_version"), "updated_at": dataset["updated_at"]}})
         raise
-    await record_audit(actor=user, action="dataset.version_published", object_type="dataset_version", object_id=version["id"], request_id=request.state.request_id)
+    await record_audit(actor=user, action="dataset.version_published", object_type="dataset_version", object_id=version["id"], request_id=request.state.request_id, changes={"quality_summary": version["quality_summary"]})
     return public_document(version) or {}
 
 
@@ -958,6 +1097,7 @@ async def restore_version(dataset_id: str, body: DatasetRestoreRequest, request:
     )
     try:
         await _restore_memberships_from_version(dataset_id, body.version_id, user["id"])
+        await db.datasets.update_one({"id": dataset_id}, {"$set": {"current_version_id": body.version_id, "current_version": version["version"]}})
     except Exception:
         await _restore_memberships_from_backup(dataset_id, restore_id)
         with suppress(Exception):
@@ -982,13 +1122,58 @@ async def restore_version(dataset_id: str, body: DatasetRestoreRequest, request:
 
 
 @router.post("/{dataset_id}/export", status_code=202)
+@serialize_dataset_write
 async def export_dataset(dataset_id: str, body: DatasetExportRequest, request: Request, user: DatasetExportUser) -> dict[str, Any]:
     dataset = await _get_dataset(dataset_id)
-    asset_ids = await db.dataset_memberships.distinct("asset_id", {"dataset_id": dataset_id})
-    if not asset_ids:
+    memberships = await db.dataset_memberships.find({"dataset_id": dataset_id}, {"asset_id": 1, "split": 1}).to_list(length=None)
+    asset_ids = [item["asset_id"] for item in memberships]
+    assets = {item["id"]: item for item in await db.assets.find({"id": {"$in": asset_ids}, "archived_at": None}, {"id": 1, "name": 1, "type": 1}).to_list(length=None)}
+    image_splits = {item["asset_id"]: split_of(item) for item in memberships if assets.get(item["asset_id"], {}).get("type") == "image"}
+    if body.export_type == "current":
+        invalid = sorted(set(body.asset_ids) - {item for item in asset_ids if assets.get(item, {}).get("type") != "annotation"})
+        if invalid:
+            raise AppError(400, "DATASET_EXPORT_SELECTION_INVALID", "所选成员已不在当前数据集中，请重新选择", {"asset_ids": invalid})
+    selected_splits = set(body.splits if body.export_type == "categories" else [body.export_type] if body.export_type in {*SPLITS, "unassigned"} else [])
+    selected_images = ({item for item in body.asset_ids if item in image_splits} if body.export_type == "current" else {item for item, split in image_splits.items() if split in selected_splits} if selected_splits else set(image_splits))
+    relations = await db.relations.find({"relation_type": "annotates", "status": "active", "source_id": {"$in": [item for item in asset_ids if assets.get(item, {}).get("type") == "annotation"]}}, {"source_id": 1, "target_id": 1}).to_list(length=None)
+    annotation_splits: dict[str, set[str]] = {}
+    annotation_targets: dict[str, set[str]] = {}
+    for relation in relations:
+        annotation_targets.setdefault(relation["source_id"], set()).add(relation["target_id"])
+        annotation_splits.setdefault(relation["source_id"], set()).add(image_splits.get(relation["target_id"], "external"))
+    if body.export_type != "all":
+        conflicts = sorted(annotation_id for annotation_id, targets in annotation_targets.items() if targets & selected_images and not targets <= selected_images)
+        if conflicts:
+            raise AppError(409, "DATASET_EXPORT_SHARED_ANNOTATION", "标注还关联了导出范围外的图片，请先修正关系", {"asset_ids": conflicts})
+    entries = []
+    for member in memberships:
+        asset = assets.get(member["asset_id"])
+        if not asset:
+            continue
+        kind = asset.get("type")
+        if kind == "image":
+            split = image_splits[asset["id"]]
+            if asset["id"] not in selected_images:
+                continue
+            folder = split
+        elif kind == "annotation":
+            split_set = annotation_splits.get(asset["id"], set())
+            if body.export_type != "all" and not (annotation_targets.get(asset["id"], set()) & selected_images):
+                continue
+            folder = next(iter(split_set)) if len(split_set) == 1 and next(iter(split_set)) != "external" else "other"
+        else:
+            if body.export_type == "current" and asset["id"] not in body.asset_ids:
+                continue
+            if body.export_type not in {"all", "current"}:
+                continue
+            folder = "other"
+        entries.append({"asset_id": asset["id"], "name": asset["name"], "folder": folder})
+    if not entries:
         raise AppError(400, "DATASET_EMPTY", "数据集中没有可导出的素材")
     timestamp = now()
-    job = {"id": new_id(), "type": "dataset_export", "name": body.name or f"数据集导出：{dataset['name']}-{timestamp.strftime('%Y%m%d%H%M%S')}", "state": "queued", "progress": 0, "owner_id": user["id"], "input": {"asset_ids": asset_ids, "asset_count": len(asset_ids), "dataset_id": dataset_id}, "result": None, "error": None, "created_at": timestamp, "updated_at": timestamp, "expires_at": timestamp + timedelta(hours=settings.export_expiry_hours)}
+    label = {"all": "全部导出", "current": "导出当前", "train": "训练集", "val": "验证集", "test": "测试集", "unassigned": "未划分", "categories": "指定分类（" + "、".join(SPLIT_LABELS[split] for split in body.splits) + "）"}[body.export_type]
+    export_name = body.name or f"{dataset['name']} {dataset.get('current_version') or '未发布'} {label}"
+    job = {"id": new_id(), "type": "dataset_export", "name": export_name, "state": "queued", "progress": 0, "owner_id": user["id"], "input": {"asset_ids": [item["asset_id"] for item in entries], "asset_count": len(entries), "dataset_id": dataset_id, "export_type": body.export_type, "entries": entries}, "result": None, "error": None, "created_at": timestamp, "updated_at": timestamp, "expires_at": timestamp + timedelta(hours=settings.export_expiry_hours)}
     await db.jobs.insert_one(job)
     try:
         await asyncio.to_thread(celery_client.send_task, "worker.tasks.build_export", args=[job["id"]])
@@ -997,5 +1182,5 @@ async def export_dataset(dataset_id: str, body: DatasetExportRequest, request: R
         job["error"] = {"code": "TASK_DISPATCH_FAILED", "message": str(exc)[:500]}
         job["updated_at"] = now()
         await db.jobs.update_one({"id": job["id"]}, {"$set": {"state": job["state"], "error": job["error"], "updated_at": job["updated_at"]}})
-    await record_audit(actor=user, action="dataset.export_created", object_type="job", object_id=job["id"], request_id=request.state.request_id, changes={"dataset_id": dataset_id, "asset_count": len(asset_ids)})
+    await record_audit(actor=user, action="dataset.export_created", object_type="job", object_id=job["id"], request_id=request.state.request_id, changes={"dataset_id": dataset_id, "asset_count": len(entries), "export_type": body.export_type})
     return public_document(job) or {}

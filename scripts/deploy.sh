@@ -6,11 +6,18 @@ project_root="$(cd -- "$script_dir/.." && pwd)"
 env_file="$project_root/.env"
 env_example="$project_root/.env.example"
 prepare_only=false
+bundle=""
 
 if [[ "${1:-}" == "--prepare-only" ]]; then
   prepare_only=true
   shift
 fi
+if [[ "${1:-}" == "--bundle" ]]; then
+  (($# >= 2)) || { echo "--bundle 需要镜像包路径。" >&2; exit 2; }
+  bundle="$2"
+  shift 2
+fi
+if (($# > 0)); then echo "不支持的参数：$*" >&2; exit 2; fi
 
 random_secret() {
   local bytes="${1:-24}"
@@ -96,4 +103,19 @@ if [[ "$prepare_only" == true ]]; then
   exit 0
 fi
 
-exec "$script_dir/start.sh" --build "$@"
+if [[ -n "$bundle" ]]; then
+  bundle="$(realpath -- "$bundle")"
+  [[ -f "$bundle" && -f "$bundle.sha256" && -f "$bundle.platform" ]] || { echo "镜像包及其 .sha256、.platform 文件必须同时存在。" >&2; exit 1; }
+  command -v sha256sum >/dev/null || { echo "缺少 sha256sum。" >&2; exit 1; }
+  (cd -- "$(dirname -- "$bundle")" && sha256sum -c "$(basename -- "$bundle").sha256")
+  local_platform="$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}')"
+  bundle_platform="$(head -n 1 -- "$bundle.platform")"
+  [[ "$local_platform" == "$bundle_platform" ]] || { echo "镜像包架构与当前 Docker 引擎不一致。" >&2; exit 1; }
+  compose_file="$project_root/deploy/docker-compose.yml"
+  if ! diff -u <(tail -n +2 -- "$bundle.platform" | sort -u) <(docker compose --env-file "$env_file" -f "$compose_file" config --images | sort -u); then
+    echo "镜像包与当前 Compose 镜像名不匹配；请核对 APP_IMAGE_TAG、DOCKER_REGISTRY_PREFIX 和 MINIO_IMAGE。" >&2; exit 1
+  fi
+  docker load --input "$bundle"
+  exec "$script_dir/start.sh" --images
+fi
+exec "$script_dir/start.sh" --build

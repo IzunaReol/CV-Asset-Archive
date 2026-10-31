@@ -70,7 +70,7 @@ async def test_create_update_delete_metric(monkeypatch):
         insert_one=AsyncMock(), update_one=AsyncMock(return_value=SimpleNamespace(matched_count=1)),
         find_one=AsyncMock(return_value=row), delete_one=AsyncMock(return_value=SimpleNamespace(deleted_count=1)),
     )
-    assets = SimpleNamespace(update_many=AsyncMock())
+    assets = SimpleNamespace(count_documents=AsyncMock(return_value=0))
     monkeypatch.setattr(parameters, "db", SimpleNamespace(metric_definitions=collection, metric_categories=SimpleNamespace(find_one=AsyncMock(return_value={"name": "图像分类"})), assets=assets))
     monkeypatch.setattr(parameters, "record_audit", AsyncMock())
     monkeypatch.setattr(parameters, "new_id", lambda: "metric-1")
@@ -86,7 +86,25 @@ async def test_create_update_delete_metric(monkeypatch):
     assert collection.update_one.call_args.args[1]["$set"]["description"] == "描述"
     await parameters.delete_metric("metric-1", request, user)
     collection.delete_one.assert_awaited_once()
-    assets.update_many.assert_awaited_once()
+    assets.count_documents.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_metric_delete_preserves_configured_model_values(monkeypatch):
+    collection = SimpleNamespace(
+        find_one=AsyncMock(return_value={"id": "metric-1", "name": "自定义指标", "built_in": False}),
+        delete_one=AsyncMock(),
+    )
+    assets = SimpleNamespace(count_documents=AsyncMock(return_value=2))
+    monkeypatch.setattr(parameters, "db", SimpleNamespace(metric_definitions=collection, assets=assets))
+    usage = await parameters.metric_usage("metric-1", {"id": "admin"})
+    assert usage["model_count"] == 2
+    with pytest.raises(AppError) as blocked:
+        await parameters.delete_metric(
+            "metric-1", SimpleNamespace(state=SimpleNamespace(request_id="request-1")), {"id": "admin"},
+        )
+    assert blocked.value.code == "METRIC_DEFINITION_IN_USE"
+    collection.delete_one.assert_not_awaited()
 
 
 @pytest.mark.asyncio

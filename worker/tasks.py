@@ -914,7 +914,14 @@ def build_export(job_id: str) -> None:
         asset_count = database.assets.count_documents(asset_query)
         if not asset_count:
             raise ValueError("没有可导出的素材")
-        assets = database.assets.find(asset_query)
+        dataset_entries = job["input"].get("entries") if job.get("type") == "dataset_export" else None
+        if dataset_entries is not None:
+            asset_map = {item["id"]: item for item in database.assets.find(asset_query)}
+            if len(asset_map) != len(set(asset_ids)):
+                raise ValueError("导出素材已删除或失效，请重新创建导出任务")
+            assets = [asset_map[entry["asset_id"]] for entry in dataset_entries]
+        else:
+            assets = database.assets.find(asset_query)
         with tempfile.TemporaryDirectory(
             prefix="cv-archive-export-", dir=WORKER_TEMP_DIR
         ) as temp_dir:
@@ -926,14 +933,22 @@ def build_export(job_id: str) -> None:
                 for index, asset in enumerate(assets):
                     if job_cancelled(job_id):
                         return
-                    filename = Path(asset["name"]).name
-                    if filename in used_names:
+                    entry = dataset_entries[index] if dataset_entries is not None else None
+                    filename = os.path.basename(str((entry or asset)["name"]).replace("\\", "/"))
+                    if filename in {"", ".", ".."}:
+                        filename = asset["id"]
+                    folder = entry["folder"] if entry else ""
+                    if folder and folder not in {"train", "val", "test", "unassigned", "other"}:
+                        raise ValueError("导出类型无效")
+                    archive_name = f"{folder}/{filename}" if folder else filename
+                    if archive_name in used_names:
                         stem, suffix = os.path.splitext(filename)
                         filename = f"{stem}-{asset['id'][:8]}{suffix}"
-                    used_names.add(filename)
+                        archive_name = f"{folder}/{filename}" if folder else filename
+                    used_names.add(archive_name)
                     response = storage.get_object(MINIO_BUCKET, asset["object_key"])
                     try:
-                        with archive.open(filename, "w") as output:
+                        with archive.open(archive_name, "w") as output:
                             for chunk in response.stream(1024 * 1024):
                                 output.write(chunk)
                     finally:

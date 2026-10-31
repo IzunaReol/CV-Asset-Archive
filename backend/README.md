@@ -1,6 +1,6 @@
 # API 服务
 
-当前包及 OpenAPI 版本为 **2.0.0**，接口仍使用 `/api/v1`。新增项目聚合、指标分类与定义、模型参数、使用影响查询和素材历史分页；定义管理与模型取值编辑使用不同权限。详见[API 约定](../docs/api-conventions.md)和[模型参数](../docs/model-parameters.md)。
+当前包及 OpenAPI 版本为 **2.1.0**，接口仍使用 `/api/v1`。本版增加数据集发布预检、图片分类与导出、模型搜索分页及参数修订号校验。详见[API 约定](../docs/api-conventions.md)、[数据集说明](../docs/datasets.md)和[模型参数](../docs/model-parameters.md)。
 
 FastAPI 服务提供认证与 RBAC、素材元数据、分片上传会话、标签与格式、关系、模型图谱、数据集与保存视图、回收站、统一任务、用户和审计接口。刷新令牌使用 `HttpOnly` Cookie，服务启动时会恢复长时间无更新的异常任务、保护默认标签，并在生产模式拒绝默认密钥。
 

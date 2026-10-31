@@ -21,6 +21,8 @@ const categoryEditingId = ref<string|null>(null)
 const categoryFormOpen = ref(false)
 const pendingCategoryDelete = ref<Category|null>(null)
 const pendingDelete = ref<Metric|null>(null)
+const deleteImpact = ref<number|null>(null)
+const deleteImpactLoading = ref(false)
 const collapsedCategories = ref<Set<string>>(new Set())
 const draft = ref<Draft>({name:'', category:'图像分类', description:''})
 const grouped = computed(() => categories.value.map(category => ({
@@ -104,7 +106,7 @@ function openEditCategory(category:Category) {
   categoryFormOpen.value = true
 }
 async function remove() {
-  if (!props.canManage || !pendingDelete.value || saving.value) return
+  if (!props.canManage || !pendingDelete.value || saving.value || deleteImpactLoading.value || deleteImpact.value !== 0) return
   saving.value = true
   try {
     await api.deleteMetric(pendingDelete.value.id)
@@ -113,6 +115,14 @@ async function remove() {
     await load()
   } catch (error) { emit('notify', error instanceof Error ? error.message : '指标参数删除失败', 'error') }
   finally { saving.value = false }
+}
+async function openDelete(row:Metric) {
+  pendingDelete.value = row
+  deleteImpact.value = null
+  deleteImpactLoading.value = true
+  try { deleteImpact.value = (await api.metricUsage(row.id)).model_count }
+  catch (error) { emit('notify', error instanceof Error ? error.message : '使用影响查询失败', 'error') }
+  finally { deleteImpactLoading.value = false }
 }
 async function removeCategory() {
   if (!props.canManage || !pendingCategoryDelete.value || saving.value) return
@@ -137,7 +147,7 @@ onMounted(load)
 </script>
 
 <template>
-  <section class="page-head"><div><h1>参数管理</h1><p>配置模型评估指标的名称、分类与描述</p></div><div v-if="canManage" class="primary-actions"><button class="secondary" @click="openCategoryEditor">分类编辑</button><button class="primary" @click="openCreate">＋ 新增指标</button></div></section>
+  <section class="page-head"><div><h1>参数管理</h1></div><div v-if="canManage" class="primary-actions"><button class="secondary" @click="openCategoryEditor">分类编辑</button><button class="primary" @click="openCreate">＋ 新增指标</button></div></section>
   <div v-if="loading" class="empty">正在加载指标参数…</div>
   <div v-else class="metric-groups">
     <section v-for="group in grouped" :key="group.category.id" class="metric-group">
@@ -149,7 +159,7 @@ onMounted(load)
         <div v-for="row in group.items" :key="row.id" class="metric-row">
           <b>{{row.name}} <small v-if="row.built_in">预置</small></b>
           <span>{{row.description}}</span>
-          <div v-if="canManage" class="metric-actions"><button @click="openEdit(row)">编辑</button><button v-if="!row.built_in" class="danger-inline" @click="pendingDelete=row">删除</button></div>
+          <div v-if="canManage" class="metric-actions"><button @click="openEdit(row)">编辑</button><button v-if="!row.built_in" class="danger-inline" @click="openDelete(row)">删除</button></div>
         </div>
       </div></div></div>
     </section>
@@ -173,7 +183,8 @@ onMounted(load)
   </section></div>
   <div v-if="pendingDelete" class="modal-stage confirm-stage"><section class="upload-dialog compact-dialog confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="metric-delete-title">
     <h2 id="metric-delete-title">删除指标参数</h2><p>确定删除“{{pendingDelete.name}}”吗？</p>
-    <div class="dialog-actions"><button class="secondary" :disabled="saving" @click="pendingDelete=null">取消</button><button class="confirm-delete" :disabled="saving" @click="remove">{{saving?'正在处理…':'确认删除'}}</button></div>
+    <p v-if="deleteImpactLoading">正在检查模型引用…</p><p v-else-if="deleteImpact === null">暂时无法确认使用影响，请重试。</p><p v-else-if="deleteImpact > 0">已有 {{deleteImpact}} 个模型配置了该指标，请先清除这些模型的参数值。</p>
+    <div class="dialog-actions"><button class="secondary" :disabled="saving" @click="pendingDelete=null">取消</button><button class="confirm-delete" :disabled="saving||deleteImpactLoading||deleteImpact!==0" @click="remove">{{saving?'正在处理…':'确认删除'}}</button></div>
   </section></div>
   <div v-if="pendingCategoryDelete" class="modal-stage confirm-stage"><section class="upload-dialog compact-dialog confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="metric-category-delete-title">
     <h2 id="metric-category-delete-title">删除指标分类</h2><p>确定删除“{{pendingCategoryDelete.name}}”分类吗？</p>

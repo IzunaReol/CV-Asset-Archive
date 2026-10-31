@@ -38,6 +38,7 @@ async def ensure_indexes() -> None:
         [("dataset_id", ASCENDING), ("asset_id", ASCENDING)], unique=True
     )
     await db.dataset_memberships.create_index([("asset_id", ASCENDING)])
+    await db.dataset_memberships.create_index([("dataset_id", ASCENDING), ("split", ASCENDING), ("asset_id", ASCENDING)])
     await db.dataset_versions.create_index(
         [("dataset_id", ASCENDING), ("version_number", ASCENDING)], unique=True
     )

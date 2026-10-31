@@ -219,6 +219,26 @@ class DatasetMembersRequest(BaseModel):
 class DatasetPublishRequest(BaseModel):
     version: str = Field(pattern=r"^v?[A-Za-z0-9][A-Za-z0-9._-]{0,31}$")
     release_note: str = Field(default="", max_length=2000)
+    quality_token: str = Field(min_length=64, max_length=64)
+    acknowledge_warnings: bool = False
+
+
+class DatasetSplitUpdate(BaseModel):
+    asset_ids: list[str] = Field(min_length=1, max_length=100000)
+    split: Literal["train", "val", "test", "unassigned"]
+
+
+class DatasetAutoSplitRequest(BaseModel):
+    train: int = Field(default=8, ge=0, le=10000)
+    val: int = Field(default=1, ge=0, le=10000)
+    test: int = Field(default=1, ge=0, le=10000)
+    preview_token: str | None = Field(default=None, min_length=64, max_length=64)
+
+    @model_validator(mode="after")
+    def require_positive_ratio(self):
+        if not (self.train or self.val or self.test):
+            raise ValueError("至少一个分配比例必须大于零")
+        return self
 
 
 class DatasetRestoreRequest(BaseModel):
@@ -227,6 +247,23 @@ class DatasetRestoreRequest(BaseModel):
 
 class DatasetExportRequest(BaseModel):
     name: str | None = Field(default=None, max_length=120)
+    export_type: Literal["all", "train", "val", "test", "unassigned", "current", "categories"] = "all"
+    asset_ids: list[str] = Field(default_factory=list)
+    splits: list[Literal["train", "val", "test", "unassigned"]] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_selection(self):
+        if self.export_type == "current" and not self.asset_ids:
+            raise ValueError("导出当前需要选择成员")
+        if self.export_type == "categories" and not self.splits:
+            raise ValueError("导出指定分类需要至少选择一个分类")
+        if self.export_type != "current" and self.asset_ids:
+            raise ValueError("仅导出当前支持指定成员")
+        if self.export_type != "categories" and self.splits:
+            raise ValueError("仅导出指定分类支持多个分类")
+        self.asset_ids = list(dict.fromkeys(self.asset_ids))
+        self.splits = list(dict.fromkeys(self.splits))
+        return self
 
 
 class DatasetModelLinkRequest(BaseModel):
@@ -270,6 +307,7 @@ class MetricCategoryCreate(BaseModel):
 
 class ModelParameterUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    revision: int = Field(ge=0)
     values: dict[str, str | None]
 
     @field_validator("values")

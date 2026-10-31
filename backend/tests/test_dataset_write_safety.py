@@ -78,7 +78,7 @@ def test_pending_restore_is_replayed_before_next_write(monkeypatch):
     )
     database = SimpleNamespace(
         datasets=datasets_collection,
-        dataset_versions=SimpleNamespace(find_one=AsyncMock(return_value={'id': 'version'})),
+        dataset_versions=SimpleNamespace(find_one=AsyncMock(return_value={'id': 'version', 'version': 'v1'})),
         dataset_version_memberships=SimpleNamespace(find=lambda query: AsyncCursor(members)),
         dataset_memberships=memberships,
         dataset_restore_backups=SimpleNamespace(delete_many=AsyncMock()),

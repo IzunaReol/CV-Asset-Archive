@@ -6,9 +6,9 @@
 
 分页列表响应包含 `items`、`page`、`page_size` 和 `total`；指标与分类等非分页列表按各接口返回，不强制分页字段。素材列表还返回 `next_cursor`；按相同筛选和排序传入 `after=<next_cursor>` 可连续读取下一页，原有页码参数仍可使用。批量操作返回成功数、失败数和逐项 `details`；单项失败不回滚已成功项，明细达到保护上限时返回 `details_truncated=true`。
 
-## v2.0.0 接口补充
+## v2.0.0–v2.1.0 接口补充
 
-以下路径均在 `/api/v1` 下，完整请求模型以 OpenAPI 为准。产品版本为 2.0.0，接口前缀仍为 `/api/v1`。
+以下路径均在 `/api/v1` 下，完整请求模型以 OpenAPI 为准。产品版本为 2.1.0，接口前缀仍为 `/api/v1`。
 
 | 接口 | 行为 |
 | --- | --- |
@@ -17,8 +17,10 @@
 | `GET /metric-categories`、`POST /metric-categories` | 查询、创建指标分类 |
 | `PATCH /metric-categories/{category_id}`、`DELETE /metric-categories/{category_id}` | 修改、删除自定义分类；内置项受保护，分类有指标时禁止删除 |
 | `GET /metric-definitions`、`POST /metric-definitions` | 查询、创建指标定义 |
-| `PATCH /metric-definitions/{metric_id}`、`DELETE /metric-definitions/{metric_id}` | 修改、删除指标；内置指标不可删除，删除自定义指标同步清除模型取值 |
-| `GET /assets/{asset_id}/parameters`、`PATCH /assets/{asset_id}/parameters` | 读取、保存模型参数；保存 `values` 为整份替换，非逐键合并，需提交全部保留值 |
+| `PATCH /metric-definitions/{metric_id}`、`DELETE /metric-definitions/{metric_id}` | 修改、删除指标；内置指标不可删除，已被模型配置的自定义指标须先清除模型取值 |
+| `GET /metric-definitions/{metric_id}/usage` | 返回配置了该指标的模型数量 |
+| `GET /assets/{asset_id}/parameters`、`PATCH /assets/{asset_id}/parameters` | 读取、保存模型参数；PATCH 须带 GET 返回的 `revision`，过期版本返回 409；`values` 为整份替换 |
+| `GET /assets/model-options` | 模型关联选择器：按名称或备注搜索 `q`，使用 `page`、`page_size` 分页，只返回模型 ID、名称和备注 |
 | `PATCH /datasets/{dataset_id}/models/{relation_id}` | 只更新关联备注，不更换模型或版本 |
 | `POST /assets/usage-impact` | 查询删除或覆盖的素材使用影响 |
 | `GET /assets/{asset_id}/history` | 返回 `items`、`total`、`page`、`page_size`，默认每页 100、上限 200 |
@@ -96,6 +98,9 @@ CVAT 在线任务和 MLflow 接口尚未实现。
 - `GET /roles` 返回 `menus`、`actions`、固定角色默认权限和可复制的权限模板，供用户管理界面展示。
 - `GET /permissions/me` 返回当前登录用户实时生效的角色、菜单和操作权限，前端用它处理权限变化和“我的权限”展示。
 - 数据集写入拆分为创建编辑、成员管理、版本发布、版本恢复、删除和模型关联权限；保存视图使用独立操作权限。
+- `GET /datasets/{id}/publication-quality` 使用版本发布权限，返回阻断项、风险提醒、受影响素材和 `token`；`POST /datasets/{id}/versions` 需提交 `quality_token`，有提醒时还需 `acknowledge_warnings=true`。预检结果变化返回 `409 / DATASET_QUALITY_CHANGED`。
+- `GET /datasets/{id}/members?split=` 支持 `all/unassigned/train/val/test`，`GET /datasets/{id}/split-stats` 返回图片用途统计；`PATCH /datasets/{id}/members/split` 批量设置图片用途，`POST /datasets/{id}/auto-split/preview` 与 `POST /datasets/{id}/auto-split` 分别预览和确认自动分配。
+- `POST /datasets/{id}/export` 的 `export_type` 支持 `all`（缺省）、`current`（需传当前成员 `asset_ids`）、`categories`（需传一个或多个 `splits`，取值 `train|val|test|unassigned`）；旧的单分类调用 `train|val|test` 仍兼容。部分导出若标注还关联了导出范围外的图片，返回 `409 / DATASET_EXPORT_SHARED_ANNOTATION`；新建标注关联若该标注已有其他图片返回 `409 / ANNOTATION_ALREADY_LINKED`。
 - 创建素材导出必须同时具备任务中心、素材库和导出权限；创建数据集导出必须同时具备任务中心、数据集和导出权限。
 - 管理员更新用户资料或权限后，服务端立即撤销该用户的刷新会话。
 - `GET /audit-logs` 使用独立的系统日志菜单权限，支持 `q`、`actor_id`、`action`、`object_type`、`created_from`、`created_to`、`page` 和 `page_size`；`GET /audit-logs/export` 按相同条件导出 CSV，最多 10000 条。

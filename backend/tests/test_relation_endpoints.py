@@ -82,6 +82,18 @@ async def test_create_relation_rejects_active_duplicate(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_new_annotation_relation_rejects_second_image(monkeypatch):
+    store = SimpleNamespace(find_one=AsyncMock(return_value={"target_id": "image-1"}))
+    monkeypatch.setattr(relations, "db", SimpleNamespace(relations=store))
+    with pytest.raises(AppError) as error:
+        await relations._create_relation_locked(
+            RelationCreate(source_id="annotation-1", target_id="image-2", relation_type="annotates"),
+            request(), user(),
+        )
+    assert error.value.code == "ANNOTATION_ALREADY_LINKED"
+
+
+@pytest.mark.asyncio
 async def test_create_relations_reports_partial_failure(monkeypatch):
     created = AsyncMock(side_effect=[{"id": "ok"}, AppError(422, "BAD", "无效关系")])
     monkeypatch.setattr(relations, "create_relation", created)
@@ -94,6 +106,18 @@ async def test_create_relations_reports_partial_failure(monkeypatch):
 
     assert result["succeeded"] == [{"id": "ok"}]
     assert result["failed"][0]["code"] == "BAD"
+
+
+@pytest.mark.asyncio
+async def test_batch_preview_rejects_one_annotation_for_two_images(monkeypatch):
+    monkeypatch.setattr(relations, "preview_relation_item", AsyncMock(return_value={"code": "READY"}))
+    body = RelationBatchRequest(relations=[
+        {"source_id": "annotation", "target_id": "a", "relation_type": "annotates"},
+        {"source_id": "annotation", "target_id": "b", "relation_type": "annotates"},
+    ])
+    result = await relations.preview_relations(body, user())
+    assert result["counts"] == {"ready": 1, "existing": 0, "invalid": 1}
+    assert result["invalid"][0]["code"] == "ANNOTATION_ALREADY_LINKED"
 
 
 @pytest.mark.asyncio

@@ -1,5 +1,5 @@
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import PurePath
 from typing import Any
 
@@ -128,6 +128,10 @@ async def preview_relation_item(item: RelationCreate) -> dict[str, Any]:
             "existing_relation_id": existing["id"],
         }
     if item.relation_type.value == "annotates":
+        other = await db.relations.find_one({"source_id": item.source_id, "relation_type": "annotates", "status": "active", "target_id": {"$ne": item.target_id}})
+        if other:
+            return {**result, "code": "ANNOTATION_ALREADY_LINKED", "message": "一份标注只能关联一张图片", "existing_target_id": other["target_id"]}
+    if item.relation_type.value == "annotates":
         result["dataset_effects"] = await annotation_dataset_effect(item.source_id, item.target_id)
     elif item.relation_type.value == "trained_on" and target.get("kind") == "dataset_version":
         result["version_members"] = target.get("member_count", 0)
@@ -160,6 +164,28 @@ async def create_relation(
     body: RelationCreate, request: Request, user: RelationWriteUser
 ) -> dict[str, Any]:
     await validate_relation(body)
+    lock_token = None
+    if body.relation_type.value == "annotates":
+        lock_token = new_id()
+        acquired = await db.assets.update_one(
+            {"id": body.source_id, "type": "annotation", "archived_at": None,
+             "$or": [{"relation_write_token": None}, {"relation_write_expires_at": {"$lte": now()}}]},
+            {"$set": {"relation_write_token": lock_token, "relation_write_expires_at": now() + timedelta(minutes=2)}},
+        )
+        if not acquired.modified_count:
+            raise AppError(409, "ANNOTATION_RELATION_BUSY", "标注关联正在修改，请稍后重试")
+    try:
+        return await _create_relation_locked(body, request, user)
+    finally:
+        if lock_token:
+            await db.assets.update_one({"id": body.source_id, "relation_write_token": lock_token}, {"$unset": {"relation_write_token": "", "relation_write_expires_at": ""}})
+
+
+async def _create_relation_locked(body: RelationCreate, request: Request, user: RelationWriteUser) -> dict[str, Any]:
+    if body.relation_type.value == "annotates":
+        existing_target = await db.relations.find_one({"source_id": body.source_id, "relation_type": "annotates", "status": "active", "target_id": {"$ne": body.target_id}})
+        if existing_target:
+            raise AppError(409, "ANNOTATION_ALREADY_LINKED", "一份标注只能关联一张图片", {"target_id": existing_target["target_id"]})
     previous = await db.relations.find_one(
         {
             "source_id": body.source_id,
@@ -224,8 +250,15 @@ async def create_relations(
 @router.post("/preview")
 async def preview_relations(body: RelationBatchRequest, user: RelationReadUser) -> dict[str, Any]:
     groups: dict[str, list[dict[str, Any]]] = {"ready": [], "existing": [], "invalid": []}
+    pending_annotation_targets: dict[str, str] = {}
     for item in body.relations:
         result = await preview_relation_item(item)
+        if result["code"] == "READY" and item.relation_type.value == "annotates":
+            previous_target = pending_annotation_targets.get(item.source_id)
+            if previous_target and previous_target != item.target_id:
+                result = {**result, "code": "ANNOTATION_ALREADY_LINKED", "message": "同一批次中一份标注只能关联一张图片", "existing_target_id": previous_target}
+            else:
+                pending_annotation_targets[item.source_id] = item.target_id
         if result["code"] == "READY":
             groups["ready"].append(result)
         elif result["code"] == "RELATION_EXISTS":
@@ -323,7 +356,8 @@ async def preview_annotation_matches(
     }
     active_relations = [item async for item in db.relations.find(relation_query)]
     existing_pairs = {(item["source_id"], item["target_id"]): item for item in active_relations}
-    images_with_relation = {item["target_id"] for item in active_relations}
+    annotation_targets = {item["source_id"]: item["target_id"] for item in active_relations}
+    planned_targets: dict[str, str] = {}
     ready = []
     existing = []
     image_conflicts = []
@@ -366,9 +400,13 @@ async def preview_annotation_matches(
             "relation_type": "annotates",
         }
         previous = existing_pairs.get((annotation["id"], image["id"]))
-        if previous or image["id"] in images_with_relation:
+        if previous:
             existing.append({**pair, "existing_relation_id": (previous or {}).get("id")})
+        elif (annotation_targets.get(annotation["id"]) or planned_targets.get(annotation["id"])) not in {None, image["id"]}:
+            conflicted_annotation_ids.add(annotation["id"])
+            annotation_conflicts.append({"stem": stem, "items": [relation_asset_summary(annotation)], "message": "一份标注只能关联一张图片"})
         else:
+            planned_targets[annotation["id"]] = image["id"]
             pair["dataset_effects"] = await annotation_dataset_effect(annotation["id"], image["id"])
             ready.append(pair)
 

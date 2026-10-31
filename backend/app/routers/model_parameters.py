@@ -29,6 +29,7 @@ async def get_model_parameters(asset_id: str, user: AssetReadUser) -> dict[str, 
     values = asset.get("metric_values") or {}
     return {
         "asset_id": asset_id,
+        "revision": asset.get("metric_values_revision", 0),
         "items": [
             {
                 "id": item["id"], "name": item["name"], "category": item["category"],
@@ -43,22 +44,30 @@ async def get_model_parameters(asset_id: str, user: AssetReadUser) -> dict[str, 
 async def update_model_parameters(
     asset_id: str, body: ModelParameterUpdate, request: Request, user: AssetEditUser,
 ) -> dict[str, Any]:
-    await model_asset(asset_id)
+    asset = await model_asset(asset_id)
     metric_ids = set(body.values)
     existing_ids = set(await db.metric_definitions.distinct("id", {"id": {"$in": list(metric_ids)}}))
     if metric_ids != existing_ids:
         raise AppError(400, "METRIC_DEFINITION_NOT_FOUND", "部分指标已被删除，请刷新后重试")
     values = {metric_id: value for metric_id, value in body.values.items() if value is not None}
     timestamp = now()
+    revision_filter = (
+        {"$in": [None, 0]} if body.revision == 0 else body.revision
+    )
     result = await db.assets.update_one(
-        {"id": asset_id, "type": "model", "archived_at": None},
-        {"$set": {"metric_values": values, "modified_at": timestamp, "updated_at": timestamp}},
+        {"id": asset_id, "type": "model", "archived_at": None,
+         "metric_values_revision": revision_filter},
+        {"$set": {"metric_values": values, "modified_at": timestamp, "updated_at": timestamp},
+         "$inc": {"metric_values_revision": 1}},
     )
     if not result.matched_count:
+        if await db.assets.find_one({"id": asset_id, "type": "model", "archived_at": None}):
+            raise AppError(409, "MODEL_PARAMETERS_CONFLICT", "模型参数已被其他人修改，请重新加载后再保存")
         raise AppError(404, "MODEL_ASSET_NOT_FOUND", "模型素材不存在或已归档")
     await record_audit(
         actor=user, action="asset.model_parameters_updated", object_type="asset",
         object_id=asset_id, object_name=None, request_id=request.state.request_id,
-        changes={"configured_count": len(values)},
+        changes={"before": asset.get("metric_values") or {}, "after": values,
+                 "revision": body.revision + 1},
     )
     return await get_model_parameters(asset_id, user)

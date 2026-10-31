@@ -268,3 +268,4 @@ html.is-scrolling::-webkit-scrollbar-thumb { background:color-mix(in srgb,#71809
 .usage-impact-list{display:grid;gap:8px;overflow:auto;max-height:340px}
 .usage-impact-list article{display:grid;gap:4px;padding:9px 10px;border:1px solid var(--line);border-radius:6px;overflow-wrap:anywhere}
 .usage-impact-list strong{font-size:13px}.usage-impact-list span{font-size:12px;color:var(--muted);line-height:1.5}
+.prototype select:not([multiple]){padding-left:11px}

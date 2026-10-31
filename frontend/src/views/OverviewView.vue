@@ -55,7 +55,7 @@ watch(() => props.userId, userId => { if (userId) void refresh() }, { immediate:
 </script>
 
 <template>
-  <section class="page-head"><div><h1>系统概览</h1><p>快速查看资产规模、任务状态和近期操作。</p></div><button class="secondary" @click="refresh">刷新</button></section>
+  <section class="page-head"><div><h1>系统概览</h1></div><button class="secondary" @click="refresh">刷新</button></section>
   <section v-if="loading" class="state-panel"><div class="spinner"></div><b>正在加载系统概览</b></section>
   <div v-else class="overview-shell">
     <section class="overview-cards"><article><small>素材总数</small><b>{{data.counts?.assets??'—'}}</b><button v-if="canViewMenu('library')" @click="emit('navigate','library')">查看素材</button></article><article><small>数据集</small><b>{{data.counts?.datasets??'—'}}</b><button v-if="canViewMenu('datasets')" @click="emit('navigate','datasets')">查看数据集</button></article><article><small>生效关系</small><b>{{data.counts?.relations??'—'}}</b><button v-if="canViewMenu('relations')" @click="emit('navigate','relations')">查看关系</button></article><article :class="{warning:data.counts?.failed_jobs}"><small>处理中 / 近 7 日失败</small><b>{{data.counts?.running_jobs??0}} / {{data.counts?.failed_jobs??0}}</b><button v-if="canViewMenu('downloads')" @click="emit('navigate','downloads')">查看任务</button></article></section>

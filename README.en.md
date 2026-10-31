@@ -2,7 +2,7 @@
 
 English | [简体中文](README.md)
 
-Current version: **v2.0.0**. See the [release notes](docs/releases/v2.0.0.md) and [release checklist](docs/release-checklist.md) for changes and remaining validation limits.
+Pending release: **v2.1.0**. See the [release notes](docs/releases/v2.1.0.md) and [release checklist](docs/release-checklist.md) for changes and remaining validation limits.
 
 CV Asset Archive is an asset and relationship management system for computer vision teams. It stores images, videos, annotations, models, and archives in one place, with search, annotation preview, lineage tracking, recycle-bin recovery, and asynchronous exports.
 
@@ -134,13 +134,13 @@ npm run test:ui
 npm run build
 ```
 
-The isolated API workflow test is available at `scripts/runtime-e2e.py`. See the [testing guide](docs/testing.md) and [v2.0.0 release checklist](docs/release-checklist.md) for results and remaining validation gates. Mocked browser tests do not constitute real end-to-end acceptance.
+The isolated API workflow test is available at `scripts/runtime-e2e.py`. See the [testing guide](docs/testing.md) and [v2.1.0 release checklist](docs/release-checklist.md) for results and remaining validation gates. Mocked browser tests do not constitute real end-to-end acceptance.
 
-## Preparing to upgrade to v2.0.0
+## Preparing to upgrade to v2.1.0
 
-Back up MongoDB, MinIO, and deployment configuration and retain old images before upgrading from v1.6.1. Verify project overview, dataset projects, model parameters, deletion impact, and navigation. Startup seeds missing metric definitions without overwriting existing configuration; no manual migration is required. Legacy datasets require projects before editing or copying. Rolling back images does not undo data changes. This preparation does not redeploy Docker.
+Back up MongoDB, MinIO, and deployment configuration and retain old images before upgrading from v2.0.0. Verify publication quality checks, image splits, version restoration, exports, and model parameter revisions. Legacy images default to unassigned; existing one-to-many annotation links remain. Older clients must adopt the publication token and parameter revision. Rolling back images does not undo data changes. This is release preparation only; nothing has been pushed to Git.
 
-See the [dataset guide](docs/datasets.md), [model parameters](docs/model-parameters.md), and [v2.0.0 release notes](docs/releases/v2.0.0.md). MLflow integration is not implemented.
+See the [dataset guide](docs/datasets.md), [model parameters](docs/model-parameters.md), and [v2.1.0 release notes](docs/releases/v2.1.0.md). MLflow integration is not implemented.
 
 ## Documentation
 

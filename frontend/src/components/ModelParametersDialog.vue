@@ -9,6 +9,10 @@ const rows = ref<Metric[]>([])
 const values = ref<Record<string,string>>({})
 const loading = ref(true)
 const saving = ref(false)
+const revision = ref(0)
+const loadError = ref(false)
+const initialValues = ref('{}')
+const dirty = computed(() => JSON.stringify(values.value) !== initialValues.value)
 const grouped = computed(() => {
   const groups = new Map<string,Metric[]>()
   for (const row of rows.value) {
@@ -24,7 +28,11 @@ async function load() {
     const result = await api.modelParameters(props.assetId)
     rows.value = result.items
     values.value = Object.fromEntries(result.items.map(item => [item.id, item.value || '']))
+    revision.value = result.revision
+    initialValues.value = JSON.stringify(values.value)
+    loadError.value = false
   } catch (error) {
+    loadError.value = true
     emit('notify', error instanceof Error ? error.message : '模型参数加载失败', 'error')
   } finally { loading.value = false }
 }
@@ -34,7 +42,7 @@ async function save() {
   saving.value = true
   try {
     const payload = Object.fromEntries(rows.value.map(item => [item.id, values.value[item.id]?.trim() || null]))
-    await api.updateModelParameters(props.assetId, payload)
+    await api.updateModelParameters(props.assetId, revision.value, payload)
     emit('notify', '模型参数已保存')
     emit('saved')
     emit('close')
@@ -44,20 +52,27 @@ async function save() {
 }
 
 onMounted(load)
+function requestClose() {
+  if (saving.value) return
+  if (props.canEdit && dirty.value && !window.confirm('参数尚未保存，确定放弃修改吗？')) return
+  emit('close')
+}
+defineExpose({ requestClose })
 </script>
 
 <template>
   <div class="modal-stage model-parameters-stage"><section class="upload-dialog model-parameters-dialog" role="dialog" aria-modal="true" aria-labelledby="model-parameters-title">
-    <button class="close" aria-label="关闭参数配置弹窗" :disabled="saving" @click="emit('close')">×</button>
+    <button class="close" aria-label="关闭参数配置弹窗" :disabled="saving" @click="requestClose">×</button>
     <h2 id="model-parameters-title">参数配置</h2><p class="model-parameters-name">{{assetName}}</p>
     <div v-if="loading" class="model-parameters-empty">正在加载模型参数…</div>
+    <div v-else-if="loadError" class="model-parameters-empty">模型参数加载失败。<button class="secondary" @click="load">重试</button></div>
     <div v-else-if="!rows.length" class="model-parameters-empty">暂无可配置参数，请先在参数管理中新增指标。</div>
     <div v-else class="model-parameters-groups">
       <section v-for="group in grouped" :key="group.name"><h3>{{group.name}}</h3>
         <label v-for="row in group.items" :key="row.id" class="model-parameter-row"><span><b>{{row.name}}</b><small v-if="row.description">{{row.description}}</small></span><input v-model="values[row.id]" :aria-label="row.name" :disabled="!canEdit||saving" maxlength="200" placeholder="未配置" /></label>
       </section>
     </div>
-    <div class="dialog-actions"><button class="secondary" :disabled="saving" @click="emit('close')">{{canEdit?'取消':'关闭'}}</button><button v-if="canEdit" class="primary" :disabled="loading||saving||!rows.length" @click="save">{{saving?'保存中…':'保存参数'}}</button></div>
+    <div class="dialog-actions"><button class="secondary" :disabled="saving" @click="requestClose">{{canEdit?'取消':'关闭'}}</button><button v-if="canEdit" class="primary" :disabled="loading||loadError||saving||!rows.length||!dirty" @click="save">{{saving?'保存中…':'保存参数'}}</button></div>
   </section></div>
 </template>
 
