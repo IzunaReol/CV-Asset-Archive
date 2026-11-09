@@ -17,6 +17,7 @@
 - [ ] 在本地 2.2.0 Docker 上手工验证真实账号登录、上传、导出、指标排序和 API 再次重建后的代理访问。
 - [ ] Linux 全新部署、备份恢复、10 GiB 续传、10 万条元数据性能与完整角色矩阵。未执行时在 Release 中保持限制说明。
 - [x] 2026-11-09：前端生产依赖 `npm audit --omit=dev --audit-level=high` 为 0 项漏洞。
+- [x] 首次远程 CI 发现 `ubuntu-latest` 已指向 Playwright 1.55.1 不支持的 Ubuntu 26.04；前端任务固定到 Ubuntu 24.04 后重新验证。
 - [ ] 全新 API／Worker／前端镜像构建、Python 依赖审计、镜像扫描、密钥扫描与 CI 通过。
 
 ## 发布前确认
