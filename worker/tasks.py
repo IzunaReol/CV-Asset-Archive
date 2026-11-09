@@ -4,6 +4,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import subprocess
 import tempfile
 import threading
@@ -910,6 +911,8 @@ def build_export(job_id: str) -> None:
             asset_ids = [item for item in selection["asset_ids"] if item not in excluded]
         else:
             asset_ids = job["input"]["asset_ids"]
+        if job.get("type") == "export":
+            asset_ids = list(dict.fromkeys([*asset_ids, *job["input"].get("annotation_ids", [])]))
         asset_query = {"id": {"$in": asset_ids}, "archived_at": None}
         asset_count = database.assets.count_documents(asset_query)
         if not asset_count:
@@ -938,7 +941,7 @@ def build_export(job_id: str) -> None:
                     if filename in {"", ".", ".."}:
                         filename = asset["id"]
                     folder = entry["folder"] if entry else ""
-                    if folder and folder not in {"train", "val", "test", "unassigned", "other"}:
+                    if folder and (not isinstance(folder, str) or not folder.strip(" .") or re.search(r'[<>:"/\\|?*\x00-\x1f]', folder)):
                         raise ValueError("导出类型无效")
                     archive_name = f"{folder}/{filename}" if folder else filename
                     if archive_name in used_names:

@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app import migrations
+from app.bootstrap import DEFAULT_FORMATS, DEFAULT_TAGS
 
 
 class AsyncRows:
@@ -38,6 +39,28 @@ async def test_simple_migrations_apply_expected_updates(monkeypatch):
     )
     assert database.format_definitions.update_one.await_count == 1
     assert database.assets.update_many.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_model_format_and_tag_defaults_migrate_existing_install(monkeypatch):
+    formats = SimpleNamespace(update_one=AsyncMock())
+    tags = SimpleNamespace(
+        find_one=AsyncMock(return_value={"values": ["YOLO11", "YOLOv8", "RT-DETR", "自研框架"]}),
+        update_one=AsyncMock(),
+    )
+    monkeypatch.setattr(migrations, "db", SimpleNamespace(format_definitions=formats, tag_definitions=tags))
+    await migrations.migration_006_model_formats_and_tag_defaults()
+    assert formats.update_one.await_args.args[1]["$addToSet"]["extensions"]["$each"] == [
+        ".caffemodel", ".solverstate", ".mdl",
+    ]
+    values = tags.update_one.await_args.args[1]["$set"]["values"]
+    assert values[:3] == ["Caffe", "Darknet", "PyTorch"]
+    assert "自研框架" in values
+    assert not {"YOLO11", "YOLOv8", "RT-DETR"}.intersection(values)
+    assert {".caffemodel", ".solverstate", ".mdl"}.issubset(DEFAULT_FORMATS["model"])
+    assert next(item[2] for item in DEFAULT_TAGS if item[0] == "data_source") == [
+        "开源数据", "生产数据", "客户反馈数据", "AIGC数据", "研发数据",
+    ]
 
 
 @pytest.mark.asyncio

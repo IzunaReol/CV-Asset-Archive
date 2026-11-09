@@ -2,14 +2,15 @@
 
 English | [简体中文](README.md)
 
-Current version: **v2.1.0**. See the [release notes](docs/releases/v2.1.0.md) and [release checklist](docs/release-checklist.md) for changes and remaining validation limits.
+**v2.2.0** is in the release process. See the [release notes](docs/releases/v2.2.0.md) and [release checklist](docs/release-checklist.md) for Git status and validation limits.
 
 CV Asset Archive is an asset and relationship management system for computer vision teams. It stores images, videos, annotations, models, and archives in one place, with search, annotation preview, lineage tracking, recycle-bin recovery, and asynchronous exports.
 
 ## Features
 
-- Project overview with multi-project selection, current dataset composition, deduplicated models, and tagged files
+- Project overview with multi-project selection, current dataset composition, and deduplicated models
 - Required dataset project membership and per-model parameter metadata shared across asset details and dataset model management
+- Standard, custom, or disabled dataset image classification; optional linked annotations in asset and dataset exports
 - Six built-in metric categories and 16 definitions, with custom category and metric management
 - Usage-impact preview before deletion or overwrite; deleting referenced assets requires a second confirmation and clears their associations
 
@@ -134,13 +135,13 @@ npm run test:ui
 npm run build
 ```
 
-The isolated API workflow test is available at `scripts/runtime-e2e.py`. See the [testing guide](docs/testing.md) and [v2.1.0 release checklist](docs/release-checklist.md) for results and remaining validation gates. Mocked browser tests do not constitute real end-to-end acceptance.
+The isolated API workflow test is available at `scripts/runtime-e2e.py`. See the [testing guide](docs/testing.md) and [v2.2.0 release checklist](docs/release-checklist.md) for results and remaining validation gates. Mocked browser tests do not constitute real end-to-end acceptance.
 
-## Preparing to upgrade to v2.1.0
+## Preparing to upgrade to v2.2.0
 
 Back up MongoDB, MinIO, and deployment configuration and retain old images before upgrading from v2.0.0. Verify publication quality checks, image splits, version restoration, exports, and model parameter revisions. Legacy images default to unassigned; existing one-to-many annotation links remain. Older clients must adopt the publication token and parameter revision. Rolling back images does not undo data changes. Publishing to Git does not deploy Docker containers.
 
-See the [dataset guide](docs/datasets.md), [model parameters](docs/model-parameters.md), and [v2.1.0 release notes](docs/releases/v2.1.0.md). MLflow integration is not implemented.
+See the [dataset guide](docs/datasets.md), [model parameters](docs/model-parameters.md), and [v2.2.0 release notes](docs/releases/v2.2.0.md). Back up MongoDB, MinIO, and deployment configuration before upgrading. Switching a dataset's classification rule resets current image classifications. MLflow integration is not implemented.
 
 ## Documentation
 

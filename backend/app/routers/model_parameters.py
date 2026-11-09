@@ -22,7 +22,7 @@ async def model_asset(asset_id: str) -> dict[str, Any]:
 @router.get("")
 async def get_model_parameters(asset_id: str, user: AssetReadUser) -> dict[str, Any]:
     asset = await model_asset(asset_id)
-    categories = [item async for item in db.metric_categories.find().sort([("order", 1), ("created_at", 1)])]
+    categories = [item async for item in db.metric_categories.find().sort([("order", 1), ("created_at", 1), ("id", 1)])]
     category_order = {item["name"]: index for index, item in enumerate(categories)}
     definitions = [item async for item in db.metric_definitions.find()]
     definitions.sort(key=lambda item: (category_order.get(item["category"], len(categories)), item["name"]))

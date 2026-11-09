@@ -13,7 +13,9 @@ describe('系统日志展示格式', () => {
   it('转换操作、对象和权限变更', () => {
     expect(auditActionText('user.updated')).toBe('修改用户')
     expect(auditActionText('metric_category.deleted')).toBe('删除指标分类')
-    expect(auditActionText('unknown')).toBe('unknown')
+    expect(auditActionText('dataset.category_created')).toBe('新增数据集分类')
+    expect(auditActionText('dataset.auto_split')).toBe('自动分配图片分类')
+    expect(auditActionText('unknown')).toBe('其他操作')
     expect(presentation.objectText({ object_type: 'user', object_name: '张三' })).toBe('用户：张三')
     expect(presentation.objectText({ object_type: 'other' })).toBe('其他：未命名对象')
     expect(presentation.changeEntries({ roles: ['viewer'], action_permissions: ['asset_edit'], size: 1024 })).toEqual([

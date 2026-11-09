@@ -6,9 +6,9 @@
 
 分页列表响应包含 `items`、`page`、`page_size` 和 `total`；指标与分类等非分页列表按各接口返回，不强制分页字段。素材列表还返回 `next_cursor`；按相同筛选和排序传入 `after=<next_cursor>` 可连续读取下一页，原有页码参数仍可使用。批量操作返回成功数、失败数和逐项 `details`；单项失败不回滚已成功项，明细达到保护上限时返回 `details_truncated=true`。
 
-## v2.0.0–v2.1.0 接口补充
+## v2.0.0–v2.2.0 接口补充
 
-以下路径均在 `/api/v1` 下，完整请求模型以 OpenAPI 为准。产品版本为 2.1.0，接口前缀仍为 `/api/v1`。
+以下路径均在 `/api/v1` 下，完整请求模型以 OpenAPI 为准。候选产品版本为 2.2.0，接口前缀仍为 `/api/v1`。
 
 | 接口 | 行为 |
 | --- | --- |
@@ -25,6 +25,12 @@
 | `POST /assets/usage-impact` | 查询删除或覆盖的素材使用影响 |
 | `GET /assets/{asset_id}/history` | 返回 `items`、`total`、`page`、`page_size`，默认每页 100、上限 200 |
 | `GET /relations?asset_id=...` | 精确筛选素材关联，用于详情数量跳转 |
+| `POST /exports/annotation-preview`、`POST /exports` | 预览所选图片的关联标注数量；创建导出时可设置 `include_annotations`，默认 `false` |
+| `POST /datasets`、`PATCH /datasets/{dataset_id}` | v2.2.0 增加 `classification_rule=standard/custom/none`；编辑切换规则会重置当前图片分类 |
+| `POST /datasets/{dataset_id}/categories`、`PATCH /datasets/{dataset_id}/categories/{category_id}`、`DELETE /datasets/{dataset_id}/categories/{category_id}` | 管理当前数据集的自定义分类；删除分类后对应图片回到未划分 |
+| `POST /datasets/{dataset_id}/auto-split/preview`、`POST /datasets/{dataset_id}/auto-split` | 自定义分类可通过 `ratios` 提交分类 ID 到非负整数比例的映射；预览令牌用于确认 |
+| `POST /datasets/{dataset_id}/export` | `all`、`current`、`categories`；`include_annotations` 默认 `false`。当前和全部导出写在 ZIP 根目录，指定分类按分类名称建文件夹；共享标注冲突返回 409 |
+| `PATCH /metric-categories/{category_id}/move` | `direction=up/down/top` 调整指标分类顺序 |
 
 模型取值修改要求 `asset_edit`；指标定义与分类管理要求参数管理菜单及 `parameter_manage`。数据集可读不代表模型可编辑。删除关联素材是历史快照固定性的明确例外，详见[数据集](datasets.md)与[模型参数](model-parameters.md)。
 

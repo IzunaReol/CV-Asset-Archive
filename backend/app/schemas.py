@@ -182,6 +182,7 @@ class DatasetCreate(BaseModel):
     remark: str = Field(default="", max_length=1000)
     status: str = Field(default="待整理", min_length=1, max_length=50)
     projects: list[str] = Field(min_length=1, max_length=50)
+    classification_rule: Literal["standard", "custom", "none"] = "standard"
     @field_validator("projects")
     @classmethod
     def validate_projects(cls, values: list[str]) -> list[str]:
@@ -196,6 +197,7 @@ class DatasetUpdate(BaseModel):
     remark: str = Field(default="", max_length=1000)
     status: str = Field(min_length=1, max_length=50)
     projects: list[str] = Field(min_length=1, max_length=50)
+    classification_rule: Literal["standard", "custom", "none"] | None = None
     @field_validator("projects")
     @classmethod
     def validate_projects(cls, values: list[str]) -> list[str]:
@@ -225,7 +227,7 @@ class DatasetPublishRequest(BaseModel):
 
 class DatasetSplitUpdate(BaseModel):
     asset_ids: list[str] = Field(min_length=1, max_length=100000)
-    split: Literal["train", "val", "test", "unassigned"]
+    split: str = Field(min_length=1, max_length=80)
 
 
 class DatasetAutoSplitRequest(BaseModel):
@@ -233,10 +235,12 @@ class DatasetAutoSplitRequest(BaseModel):
     val: int = Field(default=1, ge=0, le=10000)
     test: int = Field(default=1, ge=0, le=10000)
     preview_token: str | None = Field(default=None, min_length=64, max_length=64)
+    ratios: dict[str, int] | None = None
 
     @model_validator(mode="after")
     def require_positive_ratio(self):
-        if not (self.train or self.val or self.test):
+        values = self.ratios.values() if self.ratios is not None else (self.train, self.val, self.test)
+        if not values or any(value < 0 or value > 10000 for value in values) or not any(values):
             raise ValueError("至少一个分配比例必须大于零")
         return self
 
@@ -248,8 +252,9 @@ class DatasetRestoreRequest(BaseModel):
 class DatasetExportRequest(BaseModel):
     name: str | None = Field(default=None, max_length=120)
     export_type: Literal["all", "train", "val", "test", "unassigned", "current", "categories"] = "all"
+    include_annotations: bool = False
     asset_ids: list[str] = Field(default_factory=list)
-    splits: list[Literal["train", "val", "test", "unassigned"]] = Field(default_factory=list)
+    splits: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_selection(self):
@@ -305,6 +310,11 @@ class MetricCategoryCreate(BaseModel):
         return value
 
 
+class MetricCategoryMove(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    direction: Literal["up", "down", "top"]
+
+
 class ModelParameterUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     revision: int = Field(ge=0)
@@ -339,12 +349,16 @@ class SavedViewUpdate(BaseModel):
     shared_scope: Literal["private", "team"] | None = None
 
 
-class ExportCreate(BaseModel):
+class ExportSelection(BaseModel):
     model_config = ConfigDict(extra="forbid")
     asset_ids: list[str] = Field(default_factory=list, max_length=100000)
     selection_id: str | None = None
     excluded_ids: list[str] = Field(default_factory=list, max_length=5000)
+
+
+class ExportCreate(ExportSelection):
     name: str = Field(min_length=1, max_length=120)
+    include_annotations: bool = False
 
 
 class TagDefinitionCreate(BaseModel):

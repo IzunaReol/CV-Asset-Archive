@@ -47,16 +47,16 @@ bash deploy-linux.sh
 
 ### 方式二：预构建镜像包
 
-在与服务器相同 CPU 架构的 Linux 容器引擎上，从 **v2.1.0 同一份代码**制作镜像包：
+在与服务器相同 CPU 架构的 Linux 容器引擎上，从 **v2.2.0 候选代码**制作镜像包：
 
 ```bash
 bash scripts/package-linux-images.sh
 ```
 
-脚本构建 API、Worker、前端，拉取 MongoDB、MinIO、Redis 镜像，默认在仓库的上一级目录输出 `cv-archive-v2.1.0-linux-images.tar`、`.sha256` 和 `.platform` 三个文件；可传入目标 tar 路径更改位置。把这三个文件和同一份项目代码复制到服务器；镜像包不要放入 Git。服务器首次部署：
+脚本构建 API、Worker、前端，拉取 MongoDB、MinIO、Redis 镜像，默认在仓库的上一级目录输出 `cv-archive-v2.2.0-linux-images.tar`、`.sha256` 和 `.platform` 三个文件；可传入目标 tar 路径更改位置。把这三个文件和同一份项目代码复制到服务器；镜像包不要放入 Git。服务器首次部署：
 
 ```bash
-bash deploy-linux.sh --bundle /path/to/cv-archive-v2.1.0-linux-images.tar
+bash deploy-linux.sh --bundle /path/to/cv-archive-v2.2.0-linux-images.tar
 ```
 
 部署前会核对校验值、镜像架构、镜像名称、全部本地镜像、配置、磁盘与端口。制作镜像包与服务器上的 `APP_IMAGE_TAG`、`DOCKER_REGISTRY_PREFIX`、`MINIO_IMAGE` 必须一致。镜像模式使用 `--no-build --pull never` 启动，不在服务器现场构建或拉取。部署成功后检查六个容器、API 就绪、前端页面和 API 版本；任何检查失败都会退出并显示失败位置。请按服务器的实际域名和端口设置 `.env` 中的 `APP_BASE_URL`、`API_BASE_URL`、`MINIO_PUBLIC_ENDPOINT` 和端口。
@@ -111,9 +111,9 @@ powershell -ExecutionPolicy Bypass -File scripts/import-offline.ps1 -Bundle cv-a
 
 ## 发布前检查
 
-### v2.1.0 升级准备
+### v2.2.0 升级准备
 
-从 v2.0.0 升级前，先备份 MongoDB、MinIO 与独立保存的部署配置，保留旧镜像。确认部署后，在仓库根目录执行：
+从 v2.1.0 升级前，先备份 MongoDB、MinIO 与独立保存的部署配置，保留旧镜像。将现有 `.env` 中的 `APP_IMAGE_TAG` 更新为 `2.2.0` 后，在仓库根目录执行：
 
 ```powershell
 docker compose --env-file .env -f deploy/docker-compose.yml build api worker frontend
@@ -122,7 +122,7 @@ docker compose --env-file .env -f deploy/docker-compose.yml up -d --no-deps --no
 
 以上启动命令仅使用已构建的本地应用镜像，要求基础服务已运行；缺失镜像时应明确报错，不临时拉取。版本号修改位于 `pyproject.toml`，因此此次构建可能使 Python 依赖层失效，不能承诺首次升级不安装依赖。备份结束后的服务恢复使用 `compose start`，只启动先前停止的容器；恢复到全新 Compose 项目的脚本仍使用 `up`，不能视为严格离线恢复。
 
-验证服务健康、发布预检、图片分类与版本恢复、分类导出及模型参数并发保存。旧图片成员默认未划分，旧的一对多标注关系保留；部分导出可能因共享标注被拒绝。回滚镜像不会撤销数据更改，数据恢复须使用对应备份。版本范围及未完成验收见 [v2.1.0 发布说明](../docs/releases/v2.1.0.md)。
+验证服务健康、登录、标准／自定义／不分类数据集、自定义分类管理、当前／全部／分类导出 ZIP 目录和关联标注、模型格式及指标分类排序。旧图片成员默认未划分，旧的一对多标注关系保留；部分导出可能因共享标注被拒绝。回滚镜像不会撤销数据更改，数据恢复须使用对应备份。版本范围及未完成验收见 [v2.2.0 发布说明](../docs/releases/v2.2.0.md)。
 
 ### 通用检查
 

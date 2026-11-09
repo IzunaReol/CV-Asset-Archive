@@ -27,6 +27,12 @@ def test_export_request_requires_a_valid_selection():
     assert DatasetExportRequest(export_type="categories", splits=["train", "train"]).splits == ["train"]
 
 
+def test_export_category_folders_use_display_names_and_avoid_collisions():
+    labels = {"custom_a": "正常", "custom_b": "抽烟", "custom_c": "正常/异常", "custom_d": "正常:异常"}
+    folders = datasets._export_category_folders(labels, set(labels))
+    assert folders == {"custom_a": "正常", "custom_b": "抽烟", "custom_c": "正常_异常", "custom_d": "正常_异常 (2)"}
+
+
 @pytest.mark.asyncio
 async def test_split_export_freezes_entries_and_names_from_current_version(monkeypatch):
     memberships = [
@@ -56,22 +62,38 @@ async def test_split_export_freezes_entries_and_names_from_current_version(monke
     await datasets.export_dataset.__wrapped__("dataset", DatasetExportRequest(export_type="train"), request, user)
     train_job = jobs.insert_one.await_args.args[0]
     assert train_job["name"] == "烟火 v2 训练集"
-    assert {(item["asset_id"], item["folder"]) for item in train_job["input"]["entries"]} == {("image", "train"), ("annotation", "train")}
+    assert {(item["asset_id"], item["folder"]) for item in train_job["input"]["entries"]} == {("image", "训练集")}
+
+    await datasets.export_dataset.__wrapped__("dataset", DatasetExportRequest(export_type="train", include_annotations=True), request, user)
+    train_with_annotations = jobs.insert_one.await_args.args[0]
+    assert {(item["asset_id"], item["folder"]) for item in train_with_annotations["input"]["entries"]} == {("image", "训练集"), ("annotation", "训练集")}
 
     await datasets.export_dataset.__wrapped__("dataset", DatasetExportRequest(), request, user)
     all_job = jobs.insert_one.await_args.args[0]
     assert all_job["name"] == "烟火 v2 全部导出"
-    assert ("video", "other") in {(item["asset_id"], item["folder"]) for item in all_job["input"]["entries"]}
+    assert {(item["asset_id"], item["folder"]) for item in all_job["input"]["entries"]} == {("image", ""), ("video", "")}
+
+    await datasets.export_dataset.__wrapped__("dataset", DatasetExportRequest(include_annotations=True), request, user)
+    all_with_annotations = jobs.insert_one.await_args.args[0]
+    assert {(item["asset_id"], item["folder"]) for item in all_with_annotations["input"]["entries"]} == {("image", ""), ("annotation", ""), ("video", "")}
 
     await datasets.export_dataset.__wrapped__("dataset", DatasetExportRequest(export_type="current", asset_ids=["image"]), request, user)
     current_job = jobs.insert_one.await_args.args[0]
     assert current_job["name"] == "烟火 v2 导出当前"
-    assert {item["asset_id"] for item in current_job["input"]["entries"]} == {"image", "annotation"}
+    assert {item["asset_id"] for item in current_job["input"]["entries"]} == {"image"}
+
+    await datasets.export_dataset.__wrapped__("dataset", DatasetExportRequest(export_type="current", asset_ids=["image"], include_annotations=True), request, user)
+    current_with_annotations = jobs.insert_one.await_args.args[0]
+    assert {(item["asset_id"], item["folder"]) for item in current_with_annotations["input"]["entries"]} == {("image", ""), ("annotation", "")}
 
     await datasets.export_dataset.__wrapped__("dataset", DatasetExportRequest(export_type="categories", splits=["train", "val"]), request, user)
     selected_job = jobs.insert_one.await_args.args[0]
     assert selected_job["name"] == "烟火 v2 指定分类（训练集、验证集）"
-    assert {item["asset_id"] for item in selected_job["input"]["entries"]} == {"image", "annotation"}
+    assert {item["asset_id"] for item in selected_job["input"]["entries"]} == {"image"}
+
+    await datasets.export_dataset.__wrapped__("dataset", DatasetExportRequest(export_type="categories", splits=["train", "val"], include_annotations=True), request, user)
+    categories_with_annotations = jobs.insert_one.await_args.args[0]
+    assert {(item["asset_id"], item["folder"]) for item in categories_with_annotations["input"]["entries"]} == {("image", "训练集"), ("annotation", "训练集")}
 
     with pytest.raises(AppError) as empty:
         await datasets.export_dataset.__wrapped__("dataset", DatasetExportRequest(export_type="categories", splits=["unassigned"]), request, user)
@@ -82,15 +104,27 @@ async def test_split_export_freezes_entries_and_names_from_current_version(monke
 async def test_split_export_blocks_cross_split_legacy_annotation(monkeypatch):
     memberships = [{"asset_id": "a", "split": "train"}, {"asset_id": "b", "split": "test"}, {"asset_id": "ann"}]
     assets = [{"id": "a", "name": "a.jpg", "type": "image"}, {"id": "b", "name": "b.jpg", "type": "image"}, {"id": "ann", "name": "ann.json", "type": "annotation"}]
+    jobs = SimpleNamespace(insert_one=AsyncMock())
     monkeypatch.setattr(datasets, "db", SimpleNamespace(
         dataset_memberships=SimpleNamespace(find=lambda *args: Cursor(memberships)),
         assets=SimpleNamespace(find=lambda *args: Cursor(assets)),
         relations=SimpleNamespace(find=lambda *args: Cursor([{"source_id": "ann", "target_id": "a"}, {"source_id": "ann", "target_id": "b"}])),
+        jobs=jobs,
     ))
     monkeypatch.setattr(datasets, "_get_dataset", AsyncMock(return_value={"name": "数据集"}))
+    monkeypatch.setattr(datasets, "record_audit", AsyncMock())
+    monkeypatch.setattr(datasets.celery_client, "send_task", MagicMock())
+    await datasets.export_dataset.__wrapped__(
+        "dataset", DatasetExportRequest(export_type="train"),
+        SimpleNamespace(state=SimpleNamespace(request_id="request")), {"id": "user"},
+    )
+    assert [item["asset_id"] for item in jobs.insert_one.await_args.args[0]["input"]["entries"]] == ["a"]
     with pytest.raises(AppError) as error:
-        await datasets.export_dataset.__wrapped__("dataset", DatasetExportRequest(export_type="train"), None, None)
+        await datasets.export_dataset.__wrapped__("dataset", DatasetExportRequest(export_type="train", include_annotations=True), None, None)
     assert error.value.code == "DATASET_EXPORT_SHARED_ANNOTATION"
     with pytest.raises(AppError) as current_error:
-        await datasets.export_dataset.__wrapped__("dataset", DatasetExportRequest(export_type="current", asset_ids=["a"]), None, None)
+        await datasets.export_dataset.__wrapped__("dataset", DatasetExportRequest(export_type="current", asset_ids=["a"], include_annotations=True), None, None)
     assert current_error.value.code == "DATASET_EXPORT_SHARED_ANNOTATION"
+    with pytest.raises(AppError) as category_error:
+        await datasets.export_dataset.__wrapped__("dataset", DatasetExportRequest(export_type="categories", splits=["train", "test"], include_annotations=True), None, None)
+    assert category_error.value.code == "DATASET_EXPORT_SHARED_ANNOTATION"

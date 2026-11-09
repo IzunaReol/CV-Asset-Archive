@@ -37,7 +37,7 @@ test('系统概览独立页面可加载、刷新并跳转', async ({ page }) => 
   await mockApi(page)
   await page.route('**/api/v1/system/overview', route => {
     loads++
-    return json(route, { counts: { assets: 10, datasets: 2, relations: 3, running_jobs: 1, failed_jobs: 0 }, asset_types: { video: 2, image: 7, annotation: 1 }, asset_storage_by_type: { video: { count: 2, size: 200 }, image: { count: 7, size: 700 }, annotation: { count: 1, size: 100 } }, recent_activity: [] })
+    return json(route, { counts: { assets: 10, datasets: 2, relations: 3, running_jobs: 1, failed_jobs: 0 }, asset_types: { video: 2, image: 7, annotation: 1, model: 0 }, asset_storage_by_type: { video: { count: 2, size: 200 }, image: { count: 7, size: 700 }, annotation: { count: 1, size: 100 } }, recent_activity: [] })
   })
   await page.addInitScript(value => localStorage.setItem('cv-archive-session', JSON.stringify(value)), tokens)
   await page.goto('/')
@@ -52,6 +52,73 @@ test('系统概览独立页面可加载、刷新并跳转', async ({ page }) => 
   await expect.poll(() => loads).toBe(2)
   await page.getByRole('button', { name: '查看素材' }).click()
   await expect(page.getByRole('heading', { name: '素材库' })).toBeVisible()
+})
+
+test('系统概览近期操作的长文件名不挤出时间列', async ({ page }) => {
+  const filename = '02_65_6501_0_9d3e261dc28a45fbaac98b1a624f4947_frame_000026.txt'
+  await mockApi(page)
+  await page.route('**/api/v1/system/overview', route => json(route, {
+    counts: { assets: 1 }, asset_types: {}, recent_activity: [{
+      id: 'activity-long-name', action: 'dataset.auto_split', object_type: 'asset',
+      object_name: filename, created_at: '2026-11-02T00:10:45Z',
+    }, { id:'activity-unknown',action:'future.unknown_action',object_type:'system',object_name:'未知操作',created_at:'2026-11-02T00:10:45Z' }],
+  }))
+  await page.addInitScript(value => localStorage.setItem('cv-archive-session', JSON.stringify(value)), tokens)
+  await page.goto('/')
+  const rows = page.locator('.overview-activity > div')
+  const row = rows.first()
+  await expect(row.locator('span')).toHaveText('自动分配图片分类')
+  await expect(rows.nth(1).locator('span')).toHaveText('其他操作')
+  const name = row.locator('b')
+  await expect(name).toHaveAttribute('title', filename)
+  await expect(row.locator('small')).toBeVisible()
+  const desktop = await row.evaluate(element => {
+    const label = element.querySelector('b')!
+    const time = element.querySelector('small')!
+    return {
+      nameRight: label.getBoundingClientRect().right,
+      timeLeft: time.getBoundingClientRect().left,
+      rowRight: element.getBoundingClientRect().right,
+      timeRight: time.getBoundingClientRect().right,
+      truncated: label.scrollWidth > label.clientWidth,
+    }
+  })
+  expect(desktop.truncated).toBe(true)
+  expect(desktop.nameRight).toBeLessThan(desktop.timeLeft)
+  expect(desktop.timeRight).toBeLessThanOrEqual(desktop.rowRight)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  const mobile = await row.evaluate(element => {
+    const cells = [...element.children] as HTMLElement[]
+    return cells.map(cell => ({ left:cell.getBoundingClientRect().left, right:cell.getBoundingClientRect().right, width:cell.clientWidth, scroll:cell.scrollWidth }))
+  })
+  expect(mobile[0].right).toBeLessThan(mobile[1].left)
+  expect(mobile[1].right).toBeLessThan(mobile[2].left)
+  expect(mobile[0].scroll).toBeGreaterThan(mobile[0].width)
+  expect(mobile[2].scroll).toBeGreaterThan(mobile[2].width)
+})
+
+test('自动关联结果按数据集汇总标注变更并去重', async ({ page }) => {
+  await mockApi(page)
+  const ready = [
+    { source:{id:'annotation-1',name:'a.txt'}, target:{id:'image-1',name:'a.jpg'}, dataset_effects:[{dataset_id:'dataset-1',dataset_name:'疲劳算法数据集',added:['annotation-1'],removed:[]}] },
+    { source:{id:'annotation-2',name:'b.txt'}, target:{id:'image-2',name:'b.jpg'}, dataset_effects:[{dataset_id:'dataset-1',dataset_name:'疲劳算法数据集',added:['annotation-2'],removed:[]},{dataset_id:'dataset-2',dataset_name:'安全帽数据集',added:['annotation-2'],removed:[]}] },
+    { source:{id:'annotation-3',name:'c.txt'}, target:{id:'image-3',name:'c.jpg'}, dataset_effects:[{dataset_id:'dataset-1',dataset_name:'疲劳算法数据集',added:['annotation-3'],removed:[]}] },
+  ]
+  await page.route('**/api/v1/relations/annotation-match-preview', route => json(route, {
+    ready, counts:{ready:3,existing:0,image_conflicts:0,annotation_conflicts:0,unmatched_images:0,unmatched_annotations:0},
+  }))
+  await page.addInitScript(value => localStorage.setItem('cv-archive-session', JSON.stringify(value)), tokens)
+  await page.goto('/')
+  await page.locator('.sidebar nav').getByRole('button',{name:/关联关系/}).click()
+  await page.getByRole('button',{name:'自动关联',exact:true}).click()
+  const dialog = page.locator('.relation-preview-dialog')
+  await expect(dialog.getByRole('heading',{name:'自动关联结果'})).toBeVisible()
+  await expect(dialog.locator('.relation-dataset-effects p')).toHaveText([
+    '疲劳算法数据集：加入 3 项，移出 0 项',
+    '安全帽数据集：加入 1 项，移出 0 项',
+  ])
+  await expect(dialog.getByRole('button',{name:'确认关联 3 组'})).toBeVisible()
 })
 
 test('侧栏存储空间只在获取到有效容量时展示', async ({ page }) => {
@@ -71,7 +138,7 @@ test('侧栏存储空间只在获取到有效容量时展示', async ({ page }) 
   await expect(page.locator('.sidebar .storage')).toContainText('剩余 75%')
 })
 
-test('项目概览可多选项目、展示数据集当前成员与模型文件', async ({ page }) => {
+test('项目概览可多选项目、展示数据集与模型', async ({ page }) => {
   await mockApi(page)
   const queried: string[][] = []
   await page.route(/\/api\/v1\/projects\/overview(?:\?.*)?$/, route => {
@@ -99,6 +166,8 @@ test('项目概览可多选项目、展示数据集当前成员与模型文件',
   const sectionBox = await page.locator('.project-section').first().boundingBox()
   expect(statsBox && sectionBox && sectionBox.y - (statsBox.y + statsBox.height)).toBeGreaterThanOrEqual(20)
   await expect(page.locator('.project-stat-grid')).toContainText('1')
+  await expect(page.locator('.project-stat-grid article')).toHaveCount(3)
+  await expect(page.locator('.project-stat-grid')).not.toContainText('其他文件')
   await expect(page.locator('.project-model-card').first()).not.toContainText('待接入 MLflow')
   await expect(page.locator('.project-model-card').first().locator('.project-model-parameters')).toHaveText('准确率：0.98')
   await expect(page.getByText('跨项目重复关联的对象在顶部总数中只计算一次')).toHaveCount(0)
@@ -109,7 +178,8 @@ test('项目概览可多选项目、展示数据集当前成员与模型文件',
   await expect(page.locator('.project-section')).toHaveCount(1)
   await expect(page.locator('.project-picker-trigger')).toContainText('所属项目：烟火检测')
   expect(queried.at(-1)).toEqual(['烟火检测'])
-  await expect(page.locator('.project-file-table')).toContainText('sample.jpg')
+  await expect(page.locator('.project-file-table')).toHaveCount(0)
+  await expect(page.locator('.project-section-head')).not.toContainText('项文件')
 })
 
 test('参数管理分组展示预置指标并可维护自定义指标', async ({ page }) => {
@@ -244,6 +314,42 @@ test('参数管理分组展示预置指标并可维护自定义指标', async ({
   ])
 })
 
+test('指标分类可上移下移置顶并刷新后保持顺序', async ({ page }) => {
+  await mockApi(page)
+  let names = ['图像分类', '目标检测', 'OCR']
+  await page.route(/\/api\/v1\/metric-categories(?:\?.*)?$/, route => json(route, {
+    items:names.map(name => ({id:`category-${name}`, name, built_in:true})),
+  }))
+  await page.route(/\/api\/v1\/metric-categories\/[^/?]+\/move$/, route => {
+    const id = decodeURIComponent(route.request().url().split('/').at(-2) || '').replace('category-', '')
+    const {direction} = route.request().postDataJSON()
+    const current = names.indexOf(id)
+    const target = direction === 'top' ? 0 : current + (direction === 'up' ? -1 : 1)
+    names.splice(current, 1)
+    names.splice(target, 0, id)
+    return json(route, {items:names.map(name => ({id:`category-${name}`, name, built_in:true}))})
+  })
+  await page.route(/\/api\/v1\/metric-definitions(?:\?.*)?$/, route => json(route, {
+    items:names.map(name => ({id:`metric-${name}`,name:`${name}指标`,category:name,description:'说明',built_in:true})),
+  }))
+  await page.addInitScript(value => localStorage.setItem('cv-archive-session', JSON.stringify(value)), tokens)
+  await page.goto('/')
+  await page.locator('.sidebar nav').getByRole('button', {name:/参数管理/}).click()
+  await page.getByRole('button', {name:'分类编辑'}).click()
+  const dialog = page.getByRole('dialog', {name:'分类编辑'})
+  await expect(dialog.getByRole('button', {name:'将图像分类上移'})).toBeDisabled()
+  await dialog.getByRole('button', {name:'将OCR上移'}).click()
+  await expect(dialog.locator('.category-editor-row').nth(1)).toContainText('OCR')
+  await dialog.getByRole('button', {name:'将OCR下移'}).click()
+  await dialog.getByRole('button', {name:'将OCR置顶'}).click()
+  await expect(dialog.locator('.category-editor-row').first()).toContainText('OCR')
+  await dialog.getByRole('button', {name:'关闭', exact:true}).click()
+  await expect(page.locator('.metric-group').first()).toContainText('OCR指标')
+  await page.reload()
+  await page.locator('.sidebar nav').getByRole('button', {name:/参数管理/}).click()
+  await expect(page.locator('.metric-group').first()).toContainText('OCR指标')
+})
+
 test('仅有参数菜单权限的用户只能查看指标', async ({ page }) => {
   const readOnlyTokens = {
     ...tokens,
@@ -273,18 +379,18 @@ test('项目概览在空项目和手机宽度下可用', async ({ page }) => {
   await page.goto('/')
   await page.getByRole('button', { name: /项目概览/ }).click()
   await expect(page.getByText('请先在标签管理的“项目”字段中添加项目值。')).toBeVisible()
-  await expect(page.locator('.project-stat-grid article')).toHaveCount(4)
+  await expect(page.locator('.project-stat-grid article')).toHaveCount(3)
   await expect.poll(() => page.locator('.sidebar nav').evaluate(element => element.scrollWidth > element.clientWidth)).toBe(true)
 })
 
-test('项目概览隐藏空项目和无数据模块', async ({ page }) => {
+test('项目概览隐藏无数据集与模型的项目和空模块', async ({ page }) => {
   await mockApi(page)
   const counts = { image: 0, video: 0, annotation: 0, archive: 0, other: 0 }
   await page.route(/\/api\/v1\/projects\/overview(?:\?.*)?$/, route => json(route, {
     available_projects: ['空项目', '仅有模型'], selected_projects: ['空项目', '仅有模型'],
     summary: { project_count: 2, dataset_count: 0, model_count: 1, file_count: 0 },
     projects: [
-      { name: '空项目', dataset_count: 0, dataset_counts: counts, datasets: [], model_count: 0, models: [], file_count: 0, file_counts: counts, files: [], files_truncated: false },
+      { name: '空项目', dataset_count: 0, dataset_counts: counts, datasets: [], model_count: 0, models: [], file_count: 1, file_counts: counts, files: [{id:'file-only',name:'仅文件.jpg',type:'image'}], files_truncated: false },
       { name: '仅有模型', dataset_count: 0, dataset_counts: counts, datasets: [], model_count: 1, models: [{ id: 'model-1', name: 'model.pt', remark: '', sources: ['项目标签'], versions: [] }], file_count: 0, file_counts: counts, files: [], files_truncated: false },
     ],
   }))
@@ -387,6 +493,8 @@ test('数据集图片可批量设置用途、自动分配并选择导出类型',
   await page.goto('/')
   await page.locator('.sidebar nav').getByRole('button',{name:/数据集/}).click()
   await page.locator('.dataset-table').getByRole('button',{name:/烟火训练集/}).click()
+  await expect(page.locator('.dataset-overview .type-bars > div')).toHaveCount(1)
+  await expect(page.locator('.dataset-overview .type-bars')).toContainText('图片')
   await expect(page.locator('.dataset-split-chart .split-pie')).toBeVisible()
   await expect(page.locator('.dataset-split-chart')).toContainText('素材分类')
   await expect(page.locator('.dataset-split-chart')).toContainText('未划分')
@@ -472,29 +580,83 @@ test('数据集图片可批量设置用途、自动分配并选择导出类型',
   await page.getByRole('button',{name:'导出',exact:true}).click()
   const exportDialog = page.getByRole('dialog',{name:'导出数据集'})
   await expect(exportDialog.getByRole('radio',{name:/导出当前/})).toBeChecked()
+  await expect(exportDialog.getByRole('checkbox',{name:'导出关联标注'})).not.toBeChecked()
   await expect(exportDialog).toContainText('已选 1 项')
   await expect(exportDialog).not.toContainText('已选 1 项成员')
   await page.getByRole('button',{name:'确认导出'}).click()
   await expect.poll(()=>exports.length).toBe(1)
-  expect(exports[0]).toMatchObject({export_type:'current',asset_ids:['a']})
+  expect(exports[0]).toMatchObject({export_type:'current',asset_ids:['a'],include_annotations:false})
   await page.getByRole('button',{name:'导出',exact:true}).click()
   await exportDialog.getByRole('radio',{name:/导出全部/}).check()
+  await exportDialog.getByRole('checkbox',{name:'导出关联标注'}).check()
   await page.getByRole('button',{name:'确认导出'}).click()
   await expect.poll(()=>exports.length).toBe(2)
-  expect(exports[1]).toMatchObject({export_type:'all'})
+  expect(exports[1]).toMatchObject({export_type:'all',include_annotations:true})
   await page.getByRole('button',{name:'导出',exact:true}).click()
   await exportDialog.getByRole('radio',{name:'导出指定分类'}).check()
+  await expect(exportDialog.getByRole('checkbox',{name:'导出关联标注'})).not.toBeChecked()
+  await exportDialog.getByRole('checkbox',{name:'导出关联标注'}).check()
   await expect(exportDialog.getByRole('button',{name:'确认导出'})).toBeDisabled()
   await exportDialog.locator('.export-split-options .split-train').click()
   await exportDialog.locator('.export-split-options .split-test').click()
   await exportDialog.getByRole('button',{name:'确认导出'}).click()
   await expect.poll(()=>exports.length).toBe(3)
-  expect(exports[2]).toMatchObject({export_type:'categories',splits:['train','test']})
+  expect(exports[2]).toMatchObject({export_type:'categories',splits:['train','test'],include_annotations:true})
   await page.getByRole('button',{name:'自动分配类型'}).click()
   await page.locator('.split-conflicts summary').click()
   await page.locator('.split-conflicts').getByRole('button',{name:/one-very-long-image-filename.jpg/}).click()
   await expect(page.locator('.member-location-label')).toContainText('one-very-long-image-filename.jpg')
   await expect(page.locator('.member-grid article').first()).toHaveAttribute('aria-checked','true')
+})
+
+test('自定义分类可管理，切换不分类后隐藏分类操作', async ({ page }) => {
+  await mockApi(page)
+  await page.route('**/api/v1/tag-definitions',route=>json(route,{items:[{key:'project',name:'项目',values:['烟火检测'],built_in:true},{key:'status',name:'状态',values:['待整理'],built_in:true}]}))
+  const dataset:any={id:'dataset-rule',name:'分类规则测试',status:'待整理',projects:['烟火检测'],member_count:1,counts:{image:1},classification_rule:'custom',custom_categories:{custom_a:'第一阶段'}}
+  const categoryWrites:unknown[]=[]
+  await page.route(/\/api\/v1\/datasets(?:\/.*)?(?:\?.*)?$/,route=>{
+    const path=new URL(route.request().url()).pathname
+    if(path.endsWith('/creators'))return json(route,{items:[]})
+    if(path.endsWith('/split-stats'))return json(route,{image_count:1,counts:{custom_a:0,unassigned:1}})
+    if(path.endsWith('/members'))return json(route,{items:[{id:'image',name:'one.jpg',type:'image',size:1,dataset_split:'unassigned'}],total:1})
+    if(path.endsWith('/versions')||path.endsWith('/models')||path.endsWith('/tag-distribution'))return json(route,{items:[],total:0})
+    if(path.endsWith('/categories')&&route.request().method()==='POST'){categoryWrites.push(route.request().postDataJSON());dataset.custom_categories.custom_b='第二阶段';return json(route,{key:'custom_b',name:'第二阶段'})}
+    if(path.endsWith('/categories/custom_b')&&route.request().method()==='PATCH'){const body=route.request().postDataJSON();categoryWrites.push(body);dataset.custom_categories.custom_b=body.name;return json(route,{key:'custom_b',name:body.name})}
+    if(path.endsWith('/categories/custom_b')&&route.request().method()==='DELETE'){delete dataset.custom_categories.custom_b;return json(route,{reset_count:0})}
+    if(path.endsWith('/dataset-rule')&&route.request().method()==='PATCH'){const body=route.request().postDataJSON();dataset.classification_rule=body.classification_rule;dataset.custom_categories={};return json(route,dataset)}
+    if(path.endsWith('/datasets'))return json(route,{items:[dataset],total:1})
+    return json(route,dataset)
+  })
+  await page.addInitScript(value=>localStorage.setItem('cv-archive-session',JSON.stringify(value)),tokens)
+  await page.goto('/')
+  await page.locator('.sidebar nav').getByRole('button',{name:/数据集/}).click()
+  await page.locator('.dataset-table').getByRole('button',{name:/分类规则测试/}).click()
+  await page.getByRole('button',{name:'数据管理'}).click()
+  await expect(page.locator('.split-summary')).toContainText('第一阶段')
+  await page.getByRole('button',{name:'分类管理'}).click()
+  const manager=page.getByRole('dialog',{name:'分类管理'})
+  await manager.getByRole('button',{name:'新增分类'}).click()
+  await manager.getByPlaceholder('请输入分类名称').fill('第二阶段')
+  await manager.getByRole('button',{name:'确认新增'}).click()
+  await expect(page.locator('.split-summary')).toContainText('第二阶段')
+  expect(categoryWrites).toEqual([{name:'第二阶段'}])
+  await manager.locator('.category-editor-row').filter({hasText:'第二阶段'}).getByRole('button',{name:'编辑'}).click()
+  await manager.getByPlaceholder('请输入分类名称').fill('第二期')
+  await manager.getByRole('button',{name:'保存修改'}).click()
+  await expect(manager.locator('.category-editor-row')).toContainText(['第一阶段','第二期'])
+  await manager.locator('.category-editor-row').filter({hasText:'第二期'}).getByRole('button',{name:'删除'}).click()
+  const deleteDialog=page.getByRole('dialog',{name:'删除数据集分类'})
+  await expect(deleteDialog).toContainText('该分类下的图片将回到未划分')
+  await deleteDialog.getByRole('button',{name:'确认删除'}).click()
+  await expect(manager.locator('.category-editor-row')).toHaveCount(1)
+  await manager.getByRole('button',{name:'关闭',exact:true}).click()
+  page.once('dialog',dialog=>dialog.accept())
+  await page.getByRole('button',{name:'编辑',exact:true}).first().click()
+  await page.getByLabel('分类规则',{exact:true}).selectOption('none')
+  await page.getByRole('button',{name:'保存',exact:true}).click()
+  await expect(page.locator('.split-summary')).toHaveCount(0)
+  await expect(page.getByRole('button',{name:'自动分配类型'})).toHaveCount(0)
+  await expect(page.locator('.member-grid .split-badge')).toHaveCount(0)
 })
 
 test('已有关联只能编辑备注并保持模型和版本不变', async ({ page }) => {
@@ -680,6 +842,9 @@ test('数据集所属项目必选、支持多选并跳转到项目修改弹窗',
   await page.getByRole('button', { name: /数据集/ }).first().click()
   await page.getByRole('button', { name: /新建数据集/ }).first().click()
   const dialog = page.locator('.dataset-dialog').first()
+  await dialog.getByLabel('分类规则说明').hover()
+  await expect(dialog.getByRole('tooltip')).toContainText('标准：按训练集、验证集、测试集分类，沿用现有规则。')
+  await expect(dialog.getByRole('tooltip')).toContainText('自定义：可自行管理分类，并按比例自动分配图片。')
   await dialog.getByPlaceholder('请输入名称').fill('测试数据集')
   await expect(dialog.getByRole('button', { name: '保存', exact: true })).toBeDisabled()
   await dialog.getByRole('group', { name: '所属项目' }).getByLabel('烟火检测').check()
@@ -733,6 +898,8 @@ test('数据集新增和编辑均保存所属项目', async ({ page }) => {
   expect(new Set(summaryRows).size).toBe(1)
   expect(created).not.toHaveProperty('algorithms')
   await page.locator('.dataset-detail-actions').getByRole('button', { name: '编辑' }).click()
+  await dialog.getByLabel('分类规则说明').hover()
+  await expect(dialog.getByRole('tooltip')).toBeVisible()
   await expect(dialog.getByRole('group', { name: '所属项目' }).getByLabel('烟火检测')).toBeChecked()
   await dialog.getByRole('group', { name: '所属项目' }).getByLabel('安全帽').uncheck()
   await dialog.getByRole('button', { name: '保存', exact: true }).click()
@@ -802,6 +969,72 @@ test('刷新 Cookie 失效时清理本地会话并返回登录页', async ({ pag
 
   await expect(page.getByRole('heading', { name: '登录', exact: true })).toBeVisible()
   await expect.poll(() => page.evaluate(() => localStorage.getItem('cv-archive-session'))).toBeNull()
+})
+
+test('素材库卡片表格和详情标签使用标签管理颜色', async ({ page }) => {
+  const asset = {id:'colored-image',name:'彩色标签.jpg',type:'image',size:10,status:'ready',tags:{project:'烟火检测',data_source:'生产数据'},media:{},created_at:'2026-11-07T01:00:00Z'}
+  await mockApi(page,[asset])
+  await page.route('**/api/v1/tag-definitions',route=>json(route,{items:[
+    {key:'project',name:'项目',color:'#2764c6',values:['烟火检测']},
+    {key:'data_source',name:'数据来源',color:'#0d9488',values:['生产数据']},
+  ]}))
+  await page.addInitScript(value=>localStorage.setItem('cv-archive-session',JSON.stringify(value)),tokens)
+  await page.goto('/')
+  await page.getByRole('button',{name:/素材库/}).click()
+  const cardTags = page.locator('.asset-card .asset-tag')
+  await expect(cardTags).toHaveCount(2)
+  await expect(cardTags.first()).toHaveCSS('--tag-color','#2764c6')
+  await expect(cardTags.nth(1)).toHaveCSS('--tag-color','#0d9488')
+  await page.getByRole('button',{name:'表格',exact:true}).click()
+  const tableTags = page.locator('.asset-custom-row:not(.head) .asset-tag')
+  await expect(tableTags).toHaveCount(2)
+  await expect(tableTags.nth(1)).toHaveCSS('--tag-color','#0d9488')
+  await page.locator('.asset-custom-row:not(.head)').click()
+  const detailTags = page.locator('.detail-tags .asset-tag')
+  await expect(detailTags).toHaveCount(2)
+  await expect(detailTags.first()).toHaveCSS('--tag-color','#2764c6')
+  await page.locator('.detail-sheet .close').click()
+  await page.locator('.skin-picker select').selectOption('command')
+  const darkText = await tableTags.first().evaluate(element=>getComputedStyle(element).color)
+  const darkBackground = await tableTags.first().evaluate(element=>getComputedStyle(element).backgroundColor)
+  expect(darkText).not.toBe(darkBackground)
+  await expect(tableTags.first()).toHaveCSS('--tag-color','#2764c6')
+})
+
+test('素材库导出按所选图片决定是否附带关联标注', async ({ page }) => {
+  const assets = [
+    {id:'image-1',name:'有标注.jpg',type:'image',size:10,status:'ready',tags:{},media:{},created_at:'2026-11-07T01:00:00Z'},
+    {id:'image-2',name:'无标注.jpg',type:'image',size:10,status:'ready',tags:{},media:{},created_at:'2026-11-07T01:00:00Z'},
+  ]
+  await mockApi(page, assets)
+  const submissions: Array<Record<string,unknown>> = []
+  await page.route('**/api/v1/exports/annotation-preview', route => {
+    const selected = route.request().postDataJSON().asset_ids as string[]
+    return json(route, {annotation_count:selected.includes('image-1') ? 1 : 0})
+  })
+  await page.route('**/api/v1/exports', route => {
+    submissions.push(route.request().postDataJSON())
+    return json(route, {id:`job-${submissions.length}`,state:'queued'}, 202)
+  })
+  await page.addInitScript(value=>localStorage.setItem('cv-archive-session',JSON.stringify(value)),tokens)
+  await page.goto('/')
+  await page.getByRole('button',{name:/素材库/}).click()
+  await page.getByRole('button',{name:'选择 有标注.jpg'}).click()
+  await page.locator('.batch-bar').getByRole('button',{name:'导出'}).click()
+  const dialog = page.getByRole('dialog',{name:'导出素材'})
+  await expect(dialog.getByRole('combobox',{name:'关联标注'})).toHaveValue('exclude')
+  await dialog.getByRole('button',{name:'确认导出'}).click()
+  expect(submissions[0]).toMatchObject({asset_ids:['image-1'],include_annotations:false})
+  await page.locator('.batch-bar').getByRole('button',{name:'导出'}).click()
+  await dialog.getByRole('combobox',{name:'关联标注'}).selectOption('include')
+  await dialog.getByRole('button',{name:'确认导出'}).click()
+  expect(submissions[1]).toMatchObject({asset_ids:['image-1'],include_annotations:true})
+  await page.getByRole('button',{name:'选择 有标注.jpg'}).click()
+  await page.getByRole('button',{name:'选择 无标注.jpg'}).click()
+  await page.locator('.batch-bar').getByRole('button',{name:'导出'}).click()
+  await expect(dialog.getByRole('combobox',{name:'关联标注'})).toHaveCount(0)
+  await dialog.getByRole('button',{name:'确认导出'}).click()
+  expect(submissions[2]).toMatchObject({asset_ids:['image-2'],include_annotations:false})
 })
 
 async function json(route: Route, body: unknown, status = 200) {

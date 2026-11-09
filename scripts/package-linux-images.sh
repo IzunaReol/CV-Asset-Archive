@@ -4,7 +4,7 @@ set -euo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 project_root="$(cd -- "$script_dir/.." && pwd)"
 compose_file="$project_root/deploy/docker-compose.yml"
-output="${1:-$project_root/../cv-archive-v2.1.0-linux-images.tar}"
+output="${1:-$project_root/../cv-archive-v2.2.0-linux-images.tar}"
 output="$(realpath -m -- "$output")"
 [[ ! -e "$output" && ! -e "$output.sha256" && ! -e "$output.platform" ]] || { echo "目标文件已存在：$output" >&2; exit 1; }
 command -v docker >/dev/null && docker compose version >/dev/null && docker info >/dev/null || { echo "需要可用的 Docker Engine 与 Compose v2。" >&2; exit 1; }

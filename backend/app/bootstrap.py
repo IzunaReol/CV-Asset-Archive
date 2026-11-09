@@ -17,15 +17,16 @@ DEFAULT_TAGS = [
     ("scene", "场景", ["室内", "室外", "夜间", "车内"], "#0891b2"),
     ("lighting", "光照", ["强", "中", "弱"], "#ca8a04"),
     ("annotation_format", "标注格式", ["COCO", "YOLO", "VOC"], "#16a34a"),
-    ("model_framework", "模型框架", ["YOLO11", "YOLOv8", "RT-DETR"], "#475569"),
+    ("model_framework", "模型框架", ["Caffe", "Darknet", "PyTorch", "TensorFlow", "PaddlePaddle", "ONNX Runtime", "TensorRT", "OpenVINO"], "#475569"),
     ("model_version", "模型版本", [], "#64748b"),
+    ("data_source", "数据来源", ["开源数据", "生产数据", "客户反馈数据", "AIGC数据", "研发数据"], "#0d9488"),
 ]
 
 DEFAULT_FORMATS = {
     "image": [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".avif"],
     "video": [".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".mpeg", ".mpg", ".ts", ".mts", ".m2ts"],
     "annotation": [".txt", ".xml", ".json", ".yaml", ".yml", ".csv"],
-    "model": [".pt", ".pth", ".onnx", ".engine", ".weights", ".ckpt", ".pb", ".tflite", ".torchscript", ".safetensors", ".mlmodel", ".bin"],
+    "model": [".pt", ".pth", ".onnx", ".engine", ".weights", ".ckpt", ".pb", ".tflite", ".torchscript", ".safetensors", ".mlmodel", ".bin", ".caffemodel", ".solverstate", ".mdl"],
     "archive": [".rar", ".zip", ".7z"],
     "image_annotation": [".rar", ".zip", ".7z"],
 }

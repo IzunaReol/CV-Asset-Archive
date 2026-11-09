@@ -10,7 +10,7 @@ from ..config import get_settings
 from ..database import db
 from ..dependencies import AssetExportUser, ExportWriteUser, JobReadUser, UserManageUser
 from ..errors import AppError
-from ..schemas import ExportCreate, JobState, VisibleJobType
+from ..schemas import ExportCreate, ExportSelection, JobState, VisibleJobType
 from ..storage import presigned_get, stat_object
 from ..utils import new_id, now, public_document
 from .assets import resolve_selection_ids
@@ -191,11 +191,38 @@ async def reconcile_stale_jobs() -> int:
     return len(stale_ids)
 
 
+async def linked_annotation_ids(asset_ids: list[str]) -> list[str]:
+    annotations: set[str] = set()
+    for offset in range(0, len(asset_ids), 1000):
+        image_ids = await db.assets.distinct("id", {
+            "id": {"$in": asset_ids[offset:offset + 1000]},
+            "type": "image", "archived_at": None,
+        })
+        if not image_ids:
+            continue
+        source_ids = await db.relations.distinct("source_id", {
+            "target_id": {"$in": image_ids}, "relation_type": "annotates", "status": "active",
+        })
+        for source_offset in range(0, len(source_ids), 1000):
+            annotations.update(await db.assets.distinct("id", {
+                "id": {"$in": source_ids[source_offset:source_offset + 1000]},
+                "type": "annotation", "archived_at": None,
+            }))
+    return sorted(annotations)
+
+
+@router.post("/exports/annotation-preview")
+async def preview_export_annotations(body: ExportSelection, user: AssetExportUser) -> dict[str, int]:
+    asset_ids = await resolve_selection_ids(user, body.asset_ids, body.selection_id, body.excluded_ids)
+    return {"annotation_count": len(await linked_annotation_ids(asset_ids))}
+
+
 @router.post("/exports", status_code=202)
 async def create_export(body: ExportCreate, request: Request, user: AssetExportUser) -> dict[str, Any]:
     asset_ids = await resolve_selection_ids(user, body.asset_ids, body.selection_id, body.excluded_ids)
     if not asset_ids:
         raise AppError(400, "EXPORT_EMPTY", "筛选结果中没有可导出的素材")
+    annotation_ids = await linked_annotation_ids(asset_ids) if body.include_annotations else []
     if body.selection_id:
         await db.asset_selection_sets.update_one(
             {"id": body.selection_id, "owner_id": user["id"]},
@@ -208,6 +235,9 @@ async def create_export(body: ExportCreate, request: Request, user: AssetExportU
         }
     else:
         job_input = {"asset_ids": asset_ids, "asset_count": len(asset_ids)}
+    job_input["include_annotations"] = body.include_annotations
+    job_input["annotation_ids"] = annotation_ids
+    job_input["asset_count"] = len(set(asset_ids) | set(annotation_ids))
     job = {
         "id": new_id(),
         "type": "export",
@@ -247,7 +277,7 @@ async def create_export(body: ExportCreate, request: Request, user: AssetExportU
         object_type="job",
         object_id=job["id"],
         request_id=request.state.request_id,
-        changes={"asset_count": len(asset_ids)},
+        changes={"asset_count": job_input["asset_count"], "include_annotations": body.include_annotations, "annotation_count": len(annotation_ids)},
     )
     return public_document(job) or {}
 

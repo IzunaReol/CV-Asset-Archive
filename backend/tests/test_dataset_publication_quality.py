@@ -32,7 +32,7 @@ async def test_publication_quality_reports_unlabeled_and_duplicate_assets(monkey
     asset_collection.find.side_effect = [Cursor(assets), Cursor([{"id": "ann"}])]
     relations = MagicMock()
     relations.find.return_value = Cursor([{"source_id": "ann", "target_id": "a"}])
-    monkeypatch.setattr(datasets, "db", SimpleNamespace(dataset_memberships=memberships, assets=asset_collection, relations=relations))
+    monkeypatch.setattr(datasets, "db", SimpleNamespace(dataset_memberships=memberships, assets=asset_collection, relations=relations, datasets=SimpleNamespace(find_one=AsyncMock(return_value={"id": "dataset"}))))
 
     report, _ = await datasets._publication_quality("dataset")
     assert report["blockers"] == []
@@ -48,7 +48,7 @@ async def test_publication_quality_blocks_invalid_member(monkeypatch):
     memberships = SimpleNamespace(distinct=AsyncMock(return_value=["missing"]))
     asset_collection = MagicMock()
     asset_collection.find.return_value = Cursor([])
-    monkeypatch.setattr(datasets, "db", SimpleNamespace(dataset_memberships=memberships, assets=asset_collection))
+    monkeypatch.setattr(datasets, "db", SimpleNamespace(dataset_memberships=memberships, assets=asset_collection, datasets=SimpleNamespace(find_one=AsyncMock(return_value={"id": "dataset"}))))
 
     report, _ = await datasets._publication_quality("dataset")
     assert report["blockers"] == ["empty_dataset", "invalid_assets"]

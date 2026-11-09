@@ -10,7 +10,61 @@ from app import bootstrap
 from app.dependencies import require_action, require_menu
 from app.errors import AppError
 from app.routers import parameters
-from app.schemas import MetricCategoryCreate, MetricDefinitionWrite
+from app.schemas import MetricCategoryCreate, MetricCategoryMove, MetricDefinitionWrite
+
+
+class CategoryCursor:
+    def __init__(self, items):
+        self.items = items
+
+    def sort(self, _order):
+        return self
+
+    def __aiter__(self):
+        async def iterate():
+            for item in self.items:
+                yield item
+        return iterate()
+
+
+@pytest.mark.asyncio
+async def test_category_move_updates_order_and_metric_listing(monkeypatch):
+    items = [
+        {"id": "a", "name": "图像分类", "order": 0},
+        {"id": "b", "name": "目标检测", "order": 1},
+        {"id": "c", "name": "OCR", "order": 2},
+    ]
+    categories = SimpleNamespace(
+        find=lambda: CategoryCursor(sorted(items, key=lambda item: item["order"])),
+        update_one=AsyncMock(),
+    )
+    definitions = SimpleNamespace(find=lambda: CategoryCursor([
+        {"id": "m1", "name": "A", "category": "图像分类"},
+        {"id": "m2", "name": "B", "category": "目标检测"},
+        {"id": "m3", "name": "C", "category": "OCR"},
+    ]))
+    monkeypatch.setattr(parameters, "db", SimpleNamespace(metric_categories=categories, metric_definitions=definitions))
+    monkeypatch.setattr(parameters, "record_audit", AsyncMock())
+    response = await parameters.move_category(
+        "c", MetricCategoryMove(direction="top"), SimpleNamespace(state=SimpleNamespace(request_id="r")), {"id": "admin"},
+    )
+    assert [item["id"] for item in response["items"]] == ["c", "a", "b"]
+    assert categories.update_one.await_count == 3
+    for call in categories.update_one.await_args_list:
+        category_id = call.args[0]["id"]
+        next_order = call.args[1]["$set"]["order"]
+        next(item for item in items if item["id"] == category_id)["order"] = next_order
+    listed = await parameters.list_metrics({"id": "reader"})
+    assert [item["id"] for item in listed["items"]] == ["m3", "m1", "m2"]
+    unchanged = await parameters.move_category(
+        "c", MetricCategoryMove(direction="up"), SimpleNamespace(state=SimpleNamespace(request_id="r")), {"id": "admin"},
+    )
+    assert [item["id"] for item in unchanged["items"]] == ["c", "a", "b"]
+    with pytest.raises(AppError) as missing:
+        await parameters.move_category(
+            "missing", MetricCategoryMove(direction="down"), SimpleNamespace(state=SimpleNamespace(request_id="r")), {"id": "admin"},
+        )
+    assert missing.value.code == "METRIC_CATEGORY_NOT_FOUND"
 
 
 def test_defaults_and_validation():
@@ -155,7 +209,10 @@ async def test_category_creation_and_metric_category_validation(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_duplicate_category_is_rejected(monkeypatch):
-    collection = SimpleNamespace(insert_one=AsyncMock(side_effect=DuplicateKeyError("duplicate")))
+    collection = SimpleNamespace(
+        find_one=AsyncMock(return_value=None),
+        insert_one=AsyncMock(side_effect=DuplicateKeyError("duplicate")),
+    )
     monkeypatch.setattr(parameters, "db", SimpleNamespace(metric_categories=collection))
     with pytest.raises(AppError) as duplicate:
         await parameters.create_category(

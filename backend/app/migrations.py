@@ -123,12 +123,36 @@ async def migration_005_normalize_asset_names() -> None:
     )
 
 
+async def migration_006_model_formats_and_tag_defaults() -> None:
+    added_formats = [".caffemodel", ".solverstate", ".mdl"]
+    await db.format_definitions.update_one(
+        {"asset_type": "model"},
+        {"$addToSet": {"extensions": {"$each": added_formats}}},
+    )
+    old_defaults = {"YOLO11", "YOLOv8", "RT-DETR"}
+    new_defaults = [
+        "Caffe", "Darknet", "PyTorch", "TensorFlow", "PaddlePaddle",
+        "ONNX Runtime", "TensorRT", "OpenVINO",
+    ]
+    existing = await db.tag_definitions.find_one({"key": "model_framework"})
+    if existing is not None:
+        custom_values = [
+            value for value in existing.get("values", [])
+            if value not in old_defaults and value not in new_defaults
+        ]
+        await db.tag_definitions.update_one(
+            {"key": "model_framework"},
+            {"$set": {"values": [*new_defaults, *custom_values], "updated_at": now()}},
+        )
+
+
 MIGRATIONS: list[Migration] = [
     (1, "asset and relation defaults", migration_001_asset_defaults),
     (2, "normalize relation creator names", migration_002_relation_creator_names),
     (3, "separate archive and image annotation formats", migration_003_archive_format_types),
     (4, "migrate collections to dataset memberships", migration_004_collections_to_datasets),
     (5, "normalize asset names", migration_005_normalize_asset_names),
+    (6, "add model formats and refresh framework defaults", migration_006_model_formats_and_tag_defaults),
 ]
 
 

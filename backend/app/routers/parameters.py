@@ -7,7 +7,7 @@ from ..audit import record_audit
 from ..database import db
 from ..dependencies import ParameterManageUser, ParameterReadUser
 from ..errors import AppError
-from ..schemas import MetricCategoryCreate, MetricDefinitionWrite
+from ..schemas import MetricCategoryCreate, MetricCategoryMove, MetricDefinitionWrite
 from ..utils import new_id, now, public_document
 
 router = APIRouter(prefix="/metric-definitions", tags=["metric-definitions"])
@@ -19,7 +19,7 @@ async def list_categories(user: ParameterReadUser) -> dict[str, Any]:
     return {
         "items": [
             public_document(item)
-            async for item in db.metric_categories.find().sort([("order", 1), ("created_at", 1)])
+            async for item in db.metric_categories.find().sort([("order", 1), ("created_at", 1), ("id", 1)])
         ]
     }
 
@@ -28,8 +28,9 @@ async def list_categories(user: ParameterReadUser) -> dict[str, Any]:
 async def create_category(
     body: MetricCategoryCreate, request: Request, user: ParameterManageUser
 ) -> dict[str, Any]:
+    last = await db.metric_categories.find_one(sort=[("order", -1)])
     document = {
-        "id": new_id(), "name": body.name, "order": 100,
+        "id": new_id(), "name": body.name, "order": (last.get("order", 0) + 1) if last else 0,
         "built_in": False, "created_by": user["id"],
         "created_at": now(), "updated_at": now(),
     }
@@ -43,6 +44,36 @@ async def create_category(
         request_id=request.state.request_id,
     )
     return public_document(document) or {}
+
+
+@category_router.patch("/{category_id}/move")
+async def move_category(
+    category_id: str, body: MetricCategoryMove, request: Request, user: ParameterManageUser,
+) -> dict[str, Any]:
+    categories = [item async for item in db.metric_categories.find().sort(
+        [("order", 1), ("created_at", 1), ("id", 1)]
+    )]
+    current_index = next((index for index, item in enumerate(categories) if item["id"] == category_id), None)
+    if current_index is None:
+        raise AppError(404, "METRIC_CATEGORY_NOT_FOUND", "指标分类不存在")
+    target_index = {"up": current_index - 1, "down": current_index + 1, "top": 0}[body.direction]
+    if target_index < 0 or target_index >= len(categories) or target_index == current_index:
+        return {"items": [public_document(item) for item in categories]}
+    moved = categories.pop(current_index)
+    categories.insert(target_index, moved)
+    timestamp = now()
+    for index, item in enumerate(categories):
+        if item.get("order") != index:
+            await db.metric_categories.update_one(
+                {"id": item["id"]}, {"$set": {"order": index, "updated_at": timestamp}}
+            )
+        item["order"] = index
+    await record_audit(
+        actor=user, action="metric_category.reordered", object_type="metric_category",
+        object_id=category_id, object_name=moved["name"], request_id=request.state.request_id,
+        changes={"from": current_index, "to": target_index},
+    )
+    return {"items": [public_document(item) for item in categories]}
 
 
 @category_router.delete("/{category_id}", status_code=204)
@@ -107,11 +138,14 @@ async def ensure_category_exists(name: str) -> None:
 
 @router.get("")
 async def list_metrics(user: ParameterReadUser) -> dict[str, Any]:
+    categories = [item async for item in db.metric_categories.find().sort(
+        [("order", 1), ("created_at", 1), ("id", 1)]
+    )]
+    category_order = {item["name"]: index for index, item in enumerate(categories)}
+    metrics = [item async for item in db.metric_definitions.find()]
+    metrics.sort(key=lambda item: (category_order.get(item["category"], len(categories)), item["name"]))
     return {
-        "items": [
-            public_document(item)
-            async for item in db.metric_definitions.find().sort([("category", 1), ("name", 1)])
-        ]
+        "items": [public_document(item) for item in metrics]
     }
 
 

@@ -14,16 +14,18 @@ export const auditActionLabels: Record<string,string> = {
   'dataset.export_created':'创建数据集导出', 'job.cancelled':'取消任务',
   'relation.created':'建立关联关系', 'relation.revoked':'撤销关联关系',
   'dataset.created':'创建数据集', 'dataset.updated':'修改数据集', 'dataset.deleted':'删除数据集',
+  'dataset.category_created':'新增数据集分类', 'dataset.category_renamed':'修改数据集分类', 'dataset.category_deleted':'删除数据集分类',
+  'dataset.split_updated':'修改图片分类', 'dataset.auto_split':'自动分配图片分类',
   'dataset.members_added':'添加数据集成员', 'dataset.members_removed':'移除数据集成员',
   'dataset.version_published':'发布数据集版本', 'dataset.version_restored':'恢复数据集版本',
-  'dataset.model_link_created':'关联数据集模型', 'dataset.model_link_removed':'移除数据集模型关联',
+  'dataset.model_link_created':'关联数据集模型', 'dataset.model_link_remark_updated':'修改模型关联备注', 'dataset.model_link_removed':'移除数据集模型关联',
   'collection.created':'创建集合', 'collection.frozen':'冻结集合',
   'saved_view.created':'创建保存视图', 'saved_view.updated':'修改保存视图', 'saved_view.deleted':'删除保存视图',
   'user.created':'创建用户', 'user.updated':'修改用户', 'user.deleted':'删除用户',
   'tag_definition.created':'创建标签', 'tag_definition.updated':'修改标签', 'tag_definition.deleted':'删除标签',
   'format.created':'创建格式', 'format.updated':'修改格式', 'format.deleted':'删除格式',
   'metric_definition.created':'新增指标', 'metric_definition.updated':'修改指标', 'metric_definition.deleted':'删除指标',
-  'metric_category.created':'新增指标分类', 'metric_category.updated':'修改指标分类', 'metric_category.deleted':'删除指标分类',
+  'metric_category.created':'新增指标分类', 'metric_category.updated':'修改指标分类', 'metric_category.deleted':'删除指标分类', 'metric_category.reordered':'调整指标分类顺序',
   'role_template.created':'创建角色', 'role_template.updated':'修改角色', 'role_template.deleted':'删除角色',
   'auth.login_succeeded':'登录成功', 'auth.login_failed':'登录失败', 'auth.login_blocked':'登录受限', 'auth.logout':'退出登录', 'auth.permission_denied':'权限拦截', 'auth.session_invalid':'登录状态失效',
   'system.service_unavailable':'服务不可用', 'system.service_recovered':'服务已恢复', 'job.stale_recovered':'异常任务已恢复',
@@ -38,7 +40,7 @@ export const auditFieldLabels: Record<string,string> = {
   asset_ids:'涉及素材', invalid_ids:'无效素材', dataset_id:'数据集编号', version_id:'版本编号', selection_id:'选择范围编号',
   upload_session_id:'上传会话编号', previous_object_key:'原文件位置', new_object_key:'新文件位置',
 }
-export function auditActionText(action: string) { return auditActionLabels[action] || action }
+export function auditActionText(action: string) { return auditActionLabels[action] || '其他操作' }
 
 export function createAuditPresentation(deps: AuditPresentationDependencies) {
   function fieldText(key: string) { return deps.fieldLabels[key] || key.replaceAll('_', ' ') }
