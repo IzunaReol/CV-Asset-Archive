@@ -4,7 +4,8 @@
 
 - [x] 前端、锁文件、API、Worker 和默认镜像标签统一为 2.2.1；变更日志及[发布说明](releases/v2.2.1.md)已更新。
 - [x] 后端 263 项测试、Ruff、前端 48 项单元测试、54 项模拟接口浏览器测试、类型检查及构建通过。
-- [ ] 最终提交的远程 CI 通过，推送 `v2.2.1` Git 标签；按用户要求不创建 GitHub Release。
+- [x] 提交 `d68cc57` 的 [远程 CI](https://github.com/IzunaReol/CV-Asset-Archive/actions/runs/42588468274) 全部通过。
+- [ ] 推送 `v2.2.1` Git 标签；按用户要求不创建 GitHub Release。
 - [ ] 本地 Docker 与现有 Ubuntu 服务器运行 2.2.1，并验证 API 就绪、前端页面和代理登录接口。
 - [ ] 本版没有执行隔离真实 API 全链路、全量角色矩阵、大文件性能或备份恢复演练；不将模拟测试视为这些验收。
 
