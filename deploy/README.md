@@ -47,16 +47,16 @@ bash deploy-linux.sh
 
 ### 方式二：预构建镜像包
 
-在与服务器相同 CPU 架构的 Linux 容器引擎上，从 **v2.2.0 候选代码**制作镜像包：
+在与服务器相同 CPU 架构的 Linux 容器引擎上，从 **v2.2.1 代码**制作镜像包：
 
 ```bash
 bash scripts/package-linux-images.sh
 ```
 
-脚本构建 API、Worker、前端，拉取 MongoDB、MinIO、Redis 镜像，默认在仓库的上一级目录输出 `cv-archive-v2.2.0-linux-images.tar`、`.sha256` 和 `.platform` 三个文件；可传入目标 tar 路径更改位置。把这三个文件和同一份项目代码复制到服务器；镜像包不要放入 Git。服务器首次部署：
+脚本构建 API、Worker、前端，拉取 MongoDB、MinIO、Redis 镜像，默认在仓库的上一级目录输出 `cv-archive-v2.2.1-linux-images.tar`、`.sha256` 和 `.platform` 三个文件；可传入目标 tar 路径更改位置。把这三个文件和同一份项目代码复制到服务器；镜像包不要放入 Git。服务器首次部署：
 
 ```bash
-bash deploy-linux.sh --bundle /path/to/cv-archive-v2.2.0-linux-images.tar
+bash deploy-linux.sh --bundle /path/to/cv-archive-v2.2.1-linux-images.tar
 ```
 
 部署前会核对校验值、镜像架构、镜像名称、全部本地镜像、配置、磁盘与端口。制作镜像包与服务器上的 `APP_IMAGE_TAG`、`DOCKER_REGISTRY_PREFIX`、`MINIO_IMAGE` 必须一致。镜像模式使用 `--no-build --pull never` 启动，不在服务器现场构建或拉取。部署成功后检查六个容器、API 就绪、前端页面和 API 版本；任何检查失败都会退出并显示失败位置。请按服务器的实际域名和端口设置 `.env` 中的 `APP_BASE_URL`、`API_BASE_URL`、`MINIO_PUBLIC_ENDPOINT` 和端口。
