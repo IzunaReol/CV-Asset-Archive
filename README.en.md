@@ -2,7 +2,7 @@
 
 English | [简体中文](README.md)
 
-**v2.2.0** is in the release process. See the [release notes](docs/releases/v2.2.0.md) and [release checklist](docs/release-checklist.md) for Git status and validation limits.
+Current version: **v2.2.0**. See the [release notes](docs/releases/v2.2.0.md) and [release checklist](docs/release-checklist.md) for changes and validation limits.
 
 CV Asset Archive is an asset and relationship management system for computer vision teams. It stores images, videos, annotations, models, and archives in one place, with search, annotation preview, lineage tracking, recycle-bin recovery, and asynchronous exports.
 

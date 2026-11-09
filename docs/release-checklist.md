@@ -19,12 +19,13 @@
 - [x] 2026-11-09：前端生产依赖 `npm audit --omit=dev --audit-level=high` 为 0 项漏洞。
 - [x] 首次远程 CI 发现 `ubuntu-latest` 已指向 Playwright 1.55.1 不支持的 Ubuntu 26.04；前端任务固定到 Ubuntu 24.04 后重新验证。
 - [x] 第二次远程 CI 的前端、后端、部署脚本和密钥扫描通过；容器扫描发现基础镜像旧 `zlib1g` 的已修复漏洞，API 和 Worker 构建增加系统包升级后重新验证。
-- [ ] 全新 API／Worker／前端镜像构建、Python 依赖审计、镜像扫描、密钥扫描与 CI 通过。
+- [x] [CI 42547684022](https://github.com/IzunaReol/CV-Asset-Archive/actions/runs/42547684022) 的全新 API／Worker／前端镜像构建、Python 依赖审计、镜像扫描、密钥扫描及所有测试任务通过。
 
 ## 发布前确认
 
 - [ ] 升级前备份 MongoDB、MinIO、`.env` 和部署配置，保留旧镜像并在隔离环境验证恢复。
 - [x] 用户于 2026-11-09 明确要求“提交到 git 中，发布新版本”；按此授权执行 Git 发布，未完成验收保持可见。
+- [x] v2.2.0 功能、测试和修复已提交并推送到 `main`；发布标签与 Release 以 [GitHub 发布页](https://github.com/IzunaReol/CV-Asset-Archive/releases/tag/v2.2.0) 为准。
 
 ## v2.1.0 历史发布检查（不计入 v2.2.0 验收）
 
