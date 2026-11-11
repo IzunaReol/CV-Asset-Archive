@@ -466,6 +466,10 @@ test('数据集发布前展示质量提醒并要求确认', async ({ page }) => 
   await expect(page.locator('.publish-quality')).toContainText('1 张图片未关联有效标注')
   await expect(page.getByRole('button', { name: '确认发布' })).toBeDisabled()
   await page.getByLabel('已了解上述风险，继续发布').check()
+  await page.getByPlaceholder('例如 v1.1').fill('中文版本')
+  await page.getByRole('button', { name: '确认发布' }).click()
+  expect(published).toHaveLength(0)
+  await page.getByPlaceholder('例如 v1.1').fill('v1')
   await page.getByRole('button', { name: '确认发布' }).click()
   await expect.poll(() => published.length).toBe(1)
   expect(published[0]).toMatchObject({ quality_token: 'a'.repeat(64), acknowledge_warnings: true })
@@ -832,6 +836,51 @@ test('标签与格式管理页保持独立展示和操作入口', async ({ page 
   await expect(page.getByRole('button', { name: '新增格式' })).toBeVisible()
 })
 
+test('中文标签备注会独立保存且自动生成合法内部标识', async ({ page }) => {
+  await mockApi(page)
+  let tags: any[] = []
+  let created: any = null
+  let updated: any = null
+  await page.route('**/api/v1/tag-definitions', route => {
+    if (route.request().method() === 'POST') {
+      created = route.request().postDataJSON()
+      tags = [{...created, built_in:false}]
+      return json(route, tags[0], 201)
+    }
+    return json(route, {items:tags})
+  })
+  await page.route(/\/api\/v1\/tag-definitions\/[^/?]+$/, route => {
+    updated = route.request().postDataJSON()
+    tags = [{...tags[0], ...updated}]
+    return json(route, tags[0])
+  })
+  await page.addInitScript(value => localStorage.setItem('cv-archive-session', JSON.stringify(value)), tokens)
+  await page.goto('/')
+  await page.getByRole('button', {name:'标签管理'}).click()
+  await page.getByRole('button', {name:'新建标签字段'}).click()
+  const dialog = page.locator('.tag-dialog')
+  await dialog.getByPlaceholder('例如 天气').fill('缺陷类型')
+  await dialog.getByPlaceholder('请输入备注（选填）').fill('视觉算法检测的缺陷类型')
+  await dialog.getByRole('button', {name:'新增'}).click()
+  await dialog.getByPlaceholder('请输入标签值').fill('漏件')
+  await dialog.getByLabel('颜色值').fill('#xyz')
+  await dialog.getByRole('button', {name:'保存标签'}).click()
+  expect(created).toBeNull()
+  await dialog.getByLabel('颜色值').fill('#2fa783')
+  await dialog.getByRole('button', {name:'保存标签'}).click()
+  await expect.poll(() => created).not.toBeNull()
+  expect(created.key).toMatch(/^tag_[a-f0-9]{32}$/)
+  expect(created.name).toBe('缺陷类型')
+  expect(created.remark).toBe('视觉算法检测的缺陷类型')
+  await expect(page.locator('.tag-admin')).toContainText('视觉算法检测的缺陷类型')
+  await page.locator('.tag-admin').getByRole('button', {name:'修改'}).click()
+  await expect(dialog.getByPlaceholder('请输入备注（选填）')).toHaveValue('视觉算法检测的缺陷类型')
+  await dialog.getByPlaceholder('请输入备注（选填）').fill('缺陷识别')
+  await dialog.getByRole('button', {name:'保存标签'}).click()
+  await expect.poll(() => updated?.remark).toBe('缺陷识别')
+  await expect(page.locator('.tag-admin')).toContainText('缺陷识别')
+})
+
 test('数据集所属项目必选、支持多选并跳转到项目修改弹窗', async ({ page }) => {
   await mockApi(page)
   await page.route('**/api/v1/tag-definitions', route => json(route, { items: [
@@ -859,7 +908,7 @@ test('数据集所属项目必选、支持多选并跳转到项目修改弹窗',
   await dialog.getByRole('button', { name: '新增项目' }).click()
   await expect(page.getByRole('heading', { name: '标签管理' })).toBeVisible()
   await expect(page.getByRole('heading', { name: '修改标签字段' })).toBeVisible()
-  await expect(page.locator('.tag-dialog input[placeholder="例如 weather"]')).toHaveValue('project')
+  await expect(page.locator('.tag-dialog input[placeholder="请输入备注（选填）"]')).toHaveValue('')
   await page.locator('.tag-dialog .close').click()
   await page.getByRole('button', { name: /数据集/ }).first().click()
   await expect(page.locator('.dataset-dialog').getByPlaceholder('请输入名称')).toHaveValue('测试数据集')
@@ -1742,6 +1791,31 @@ test('自定义用户的菜单权限和操作权限支持全选与取消选择',
   await bulk.getByRole('button', { name: '取消全选', exact: true }).click()
   await expect(permissions.locator('.permission-menu-title').getByLabel('有权限')).toHaveCount(0)
   await expect(permissions.locator('.permission-menu-actions').getByLabel('有权限')).toHaveCount(0)
+})
+
+test('用户表单在提交前拦截接口不接受的用户名', async ({ page }) => {
+  await mockApi(page)
+  let creates = 0
+  await page.route('**/api/v1/users', route => {
+    if (route.request().method() === 'POST') {
+      creates += 1
+      return json(route, {id:'user-test', username:route.request().postDataJSON().username}, 201)
+    }
+    return json(route, {items:[]})
+  })
+  await page.addInitScript(value => localStorage.setItem('cv-archive-session', JSON.stringify(value)), tokens)
+  await page.goto('/')
+  await page.getByRole('button', {name:/用户管理/}).click()
+  await page.getByRole('button', {name:'＋ 新增用户', exact:true}).click()
+  const dialog = page.locator('.user-dialog')
+  await dialog.getByLabel('用户名').fill('中文用户')
+  await dialog.getByLabel('初始密码').fill('password123')
+  await dialog.getByRole('button', {name:'创建用户'}).click()
+  expect(creates).toBe(0)
+  await expect(dialog).toBeVisible()
+  await dialog.getByLabel('用户名').fill('user_01')
+  await dialog.getByRole('button', {name:'创建用户'}).click()
+  await expect.poll(() => creates).toBe(1)
 })
 
 test('全局搜索可以打开素材结果', async ({ page }) => {

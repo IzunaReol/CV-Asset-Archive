@@ -1,4 +1,5 @@
 import { parseStoredSession, persistedSession } from './sessionPolicy'
+import { formatValidationErrors } from './validationErrors'
 import type { ApiList, AssetStats, DatasetOption, Job, RelationGraph } from './apiTypes'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api/v1'
@@ -91,7 +92,7 @@ async function request<T>(path: string, init: RequestInit = {}, retry = true, tr
       throw new Error('服务器异常，请重启后端服务')
     }
     const validationMessage = Array.isArray(payload?.detail)
-      ? payload.detail.map((item:any) => item?.msg).filter(Boolean).join('；')
+      ? formatValidationErrors(payload.detail)
       : (typeof payload?.detail === 'string' ? payload.detail : '')
     throw new Error(payload?.error?.message || validationMessage || `请求失败 (${response.status})`)
   }

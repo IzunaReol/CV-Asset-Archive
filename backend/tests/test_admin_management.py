@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from pydantic import ValidationError
 
 from app.errors import AppError
 from app.routers import admin
@@ -16,6 +17,13 @@ def test_fixed_role_uses_predefined_menu_permissions():
     body = admin.UserCreate(username="viewer-user", password="password123", roles=["viewer"])
 
     assert body.menu_permissions == ["overview", "project_overview", "library", "datasets", "relations", "lineage", "downloads"]
+
+
+def test_username_contract_rejects_chinese_and_overlong_values():
+    for username in ("中文用户", "a" * 51):
+        with pytest.raises(ValidationError):
+            admin.UserCreate(username=username, password="password123", roles=["viewer"])
+    assert admin.UserCreate(username="user_01", password="password123", roles=["viewer"]).username == "user_01"
 
 
 def test_reusable_role_rejects_action_without_corresponding_menu():

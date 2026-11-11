@@ -91,6 +91,15 @@ def test_tag_key_is_storage_safe():
         TagDefinitionCreate(key="bad.key", name="错误字段")
 
 
+def test_tag_remark_accepts_chinese_without_changing_storage_key():
+    tag = TagDefinitionCreate(
+        key="tag_0123456789abcdef", name="缺陷类型", remark="视觉算法检测的缺陷类型",
+        values=["拉尖", "漏件"],
+    )
+    assert tag.remark == "视觉算法检测的缺陷类型"
+    assert TagDefinitionUpdate(name="缺陷类型", remark=tag.remark).remark == tag.remark
+
+
 def test_saved_view_name_cannot_be_empty():
     with pytest.raises(ValidationError):
         SavedViewUpdate(name="")

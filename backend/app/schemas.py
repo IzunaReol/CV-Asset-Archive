@@ -364,6 +364,7 @@ class ExportCreate(ExportSelection):
 class TagDefinitionCreate(BaseModel):
     key: str = Field(pattern=r"^[a-z][a-z0-9_]{1,49}$")
     name: str = Field(min_length=1, max_length=50)
+    remark: str = Field(default="", max_length=1000)
     values: list[str] = Field(default_factory=list)
     color: str = Field(default="#64748b", pattern=r"^#[0-9a-fA-F]{6}$")
     asset_types: list[AssetType] = Field(default_factory=list)
@@ -372,6 +373,7 @@ class TagDefinitionCreate(BaseModel):
 
 class TagDefinitionUpdate(BaseModel):
     name: str = Field(min_length=1, max_length=50)
+    remark: str = Field(default="", max_length=1000)
     values: list[str] = Field(default_factory=list)
     color: str = Field(default="#64748b", pattern=r"^#[0-9a-fA-F]{6}$")
     asset_types: list[AssetType] = Field(default_factory=list)

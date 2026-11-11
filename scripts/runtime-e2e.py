@@ -47,6 +47,19 @@ def expect_error(path: str, method: str, body: Any, token: str, status: int, cod
         assert exc.code == status and payload.get("error", {}).get("code") == code, (exc.code, payload)
 
 
+def expect_validation_error(path: str, body: Any, token: str, field: str) -> None:
+    req = urllib.request.Request(
+        f"{BASE_URL}{path}", data=json.dumps(body, ensure_ascii=False).encode(),
+        headers={"content-type": "application/json", "authorization": f"Bearer {token}"}, method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20):
+            raise AssertionError(f"Expected validation error for {field}")
+    except urllib.error.HTTPError as exc:
+        payload = json.loads(exc.read())
+        assert exc.code == 422 and any(field in item.get("loc", []) for item in payload.get("detail", [])), payload
+
+
 def upload(token: str, filename: str, content: bytes, asset_type: str) -> dict[str, Any]:
     session = request(
         "/assets/upload-sessions",
@@ -76,6 +89,31 @@ def main() -> None:
         raise RuntimeError("E2E requires an isolated database and API port 8010")
     login = request("/auth/login", "POST", {"username": "admin", "password": "admin"})
     token = login["access_token"]
+    expect_validation_error("/users", {
+        "username": "中文用户", "password": "password123", "roles": ["viewer"],
+    }, token, "username")
+    expect_validation_error("/tag-definitions", {
+        "key": "中文标识", "name": "缺陷类型", "remark": "视觉算法检测的缺陷类型",
+    }, token, "key")
+    expect_validation_error("/tag-definitions", {
+        "key": "tag_e2e_invalid_color", "name": "缺陷类型", "color": "#xyz",
+    }, token, "color")
+    expect_validation_error("/format-definitions", {
+        "asset_type": "image", "remark": "x" * 201, "extensions": [".jpg"],
+    }, token, "remark")
+    custom_tag = request("/tag-definitions", "POST", {
+        "key": "tag_e2e_defect", "name": "缺陷类型", "remark": "视觉算法检测的缺陷类型",
+        "values": ["拉尖", "漏件"], "color": "#2fa783", "asset_types": [], "free_input": False,
+    }, token)
+    assert custom_tag["remark"] == "视觉算法检测的缺陷类型"
+    assert any(item["key"] == custom_tag["key"] and item["remark"] == custom_tag["remark"]
+               for item in request("/tag-definitions", token=token)["items"])
+    updated_tag = request("/tag-definitions/tag_e2e_defect", "PATCH", {
+        "name": "缺陷类型", "remark": "已修改备注", "values": ["拉尖", "漏件"],
+        "color": "#2fa783", "asset_types": [], "free_input": False,
+    }, token)
+    assert updated_tag["remark"] == "已修改备注"
+    request("/tag-definitions/tag_e2e_defect", "DELETE", token=token)
     pixels = io.BytesIO()
     Image.new("RGB", (48, 32), (120, 80, 40)).save(pixels, format="JPEG")
     image = upload(token, "pair.JPG", pixels.getvalue(), "image")
@@ -143,7 +181,15 @@ def main() -> None:
     dataset = request("/datasets", "POST", {"name": "e2e-dataset", "projects": ["e2e-isolated"]}, token)
     members = request(f"/datasets/{dataset['id']}/members", "POST", {"asset_ids": [image["id"]]}, token)
     assert members["added"] == 1 and annotation["id"] in members["annotations"]["added"]
-    version = request(f"/datasets/{dataset['id']}/versions", "POST", {"version": "v1", "release_note": "e2e"}, token)
+    quality = request(f"/datasets/{dataset['id']}/publication-quality", token=token)
+    assert not quality["blockers"]
+    expect_validation_error(f"/datasets/{dataset['id']}/versions", {
+        "version": "中文版本", "quality_token": quality["token"],
+    }, token, "version")
+    version = request(f"/datasets/{dataset['id']}/versions", "POST", {
+        "version": "v1", "release_note": "e2e", "quality_token": quality["token"],
+        "acknowledge_warnings": bool(quality["warnings"]),
+    }, token)
     assert version["member_count"] == 2
     model_body = {
         "relations": [
@@ -209,6 +255,16 @@ def main() -> None:
         assert len(recreated["succeeded"]) == 1
 
     duplicate = upload(token, "PAIR.png", pixels.getvalue(), "image")
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        duplicate_state = request(f"/assets/{duplicate['id']}", token=token)["status"]
+        if duplicate_state == "ready":
+            break
+        if duplicate_state == "failed":
+            raise RuntimeError("Duplicate asset processing failed")
+        time.sleep(0.3)
+    else:
+        raise RuntimeError("Duplicate asset processing timed out")
     conflict = request(
         "/relations/annotation-match-preview",
         "POST",
@@ -251,6 +307,8 @@ def main() -> None:
         "model_parameter_conflict": "MODEL_PARAMETERS_CONFLICT",
         "metric_delete_guard": "METRIC_DEFINITION_IN_USE",
         "project_overview_model_count": overview["summary"]["model_count"],
+        "form_contract_validation": "username, tag key/color, format remark, version",
+        "tag_remark_roundtrip": True,
     }, ensure_ascii=False))
 
 
@@ -271,11 +329,16 @@ def cleanup() -> None:
         secret_key=os.getenv("MINIO_SECRET_KEY", "minioadmin"),
         secure=False,
     )
+    bucket = os.getenv("MINIO_BUCKET", "cv-assets")
+    if bucket.startswith("cv-assets-e2e"):
+        objects.update(item.object_name for item in client.list_objects(bucket, recursive=True))
     for object_key in objects:
         try:
-            client.remove_object(os.getenv("MINIO_BUCKET", "cv-assets"), object_key)
+            client.remove_object(bucket, object_key)
         except Exception:
             pass
+    if bucket.startswith("cv-assets-e2e"):
+        client.remove_bucket(bucket)
     mongo.drop_database(DATABASE)
     mongo.close()
 

@@ -278,5 +278,7 @@ html.is-scrolling::-webkit-scrollbar-thumb { background:color-mix(in srgb,#71809
 /* Keep values and native menu options consistent across newly added dialogs. */
 .modal-stage :is(input:not([type="checkbox"]):not([type="radio"]),select,textarea),
 .modal-stage select option{font-size:14px}
+.tag-admin article>div{min-width:0}
+.tag-admin .tag-remark{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:12px}
 
 @media(max-width:560px){.overview-activity div{grid-template-columns:minmax(0,82px) minmax(0,1fr) minmax(0,106px);gap:7px}}
