@@ -10,6 +10,7 @@ html:has(.modal-stage),html:has(.detail-sheet),html:has(.media-viewer),body:has(
 .file-drop input { position:absolute; opacity:0; pointer-events:none; }.file-drop small { color:var(--muted); }
 .upload-fields { display:grid; grid-template-columns:1fr 1fr; gap:12px; }.upload-fields label { display:grid; gap:6px; font-size:12px; color:var(--muted); }.upload-fields input,.upload-fields select { border:1px solid var(--line); background:var(--panel); color:var(--ink); border-radius:6px; padding:9px; }
 .batch-tag-value-field{display:grid;align-content:start;gap:6px;min-width:0}.batch-tag-no-values{margin:0;color:var(--muted);font-size:12px}
+.batch-tag-fields{margin-top:20px;align-items:start}.batch-tag-picker,.batch-tag-value-field{display:grid;align-content:start;gap:6px;min-width:0;color:var(--muted);font-size:12px}.batch-tag-value-field input{width:100%;min-width:0;font-size:14px}.batch-tag-value-field small{font-size:12px;color:var(--muted)}.batch-tag-value-field .batch-tag-error{color:#b6453c}.detail-add-tag{margin:0 0 10px;padding:6px 10px;border:1px solid var(--line);border-radius:7px;background:var(--panel);color:var(--accent);font-size:12px;font-weight:700;cursor:pointer}
 .dialog-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:20px; }.upload-meter { height:7px; background:var(--line); border-radius:99px; overflow:hidden; margin-top:16px; }.upload-meter i { display:block; height:100%; background:var(--accent); transition:width .3s; }
 .upload-count{margin:7px 0 0;color:var(--muted);font-size:12px;text-align:right}
 .form-error { color:#b6453c!important; font-size:12px; margin:10px 0!important; }.primary:disabled { opacity:.55; cursor:not-allowed; }
@@ -170,10 +171,13 @@ html:has(.modal-stage),html:has(.detail-sheet),html:has(.media-viewer),body:has(
 .skin-command .asset-info .asset-tag{background:color-mix(in srgb,var(--tag-color) 19%,var(--panel));color:var(--ink)}
 .asset-tag::before{content:"";flex:0 0 7px;width:7px;height:7px;border-radius:50%;background:var(--tag-color)}
 .asset-custom-row .asset-table-tags{display:flex;align-items:center;gap:5px;min-width:0;overflow:hidden}
-.detail-tags .asset-tag{font-size:12px;padding:5px 8px}
-.detail-tags span i { font-style:normal; }
+.detail-tags .asset-tag{font-size:12px;padding:5px 8px;margin:7px 7px 0 0;overflow:visible}
+.detail-tags span i { font-style:normal;min-width:0;overflow:hidden;text-overflow:ellipsis; }
 .detail-tags span button { position:absolute; top:-7px; right:-7px; width:18px; height:18px; padding:0; display:none; align-items:center; justify-content:center; border:1px solid var(--line); border-radius:50%; background:var(--panel); color:var(--ink); font-size:13px; line-height:1; }
 .detail-tags span:hover button,.detail-tags span:focus-within button { display:flex; }
+.primary-actions .selection-pair,.member-toolbar .selection-pair{display:inline-flex;align-items:stretch;gap:0}
+.selection-pair>button:first-child{border-top-right-radius:0;border-bottom-right-radius:0}
+.selection-pair>button+button{margin-left:-1px;border-top-left-radius:0;border-bottom-left-radius:0}
 .asset-remark { display:grid; gap:8px; margin:18px 0 4px; }
 .asset-remark label { display:grid; gap:7px; color:var(--muted); font-size:12px; font-weight:700; }
 .asset-remark textarea { width:100%; resize:vertical; min-height:72px; border:1px solid var(--line); border-radius:7px; padding:9px; background:var(--panel); color:var(--ink); font-weight:400; }
@@ -280,5 +284,6 @@ html.is-scrolling::-webkit-scrollbar-thumb { background:color-mix(in srgb,#71809
 .modal-stage select option{font-size:14px}
 .tag-admin article>div{min-width:0}
 .tag-admin .tag-remark{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:12px}
+.tag-value-row input.duplicate{border-color:#b6453c}.tag-value-error{color:#b6453c;font-size:12px}
 
 @media(max-width:560px){.overview-activity div{grid-template-columns:minmax(0,82px) minmax(0,1fr) minmax(0,106px);gap:7px}}

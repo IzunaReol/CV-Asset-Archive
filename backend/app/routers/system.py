@@ -1,12 +1,12 @@
 import re
 from datetime import timedelta
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 from pymongo import DESCENDING
 
 from ..database import db
-from ..dependencies import ReadUser
+from ..dependencies import ReadUser, require_menu
 from ..permissions import effective_menu_permissions
 from ..utils import now, public_document
 
@@ -14,7 +14,7 @@ router = APIRouter(prefix="/system", tags=["system"])
 
 
 @router.get("/overview")
-async def system_overview(user: ReadUser) -> dict[str, Any]:
+async def system_overview(user: Annotated[dict[str, Any], Depends(require_menu("overview"))]) -> dict[str, Any]:
     menus = effective_menu_permissions(user)
     result: dict[str, Any] = {
         "counts": {}, "asset_types": {}, "asset_storage_by_type": {}, "recent_activity": []

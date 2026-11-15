@@ -23,8 +23,10 @@ async def test_ensure_indexes_creates_all_required_indexes(monkeypatch):
     await database.ensure_indexes()
 
     assert collections["users"].create_index.await_count == 1
-    assert collections["assets"].create_index.await_count == 6
-    assert collections["datasets"].create_index.await_count == 3
+    assert collections["assets"].create_index.await_count == 7
+    assert collections["datasets"].create_index.await_count == 5
+    assert collections["assets"].create_index.await_args_list[0].args == ("id",)
+    assert collections["assets"].create_index.await_args_list[0].kwargs == {"unique": True}
     assert collections["relations"].create_index.await_count == 3
     assert collections["jobs"].create_index.await_count == 6
     assert collections["maintenance_runs"].create_index.await_count == 2
@@ -32,7 +34,7 @@ async def test_ensure_indexes_creates_all_required_indexes(monkeypatch):
     assert collections["maintenance_runs"].create_index.await_args_list[1].kwargs == {
         "expireAfterSeconds": 0
     }
-    normalized_index = collections["assets"].create_index.await_args_list[3].args[0]
+    normalized_index = collections["assets"].create_index.await_args_list[4].args[0]
     assert ("normalized_name", 1) in normalized_index
     assert collections["relations"].create_index.await_args_list[0].kwargs == {"unique": True}
     assert collections["upload_sessions"].create_index.await_args.kwargs == {"expireAfterSeconds": 0}

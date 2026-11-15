@@ -661,7 +661,7 @@ async def list_members(dataset_id: str, user: DatasetReadUser, page: int = Query
     cursor = await db.dataset_memberships.aggregate(pipeline)
     asset_documents = await cursor.to_list(length=None)
     if ids_only:
-        return {"items": [{"id": item["id"]} for item in asset_documents], "page": page, "page_size": page_size, "total": total}
+        return {"items": [{"id": item["id"], "type": item["type"]} for item in asset_documents], "page": page, "page_size": page_size, "total": total}
     assets: dict[str, dict[str, Any]] = {}
     for item in asset_documents:
         result = public_document(item) or {}

@@ -10,6 +10,9 @@ db = client[settings.mongodb_database]
 
 
 async def ensure_indexes() -> None:
+    await db.assets.create_index("id", unique=True)
+    await db.datasets.create_index("id", unique=True)
+    await db.datasets.create_index([("deleted_at", ASCENDING), ("updated_at", DESCENDING), ("id", ASCENDING)])
     await db.users.create_index("username", unique=True)
     await db.refresh_sessions.create_index("token_hash", unique=True)
     await db.refresh_sessions.create_index("expires_at", expireAfterSeconds=0)

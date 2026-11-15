@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { api } from './api'
 import { useDialogAccessibility } from './dialogAccessibility'
 import ModelParametersDialog from './components/ModelParametersDialog.vue'
+import TagOptionSelect from './components/TagOptionSelect.vue'
 
 type DemoState = 'normal' | 'loading' | 'empty' | 'error' | 'forbidden'
 type DatasetTab = 'overview' | 'members' | 'versions' | 'models'
@@ -35,6 +36,7 @@ const copyAssets = ref(false)
 const copyName = ref('')
 const copyBusy = ref(false)
 const selectedMemberIds = ref<string[]>([])
+const selectingAllMembers = ref(false)
 const knownMemberTypes = ref<Record<string,string>>({})
 const operationBusy=ref(false)
 const pickerMode=ref<'add'|'filter'>('add')
@@ -95,7 +97,7 @@ const candidateLoading = ref(false)
 let candidateFilterTimer: ReturnType<typeof setTimeout>|undefined
 const candidateNoTags = ref(false)
 const candidateMatch = ref<'all'|'any'>('all')
-const candidateRules = ref<Array<{id:number;tag:string;operator:string;value:string;valueEnd?:string}>>([])
+const candidateRules = ref<Array<{id:number;tag:string;operator:string;value:string;valueEnd?:string;manualInput?:boolean}>>([])
 let nextCandidateRuleId=1
 const modelOpen = ref(false)
 const modelCandidates = ref<any[]>([])
@@ -177,7 +179,11 @@ async function loadMembers(){try{const result=await api.datasetMembers(activeDat
 function localTime(date=new Date()){return new Date(date.getTime()-date.getTimezoneOffset()*60000).toISOString().slice(0,19)}
 function nextTime(value:string){return localTime(new Date(new Date(value).getTime()+1000))}
 function isTime(key:string){return ['created_at','updated_at'].includes(key)}
-function changeCandidateField(rule:any){rule.operator=isTime(rule.tag)?'equals':'contains';rule.value=isTime(rule.tag)?localTime():'';rule.valueEnd=nextTime(rule.value||localTime())}
+function candidateDefinition(key:string){return props.filterDefinitions.find((field:any)=>field.key===key)}
+function candidateValueOptions(rule:any){const definition=candidateDefinition(rule.tag);return [...(definition?.values||[]).map((value:string)=>({value,label:value,color:definition?.color})),...(definition?.free_input?[{value:'__manual_input__',label:'输入其他值…',color:definition?.color}]:[])]}
+function useManualCandidateInput(rule:any){const definition=candidateDefinition(rule.tag);return Boolean(definition?.free_input&&(rule.manualInput||(rule.value&&!definition.values?.includes(rule.value))))}
+function changeCandidateValue(rule:any,value:string){if(value==='__manual_input__'){rule.manualInput=true;rule.value=''}else{rule.manualInput=false;rule.value=value}}
+function changeCandidateField(rule:any){rule.operator=isTime(rule.tag)?'equals':'contains';rule.value=isTime(rule.tag)?localTime():'';rule.manualInput=false;rule.valueEnd=nextTime(rule.value||localTime())}
 function changeCandidateOperator(rule:any){if(rule.operator==='between')rule.valueEnd=nextTime(rule.value||localTime())}
 
 function ask(text:string, action:()=>void|Promise<void>) { confirmText.value=text; confirmAction.value=action as ()=>void; confirmOpen.value=true }
@@ -185,6 +191,30 @@ async function runConfirm() { if(operationBusy.value)return;operationBusy.value=
 function removeDataset(item:DatasetRow) { ask(`确定要删除“${item.name}”吗？历史版本和模型关联将一并清除，素材文件保留。`,async()=>{await api.deleteDataset(item.id);if(pageSize.value&&page.value>1&&datasets.value.length===1)page.value--;await loadDatasets();emit('notify','数据集已删除')}) }
 function toggleMember(id:string) { if(members.value.find(item=>item.id===id)?.rawType==='annotation')return;selectedMemberIds.value=selectedMemberIds.value.includes(id)?selectedMemberIds.value.filter(item=>item!==id):[...selectedMemberIds.value,id] }
 function selectAllMembers() { selectedMemberIds.value=[...new Set([...selectedMemberIds.value,...members.value.filter(item=>item.rawType!=='annotation').map(item=>item.id)])] }
+async function selectAllMemberPages() {
+  if(selectingAllMembers.value)return
+  selectingAllMembers.value=true
+  const datasetId=activeDataset.value.id
+  const filterString=effectiveMemberFilters().toString()
+  try {
+    const selected=new Set(selectedMemberIds.value)
+    for(let page=1,total=Infinity;(page-1)*200<total;page++) {
+      const filters=new URLSearchParams(filterString)
+      filters.set('ids_only','true')
+      const result=await api.datasetMembers(datasetId,page,200,filters)
+      total=result.total
+      for(const item of result.items) {
+        if(item.type==='annotation')continue
+        selected.add(String(item.id))
+        knownMemberTypes.value[String(item.id)]=item.type
+      }
+      if(!result.items.length)break
+    }
+    if(activeDataset.value.id!==datasetId||effectiveMemberFilters().toString()!==filterString)return
+    selectedMemberIds.value=[...selected]
+  } catch(error) { emit('notify',error instanceof Error?error.message:'选择全部数据失败','error') }
+  finally { selectingAllMembers.value=false }
+}
 function invertMembers() { const selectable=members.value.filter(item=>item.rawType!=='annotation');selectedMemberIds.value=[...selectedMemberIds.value.filter(id=>!selectable.some(item=>item.id===id)),...selectable.filter(item=>!selectedMemberIds.value.includes(item.id)).map(item=>item.id)] }
 const selectedImageIds=computed(()=>selectedMemberIds.value.filter(id=>knownMemberTypes.value[id]==='image'))
 async function changeSplitFilter(value:string){splitFilters.value=splitFilters.value.includes(value)?splitFilters.value.filter(item=>item!==value):[...splitFilters.value,value];memberPage.value=1;selectedMemberIds.value=[];await loadMembers()}
@@ -229,14 +259,14 @@ async function removeCategory(){const key=pendingCategoryDeleteKey.value;if(!key
 async function removeMembers() { const ids=[...selectedMemberIds.value];const body={asset_ids:ids};try{const preview=await api.previewDatasetMembers(activeDataset.value.id,body,'remove');if(preview.invalid_ids.length){emit('notify','标注不能单独移出数据集','error');return}ask(`确定移除 ${preview.asset_ids.length} 项素材以及 ${preview.annotations.removed.length} 项关联标注吗？`,async()=>{await api.removeDatasetMembers(activeDataset.value.id,body);selectedMemberIds.value=[];memberFilters.value=new URLSearchParams();memberPage.value=1;await refreshActiveDataset();emit('notify','已从数据集移出')})}catch(error){emit('notify',error instanceof Error?error.message:'预览失败','error')} }
 function toggleCandidate(id:string) { if(candidates.value.find(item=>item.id===id)?.rawType==='annotation'||(pickerMode.value==='add'&&existingCandidateIds.value.includes(id)))return;if(candidateSelectionId.value){candidateExcludedIds.value=candidateExcludedIds.value.includes(id)?candidateExcludedIds.value.filter(item=>item!==id):[...candidateExcludedIds.value,id];return}candidateSelected.value=candidateSelected.value.includes(id)?candidateSelected.value.filter(item=>item!==id):[...candidateSelected.value,id] }
 function addCandidateRule(){candidateRules.value.push({id:nextCandidateRuleId++,tag:props.filterDefinitions[0]?.key||'remark',operator:'contains',value:''})}
-function candidateParams(){const params=new URLSearchParams({match:candidateMatch.value});if(candidateQuery.value.trim())params.set('q',candidateQuery.value.trim());if(candidateType.value)params.append('asset_type',candidateType.value);else Object.keys(typeLabels).filter(type=>type!=='annotation').forEach(type=>params.append('asset_type',type));if(candidateNoTags.value)params.set('no_tags','true');candidateRules.value.filter(rule=>rule.value.trim()).forEach(rule=>{let value=rule.value;if(isTime(rule.tag)){value=new Date(rule.value).toISOString();if(rule.operator==='between'){if(!rule.valueEnd||new Date(rule.valueEnd)<=new Date(rule.value))throw new Error('结束时间必须晚于开始时间');value+='|'+new Date(rule.valueEnd).toISOString()}}params.append('tag',`${rule.tag}:${rule.operator}:${value}`)});return params}
+function candidateParams(){const params=new URLSearchParams({match:candidateMatch.value});if(candidateQuery.value.trim())params.set('q',candidateQuery.value.trim());if(candidateType.value)params.append('asset_type',candidateType.value);else Object.keys(typeLabels).filter(type=>type!=='annotation').forEach(type=>params.append('asset_type',type));if(candidateNoTags.value)params.set('no_tags','true');candidateRules.value.filter(rule=>rule.value.trim()).forEach(rule=>{let value=rule.value;if(isTime(rule.tag)){value=new Date(rule.value).toISOString();if(rule.operator==='between'){if(!rule.valueEnd||new Date(rule.valueEnd)<=new Date(rule.value))throw new Error('结束时间必须晚于开始时间');value+='|'+new Date(rule.valueEnd).toISOString()}}params.append('tag',`${rule.tag}:${(useManualCandidateInput(rule)||!candidateDefinition(rule.tag)?.values?.length)&&!isTime(rule.tag)&&rule.tag!=='remark'?(rule.operator==='notContains'?'textNotContains':'textContains'):rule.operator}:${value}`)});return params}
 async function loadCandidates(){try{appliedCandidateParams=candidateParams();candidatePage.value=1;candidateSelected.value=[];candidateSelectionId.value='';candidateExcludedIds.value=[];await fetchCandidatePage()}catch(error){emit('notify',error instanceof Error?error.message:'素材加载失败','error')}}
 async function fetchCandidatePage(){candidateLoading.value=true;try{const params=new URLSearchParams(appliedCandidateParams);params.set('page',String(candidatePage.value));params.set('page_size',String(candidatePageSize.value||200));const result=pickerMode.value==='filter'?await api.datasetMembers(activeDataset.value.id,candidatePage.value,candidatePageSize.value||200,appliedCandidateParams):await api.assets(params);candidateTotal.value=result.total;const items=result.items;candidates.value=items.map(mapAsset);candidateRenderLimit.value=200;items.forEach((item:any)=>candidateNames.value[item.id]=item.name);existingCandidateIds.value=pickerMode.value==='add'&&items.length?(await api.datasetMemberStatus(activeDataset.value.id,items.map((item:any)=>item.id))).existing_ids:[]}catch(error){emit('notify',error instanceof Error?error.message:'素材加载失败','error')}finally{candidateLoading.value=false}}
 async function openMemberPicker(mode:'add'|'filter'='add'){pickerMode.value=mode;addMembersOpen.value=true;candidateSelected.value=[];candidateRules.value=[];candidateQuery.value='';candidateType.value='';candidateNoTags.value=false;candidateMatch.value='all';await loadCandidates()}
 async function openMemberFilter(){await openMemberPicker('filter')}
 async function applyMemberFilter(){try{memberFilters.value=new URLSearchParams(appliedCandidateParams);memberPage.value=1;await loadMembers();selectedMemberIds.value=[...candidateSelected.value];addMembersOpen.value=false}catch(error){emit('notify',error instanceof Error?error.message:'筛选失败','error')}}
-watch([candidateQuery,candidateType,candidateNoTags,candidateMatch,candidateRules],()=>{if(!addMembersOpen.value)return;clearTimeout(candidateFilterTimer);candidateFilterTimer=setTimeout(()=>{void loadCandidates()},300)},{deep:true})
-function selectCandidatePage(){candidateSelected.value=[...new Set([...candidateSelected.value,...candidates.value.filter(item=>item.rawType!=='annotation'&&(pickerMode.value!=='add'||!existingCandidateIds.value.includes(item.id))).map(item=>item.id)])]}
+watch([candidateQuery,candidateType,candidateNoTags],()=>{if(!addMembersOpen.value)return;clearTimeout(candidateFilterTimer);candidateFilterTimer=setTimeout(()=>{void loadCandidates()},300)})
+function selectCandidatePage(){const ids=candidates.value.filter(item=>item.rawType!=='annotation'&&(pickerMode.value!=='add'||!existingCandidateIds.value.includes(item.id))).map(item=>item.id);if(candidateSelectionId.value){candidateExcludedIds.value=candidateExcludedIds.value.filter(id=>!ids.includes(id));return}candidateSelected.value=[...new Set([...candidateSelected.value,...ids])]}
 function invertCandidatePage(){const selectable=candidates.value.filter(item=>item.rawType!=='annotation'&&(pickerMode.value!=='add'||!existingCandidateIds.value.includes(item.id)));candidateSelected.value=[...candidateSelected.value.filter(id=>!selectable.some(item=>item.id===id)),...selectable.filter(item=>!candidateSelected.value.includes(item.id)).map(item=>item.id)]}
 function clearCandidateSelection(){candidateSelected.value=[];candidateSelectionId.value='';candidateExcludedIds.value=[]}
 async function selectAllCandidates(){const params=appliedCandidateParams;const result=await api.createAssetSelection({q:params.get('q')||'',no_tags:params.get('no_tags')==='true',asset_type:params.getAll('asset_type'),match:params.get('match')||'all',tag:params.getAll('tag')});candidateSelectionId.value=result.selection_id;candidateSelected.value=[];candidateExcludedIds.value=[]}
@@ -377,7 +407,7 @@ onMounted(()=>{
 
     <section v-else-if="activeTab==='members'" class="dataset-members-panel">
       <div v-if="activeDataset.classificationRule!=='none'" class="split-summary"><button v-for="key in splitKeys" :key="key" type="button" class="split-filter-chip" :style="splitChipStyle(key)" :class="[`split-${key}`,{active:splitFilters.includes(key)}]" :aria-pressed="splitFilters.includes(key)" @click="changeSplitFilter(key)">{{splitLabels[key]}} {{splitCount(key)}}项（{{splitStats.image_count?Math.round(splitCount(key)/splitStats.image_count*100):0}}%）<span v-if="splitFilters.includes(key)" class="split-check" aria-hidden="true">✓</span></button><button v-if="activeDataset.classificationRule==='custom'&&props.canManageMembers" type="button" class="secondary" @click="openCategoryManager">分类管理</button><span v-if="memberFilters.has('q')" class="member-location-label">定位：{{memberFilters.get('q')}}</span><button v-if="splitFilters.length||memberFilters.toString()" type="button" class="split-filter-reset" @click="resetMemberFilters">重置</button></div>
-      <div class="member-toolbar"><div><button class="secondary" @click="openMemberFilter">筛选</button><button v-if="activeDataset.classificationRule==='none'&&memberFilters.toString()" class="secondary" @click="resetMemberFilters">重置</button><button v-if="selectedMemberIds.length" class="secondary" @click="selectedMemberIds=[]">取消选择</button><button class="secondary" :disabled="allMembersSelected" @click="selectAllMembers">全选</button><button class="secondary" @click="invertMembers">反选</button></div><div><button v-if="props.canExport" class="secondary" @click="exportDataset">导出</button><button v-if="props.canManageMembers&&activeDataset.classificationRule!=='none'&&assignedSplitKeys.length" class="secondary" @click="openAutoSplit">自动分配类型</button><button v-if="props.canManageMembers&&selectedMemberIds.length" class="danger-action" @click="removeMembers">移出数据集</button><button v-if="props.canManageMembers" class="primary" @click="openMemberPicker()">＋ 添加素材</button></div></div>
+      <div class="member-toolbar"><div><button class="secondary" @click="openMemberFilter">筛选</button><button v-if="activeDataset.classificationRule==='none'&&memberFilters.toString()" class="secondary" @click="resetMemberFilters">重置</button><button v-if="selectedMemberIds.length" class="secondary" @click="selectedMemberIds=[]">取消选择</button><div class="selection-pair" role="group" aria-label="选择数据集成员范围"><button class="secondary" :disabled="allMembersSelected||selectingAllMembers" @click="selectAllMembers">当页</button><button class="secondary" :disabled="!memberTotal||selectingAllMembers" @click="selectAllMemberPages">{{selectingAllMembers?'选择中…':'全部'}}</button></div><button class="secondary" @click="invertMembers">反选</button></div><div><button v-if="props.canExport" class="secondary" @click="exportDataset">导出</button><button v-if="props.canManageMembers&&activeDataset.classificationRule!=='none'&&assignedSplitKeys.length" class="secondary" @click="openAutoSplit">自动分配类型</button><button v-if="props.canManageMembers&&selectedMemberIds.length" class="danger-action" @click="removeMembers">移出数据集</button><button v-if="props.canManageMembers" class="primary" @click="openMemberPicker()">＋ 添加素材</button></div></div>
       <div v-if="selectedMemberIds.length" class="batch-bar"><b>已选 {{selectedMemberIds.length}} 项</b><span>操作只影响当前数据集</span></div>
       <div v-if="props.canManageMembers&&activeDataset.classificationRule!=='none'&&selectedImageIds.length&&splitKeys.length>1" class="batch-split"><span>批量设置图片分类（{{selectedImageIds.length}} 张）</span><select v-model="batchSplit" aria-label="批量图片分类"><option v-for="key in splitKeys" :key="key" :value="key">{{splitLabels[key]}}</option></select><button class="secondary" :disabled="operationBusy" @click="saveBatchSplit">应用分类</button></div>
       <div class="member-grid"><article v-for="item in members.slice(0,memberRenderLimit)" :key="item.id" :class="{selected:selectedMemberIds.includes(item.id)}" role="checkbox" :aria-checked="selectedMemberIds.includes(item.id)" :aria-label="item.name" tabindex="0" @click="toggleMember(item.id)" @keydown.enter.prevent="toggleMember(item.id)" @keydown.space.prevent="toggleMember(item.id)"><span class="member-select" aria-hidden="true">{{selectedMemberIds.includes(item.id)?'✓':''}}</span><div class="member-preview"><img v-if="['图片','视频'].includes(item.type)&&item.preview_url" :src="item.preview_url" :alt="item.name" /><b v-else>{{item.type==='图片'?'IMG':item.type==='视频'?'VIDEO':'ARCHIVE'}}</b><i v-if="item.type==='视频'&&item.preview_url">▶</i></div><div><b :title="item.name">{{item.name}}</b><p :title="item.remark">{{item.remark}}</p><span :title="item.tags.join('、')"><i v-for="tag in item.tags" :key="tag" :style="tagStyle(tag)">{{tag}}</i></span><small>{{item.type}} · {{item.size}}</small><div v-if="item.rawType==='image'&&activeDataset.classificationRule!=='none'" class="member-card-badge-row"><em class="split-badge" :class="`split-${item.split}`" :style="splitChipStyle(item.split)">{{splitLabels[item.split]||'未划分'}}</em></div><div v-if="item.has_annotation" class="member-card-badge-row"><em class="annotation-badge">已关联标注</em></div></div></article></div>
@@ -443,18 +473,20 @@ onMounted(()=>{
           <div class="advanced-head"><b>高级筛选条件</b><button @click="addCandidateRule">＋ 条件</button></div>
           <div class="match-mode"><span>符合</span><button :class="{active:candidateMatch==='all'}" @click="candidateMatch='all'">全部</button><button :class="{active:candidateMatch==='any'}" @click="candidateMatch='any'">任一</button></div>
           <div class="candidate-rules"><div v-for="rule in candidateRules" :key="rule.id">
-            <select v-model="rule.tag" @change="changeCandidateField(rule)"><option v-for="field in props.filterDefinitions" :key="field.key" :value="field.key">{{field.label}}</option></select>
-            <select v-model="rule.operator" @change="changeCandidateOperator(rule)"><template v-if="isTime(rule.tag)"><option value="equals">等于</option><option value="lt">小于</option><option value="gt">大于</option><option value="between">位于</option></template><template v-else><option value="equals">等于</option><option value="notEquals">不等于</option><option value="contains">包含</option><option value="notContains">不包含</option></template></select>
+            <TagOptionSelect v-model="rule.tag" label="标签名称" :options="props.filterDefinitions.map((field:any)=>({value:field.key,label:field.label,color:field.color}))" searchable @change="changeCandidateField(rule)" />
+            <select v-model="rule.operator" aria-label="筛选条件" @change="changeCandidateOperator(rule)"><template v-if="isTime(rule.tag)"><option value="equals">等于</option><option value="lt">小于</option><option value="gt">大于</option><option value="between">位于</option></template><template v-else><option value="contains">包含</option><option value="notContains">不包含</option></template></select>
             <div v-if="isTime(rule.tag)" class="dataset-time-range"><input v-model="rule.value" type="datetime-local" step="1" @change="rule.operator==='between' && (!rule.valueEnd || rule.valueEnd<=rule.value) ? rule.valueEnd=nextTime(rule.value) : null" /><span v-if="rule.operator==='between'">至</span><input v-if="rule.operator==='between'" v-model="rule.valueEnd" type="datetime-local" step="1" :min="nextTime(rule.value)" /></div>
-            <select v-else-if="props.filterDefinitions.find(field=>field.key===rule.tag)?.values?.length" v-model="rule.value"><option value="">请选择</option><option v-for="value in props.filterDefinitions.find(field=>field.key===rule.tag)?.values" :key="value">{{value}}</option></select><input v-else v-model="rule.value" placeholder="请输入值" />
+            <TagOptionSelect v-else-if="candidateDefinition(rule.tag)?.values?.length&&!useManualCandidateInput(rule)" v-model="rule.value" class="candidate-value-select" label="标签值" :options="candidateValueOptions(rule)" placeholder="请选择" searchable @change="changeCandidateValue(rule,$event)" />
+            <div v-else-if="useManualCandidateInput(rule)" class="candidate-value-manual"><input v-model="rule.value" aria-label="标签值" placeholder="请输入值" /><button type="button" @click="rule.value='';rule.manualInput=false">选标签值</button></div>
+            <input v-else v-model="rule.value" aria-label="筛选值" placeholder="请输入值" />
             <button class="remove-rule" @click="candidateRules=candidateRules.filter(item=>item.id!==rule.id)">×</button>
           </div></div>
+          <button class="apply-filter" @click="loadCandidates">应用筛选</button>
         </aside>
         <div class="candidate-panel" @wheel.stop>
           <div class="candidate-selection-tools">
             <button v-if="pickerMode==='filter'||candidateSelected.length||candidateSelectionId" :disabled="pickerMode==='filter'&&!candidateSelected.length" @click="clearCandidateSelection">取消选择</button>
-            <button v-if="pickerMode==='filter'" @click="selectCandidatePage">全选</button>
-            <button v-else @click="candidatePageSize?selectCandidatePage():selectAllCandidates()">{{candidatePageSize?'全选当前页':'全选筛选结果'}}</button>
+            <span class="selection-pair"><button @click="selectCandidatePage">当页</button><button v-if="pickerMode==='add'" @click="selectAllCandidates">全部</button></span>
             <button v-if="pickerMode==='filter'" @click="invertCandidatePage">反选</button>
             <button v-else-if="candidatePageSize" @click="invertCandidatePage">反选当前页</button>
           </div>
@@ -523,7 +555,7 @@ onMounted(()=>{
 .dataset-pagination .page-controls>span{color:var(--muted);font-size:12px;min-width:18px;text-align:center}
 .version-toolbar{display:flex;justify-content:flex-end;padding:14px 16px;border-bottom:1px solid var(--line)}
 .version-toolbar button{min-height:36px;border-radius:7px;font-weight:650}
-.member-grid .annotation-badge{color:var(--accent);font-style:normal;font-weight:600}
+.member-grid .annotation-badge{color:var(--accent);font-size:11px;font-style:normal;font-weight:600}
 .model-picker-pagination{display:flex;align-items:center;justify-content:space-between;gap:10px;color:var(--muted);font-size:12px}.model-picker-pagination>div{display:flex;gap:8px}.model-picker-pagination button{padding:6px 10px}.model-picker-pagination button:disabled{opacity:.45;cursor:not-allowed}
 @media(max-width:500px){.model-picker-pagination{align-items:flex-start;flex-direction:column}}
 @media(max-width:900px){.advanced-member-picker .member-picker-layout{grid-template-columns:220px minmax(0,1fr)}.advanced-member-picker .candidate-table-head,.advanced-member-picker .candidate-list>button{grid-template-columns:minmax(200px,1fr) minmax(90px,.5fr) 60px 80px;gap:6px}}
@@ -553,6 +585,7 @@ onMounted(()=>{
 .dataset-category-dialog{width:min(620px,calc(100vw - 32px))}.category-editor-head,.category-editor-row{display:flex;align-items:center;justify-content:space-between;gap:12px}.category-editor-head{margin:18px 0 10px;font-weight:700}.category-editor-list{max-height:min(48vh,420px);overflow:auto;border:1px solid var(--line);border-radius:8px}.category-editor-row{padding:11px 14px;border-bottom:1px solid var(--line)}.category-editor-row:last-child{border-bottom:0}.category-editor-row>span{min-width:0;overflow-wrap:anywhere}.category-editor-row>div,.category-editor-form>div{display:flex;gap:8px}.category-editor-row button,.category-editor-head button,.category-editor-form button{padding:7px 12px}.category-editor-row .danger-inline{border:1px solid #b6453c;border-radius:6px;background:transparent;color:#b6453c}.category-editor-row button:disabled{opacity:.45;cursor:not-allowed}.category-editor-empty{margin:0;padding:18px 14px;color:var(--muted)}.category-editor-form{margin-top:16px;padding:14px;border:1px solid var(--line);border-radius:8px}.category-editor-form label{display:grid;gap:7px}.category-editor-form input{width:100%;box-sizing:border-box;border:1px solid var(--line);border-radius:7px;background:var(--panel);color:var(--ink);padding:10px;font:inherit}.category-editor-form>div{justify-content:flex-end;margin-top:12px}
 .classification-rule-field{display:grid;gap:6px}.classification-rule-heading{display:flex;align-items:center;gap:6px}.classification-rule-heading>label{color:var(--muted);font-size:12px}.classification-help{position:relative;display:inline-grid;place-items:center;width:16px;height:16px;border:1px solid var(--muted);border-radius:50%;color:var(--muted);font-size:11px;font-weight:700;line-height:1;cursor:help}.classification-help:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.classification-help-text{position:absolute;z-index:3;top:calc(100% + 8px);left:0;display:none;width:max-content;max-width:min(310px,calc(100vw - 64px));padding:10px 12px;border:1px solid var(--line);border-radius:7px;background:var(--panel);box-shadow:0 8px 24px #0002;color:var(--ink);font-size:12px;font-weight:400;line-height:1.7;white-space:normal}.classification-help:hover .classification-help-text,.classification-help:focus .classification-help-text{display:block}.classification-rule-field>select{width:100%;border:1px solid var(--line);border-radius:6px;padding:9px;background:var(--panel);color:var(--ink)}
 .split-pie-layout{display:grid;grid-template-columns:150px minmax(0,1fr);align-items:center;gap:22px}.split-pie{position:relative;display:grid;place-items:center;width:150px;height:150px;border-radius:50%}.split-pie::before{content:'';position:absolute;inset:28px;border-radius:50%;background:var(--panel)}.split-pie>span{position:relative;display:grid;text-align:center;gap:2px}.split-pie b{color:var(--ink);font-size:22px}.split-pie small{color:var(--muted);font-size:11px}.split-pie-legend{display:grid;gap:10px}.split-pie-legend>div{display:grid;grid-template-columns:10px minmax(60px,1fr) auto 48px;align-items:center;gap:9px;color:var(--ink);font-size:12px}.split-pie-legend i{width:10px;height:10px;border-radius:3px}.split-pie-legend b{font-weight:650}.split-pie-legend small{color:var(--muted);text-align:right}@media(max-width:500px){.split-pie-layout{grid-template-columns:1fr;justify-items:center}.split-pie-legend{width:100%}}
+.candidate-rules>div>.candidate-value-select,.candidate-rules>div>.candidate-value-manual{grid-column:1/3;min-width:0}.candidate-value-manual{display:flex;gap:5px}.candidate-value-manual input{flex:1;min-width:0}.candidate-value-manual button{flex:0 0 auto;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--accent);padding:0 8px}
 </style>
 
 

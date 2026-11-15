@@ -14,6 +14,7 @@ import { useJobs, jobStateText } from './composables/useJobs'
 import GlobalSearch from './components/GlobalSearch.vue'
 import ConfirmationDialog from './components/ConfirmationDialog.vue'
 import ModelParametersDialog from './components/ModelParametersDialog.vue'
+import TagOptionSelect from './components/TagOptionSelect.vue'
 import OverviewView from './views/OverviewView.vue'
 import ProjectOverviewView from './views/ProjectOverviewView.vue'
 import JobsView from './views/JobsView.vue'
@@ -34,7 +35,7 @@ type ActionDefinition = { key: ActionKey; name: string; menu: Page }
 type Skin = 'light' | 'command'
 type TagKey = string
 type FilterOperator = 'equals' | 'notEquals' | 'contains' | 'notContains' | 'lt' | 'gt' | 'between'
-type FilterRule = { id: number; tag: TagKey; operator: FilterOperator; value: string; valueEnd?: string }
+type FilterRule = { id: number; tag: TagKey; operator: FilterOperator; value: string; valueEnd?: string; manualInput?: boolean }
 type AssetId = string | number
 type Asset = { id:AssetId; name:string; type:string; status:string; scene:string; algorithm:string; tone:string; mark:string; remark:string; createdAt:string; updatedAt:string; size?:number; preview_url?:string|null; tags:Partial<Record<TagKey,string|string[]>>; datasets?:Array<{id:string;name:string;in_current_dataset:boolean;versions:string[]}> }
 
@@ -65,7 +66,7 @@ const assetPageSize = ref(50)
 const assetSort = ref('created_at')
 const assetDirection = ref<'asc'|'desc'>('desc')
 const matchMode = ref<'all' | 'any'>('all')
-const filterRules = ref<FilterRule[]>([{ id: 1, tag: 'status', operator: 'equals', value: '' }])
+const filterRules = ref<FilterRule[]>([])
 const appliedMatchMode = ref<'all' | 'any'>('all')
 const appliedFilterRules = ref<FilterRule[]>([])
 let nextRuleId = 2
@@ -162,7 +163,10 @@ const hasSystemMenuPermission = computed(() => ['tags','formats','parameters','a
 const hasAssetMenuPermission = computed(() => ['library','datasets','relations','lineage','downloads','trash'].some(item=>currentMenuPermissions.value.includes(item as Page)))
 function canViewMenu(menu:Page) { return currentMenuPermissions.value.includes(menu) }
 const currentActionPermissions = computed(() => resolveActionPermissions(currentUser.value, roleActionPermissions.value))
-function can(action:ActionKey) { return currentActionPermissions.value.includes(action) }
+function can(action:ActionKey) {
+  const menu=actionDefinitions.value.find(item=>item.key===action)?.menu
+  return Boolean(menu&&currentMenuPermissions.value.includes(menu)&&currentActionPermissions.value.includes(action))
+}
 function firstAllowedPage() { return menuDefinitions.value.find(item=>canViewMenu(item.key))?.key || 'library' }
 api.onSessionExpired(resetAuthenticatedView)
 api.onServiceStatus(status => { serviceStatus.value = status })
@@ -184,8 +188,11 @@ const batchTagOpen = ref(false)
 const batchTagAction = ref<'add'|'remove'>('add')
 const batchTagKey = ref<TagKey>('status')
 const batchTagValue = ref('')
+const batchTagNewMode = ref(false)
+const batchTagNewValue = ref('')
+const batchTagBusy = ref(false)
 const batchTagLoading = ref(false)
-const batchTagTarget = ref<'library'|'upload'>('library')
+const batchTagTarget = ref<'library'|'upload'|'detail'>('library')
 const batchResultOpen = ref(false)
 const batchResultTitle = ref('')
 const batchResult = ref<any>({succeeded_count:0,failed_count:0,details:[],details_truncated:false})
@@ -280,6 +287,18 @@ const editingTagKey = ref<string | null>(null)
 const newTag = ref({name:'',key:'',remark:'',values:'',color:'#64748b',free_input:false})
 const tagPickerColor = ref('#64748b')
 const tagValueRows = ref<Array<{id:number;value:string;editing:boolean}>>([])
+const duplicateTagValueIds = computed(() => {
+  const seen=new Map<string,number>()
+  const duplicates=new Set<number>()
+  for (const row of tagValueRows.value) {
+    const value=row.value.trim().toLocaleLowerCase()
+    if (!value) continue
+    const first=seen.get(value)
+    if (first!==undefined) { duplicates.add(first); duplicates.add(row.id) }
+    else seen.set(value,row.id)
+  }
+  return duplicates
+})
 let nextTagValueId = 1
 const savedViewOpen = ref(false)
 const savedViewName = ref('')
@@ -310,7 +329,14 @@ const trash = useTrash({ mapAsset, refreshAssets: loadAssets, notify, notifyErro
 const { total: trashTotal, load: loadTrash, clear: clearTrash } = trash
 
 const assets = ref<Asset[]>([])
-const tagDefinitions = computed(() => tagRows.value.map((tag:any) => ({key:tag.key,label:tag.name,values:tag.values || [],free_input:Boolean(tag.free_input)})))
+const tagDefinitions = computed(() => tagRows.value.map((tag:any) => ({key:tag.key,label:tag.name,color:tag.color || '#64748b',values:tag.values || [],free_input:Boolean(tag.free_input)})))
+const batchTagOptions = computed(() => tagDefinitions.value.map(tag => ({value:tag.key,label:tag.label,color:tag.color})))
+const batchTagValueOptions = computed(() => [
+  ...(selectedTagDefinition(batchTagKey.value)?.values || []).map((value:string) => ({value:`existing:${value}`,label:value,rawValue:value,color:selectedTagDefinition(batchTagKey.value)?.color})),
+  ...(batchTagAction.value==='add'&&can('tag_manage') ? [{value:'action:create',label:'<新建标签值>',rawValue:'',color:selectedTagDefinition(batchTagKey.value)?.color}] : []),
+])
+const batchTagSelectedValue = computed(() => batchTagValueOptions.value.find(option=>option.value===batchTagValue.value)?.rawValue || '')
+const batchTagValueDuplicate = computed(() => selectedTagDefinition(batchTagKey.value)?.values?.some((value:string) => value.trim().toLocaleLowerCase() === batchTagNewValue.value.trim().toLocaleLowerCase()) || false)
 const datasetStatusValues = computed(() => tagRows.value.find((tag:any) => tag.key === 'status')?.values || ['待整理','未标注','已标注','审核中','待复核','已训练'])
 const datasetProjectValues = computed<string[]>(() => tagRows.value.find((tag:any) => tag.key === 'project')?.values || [])
 const filterDefinitions = computed(() => [{key:'remark',label:'备注',values:[],free_input:true},{key:'created_at',label:'创建时间',values:[],free_input:false,time:true},{key:'updated_at',label:'修改时间',values:[],free_input:false,time:true}, ...tagDefinitions.value])
@@ -419,19 +445,24 @@ function toggleSelect(id: AssetId) {
   selected.value = selected.value.includes(id) ? selected.value.filter((item) => item !== id) : [...selected.value, id]
 }
 
-async function selectCurrentPage() {
-  if (assetPageSize.value === 0) {
-    try {
-      const result = await api.createAssetSelection({
-        q:query.value.trim(),no_tags:noTags.value,asset_type:[...selectedAssetTypes.value],
-        match:appliedMatchMode.value,
-        tag:appliedFilterRules.value.map(rule=>`${rule.tag}:${rule.operator}:${serializedFilterValue(rule)}`),
-      })
-      selected.value=[]; selectedSetId.value=result.selection_id; selectedSetTotal.value=result.total; selectedSetExcluded.value=[]
-    } catch (error) { notifyError(error instanceof Error?error.message:'选择素材失败') }
+function selectCurrentPage() {
+  if (selectedSetId.value) {
+    const currentIds=new Set(filtered.value.map(asset=>String(asset.id)))
+    selectedSetExcluded.value=selectedSetExcluded.value.filter(id=>!currentIds.has(id))
     return
   }
   selected.value = Array.from(new Set([...selected.value, ...filtered.value.map(asset => asset.id)]))
+}
+
+async function selectAllFilteredAssets() {
+  try {
+    const result = await api.createAssetSelection({
+      q:query.value.trim(),no_tags:noTags.value,asset_type:[...selectedAssetTypes.value],
+      match:appliedMatchMode.value,
+      tag:appliedFilterRules.value.map(rule=>`${rule.tag}:${serializedFilterOperator(rule)}:${serializedFilterValue(rule)}`),
+    })
+    selected.value=[]; selectedSetId.value=result.selection_id; selectedSetTotal.value=result.total; selectedSetExcluded.value=[]
+  } catch (error) { notifyError(error instanceof Error?error.message:'选择全部素材失败') }
 }
 
 function assetListParams(page:number, pageSize:number) {
@@ -439,7 +470,7 @@ function assetListParams(page:number, pageSize:number) {
   if (query.value.trim()) params.set('q', query.value.trim())
   if (noTags.value) params.set('no_tags','true')
   selectedAssetTypes.value.forEach(type => params.append('asset_type', type))
-  appliedFilterRules.value.forEach(rule => params.append('tag', `${rule.tag}:${rule.operator}:${serializedFilterValue(rule)}`))
+  appliedFilterRules.value.forEach(rule => params.append('tag', `${rule.tag}:${serializedFilterOperator(rule)}:${serializedFilterValue(rule)}`))
   return params
 }
 
@@ -538,7 +569,7 @@ function restoreLibraryPreferences() {
     const saved=JSON.parse(localStorage.getItem(libraryPreferenceKey()) || '{}')
     query.value=saved.query||'';noTags.value=Boolean(saved.noTags);selectedAssetTypes.value=Array.isArray(saved.selectedAssetTypes)?saved.selectedAssetTypes:[]
     matchMode.value=saved.matchMode==='any'?'any':'all';appliedMatchMode.value=saved.appliedMatchMode==='any'?'any':'all'
-    filterRules.value=(saved.filterRules?.length?saved.filterRules:[{tag:'status',operator:'equals',value:''}]).map((rule:any)=>({...rule,id:nextRuleId++}))
+    filterRules.value=(saved.filterRules || []).filter((rule:any)=>String(rule.value || '').trim()).map((rule:any)=>({...rule,id:nextRuleId++}))
     appliedFilterRules.value=(saved.appliedFilterRules||[]).map((rule:any)=>({...rule,id:nextRuleId++}))
     assetSort.value=['created_at','name','size'].includes(saved.assetSort)?saved.assetSort:'created_at';assetDirection.value=saved.assetDirection==='asc'?'asc':'desc'
     assetPageSize.value=[0,20,50,100,200].includes(saved.assetPageSize)?saved.assetPageSize:50;density.value=saved.density==='compact'?'compact':'comfortable'
@@ -796,7 +827,7 @@ async function loadRelationPicker() {
   if (relationPickerQuery.value.trim()) params.set('q', relationPickerQuery.value.trim())
   if (relationPickerNoTags.value) params.set('no_tags','true')
   if (selectedType && selectedType !== 'collection') params.append('asset_type',selectedType)
-  relationPickerRules.value.filter(rule=>rule.value.trim()).forEach(rule=>params.append('tag',`${rule.tag}:${rule.operator}:${serializedFilterValue(rule)}`))
+  relationPickerRules.value.filter(rule=>rule.value.trim()).forEach(rule=>params.append('tag',`${rule.tag}:${serializedFilterOperator(rule)}:${serializedFilterValue(rule)}`))
   try {
     if (selectedType === 'collection') {
       const result = await api.collections()
@@ -880,19 +911,18 @@ function chooseLineageModel(item:any) {
 }
 
 function addFilterRule() {
-  filterRules.value.push({ id: nextRuleId++, tag:'status', operator:'equals', value:'' })
+  filterRules.value.push({ id: nextRuleId++, tag:'status', operator:'contains', value:'' })
 }
 
 function removeFilterRule(id: number) {
-  if (filterRules.value.length === 1) filterRules.value = [{ id: nextRuleId++, tag:'status', operator:'equals', value:'' }]
-  else filterRules.value = filterRules.value.filter((rule) => rule.id !== id)
+  filterRules.value = filterRules.value.filter((rule) => rule.id !== id)
 }
 
 function resetFilters() {
   clearSelection()
   noTags.value = false
   matchMode.value = 'all'
-  filterRules.value = [{ id: nextRuleId++, tag:'status', operator:'equals', value:'' }]
+  filterRules.value = []
   appliedMatchMode.value = 'all'
   appliedFilterRules.value = []
   selectedAssetTypes.value = []
@@ -938,6 +968,37 @@ function pickerTagsText(item:any) {
 function selectedFilterDefinition(key:string) {
   return filterDefinitions.value.find((field:any) => field.key === key)
 }
+const filterFieldOptions = computed(() => filterDefinitions.value.map((field:any) => ({value:field.key,label:field.label,color:field.color})))
+function filterValueOptions(rule:FilterRule) {
+  const definition=selectedFilterDefinition(rule.tag)
+  return [...(definition?.values || []).map((value:string) => ({value,label:value,color:definition?.color})),
+    ...(definition?.free_input ? [{value:'__manual_input__',label:'输入其他值…',color:definition?.color}] : [])]
+}
+function serializedFilterOperator(rule:FilterRule) {
+  return (useManualFilterInput(rule) || !selectedFilterDefinition(rule.tag)?.values?.length) && rule.tag !== 'remark' && !isTimeFilter(rule.tag)
+    ? rule.operator === 'notContains' ? 'textNotContains' : 'textContains'
+    : rule.operator
+}
+
+function useManualFilterInput(rule:FilterRule) {
+  const definition=selectedFilterDefinition(rule.tag)
+  return Boolean(definition?.free_input && (rule.manualInput || (rule.value && !definition.values?.includes(rule.value))))
+}
+
+function changeFilterValueChoice(rule:FilterRule,value:string) {
+  if (value === '__manual_input__') {
+    rule.manualInput=true
+    rule.value=''
+  } else {
+    rule.manualInput=false
+    rule.value=value
+  }
+}
+
+function returnToFilterValues(rule:FilterRule) {
+  rule.value=''
+  rule.manualInput=false
+}
 
 function isTimeFilter(key:string) { return key === 'created_at' || key === 'updated_at' }
 
@@ -959,12 +1020,13 @@ function serializedFilterValue(rule:FilterRule) {
 
 function changeRuleTag(rule:FilterRule) {
   rule.valueEnd = undefined
+  rule.manualInput = false
   if (isTimeFilter(rule.tag)) {
     rule.operator = 'equals'
     rule.value = localDateTimeValue()
   } else {
     rule.value = ''
-    if (rule.tag === 'remark' && rule.operator === 'notEquals') rule.operator = 'equals'
+    rule.operator = 'contains'
   }
 }
 
@@ -1104,7 +1166,7 @@ function applySavedView(view:any) {
   const value = view.query || {}
   query.value = value.q || ''; noTags.value = Boolean(value.no_tags); matchMode.value = value.match || 'all'
   selectedAssetTypes.value = Array.isArray(value.asset_types) ? value.asset_types : []
-  filterRules.value = (value.tags?.length ? value.tags : [{tag:'status',operator:'equals',value:''}]).map((rule:any) => ({...rule,id:nextRuleId++}))
+  filterRules.value = (value.tags || []).map((rule:any) => ({...rule,id:nextRuleId++}))
   appliedMatchMode.value=matchMode.value
   appliedFilterRules.value=filterRules.value.filter(rule=>rule.value.trim()).map(rule=>({...rule}))
   const savedSort = view.sort?.[0]
@@ -1622,7 +1684,10 @@ async function loadTags() {
 async function createTag() {
   try {
     if (!/^#[0-9a-fA-F]{6}$/.test(newTag.value.color)) { notifyError('颜色值必须是 6 位十六进制颜色，例如 #2fa783'); return }
-    const body = {name:newTag.value.name.trim(),remark:newTag.value.remark.trim(),values:[...new Set(tagValueRows.value.map(item=>item.value.trim()).filter(Boolean))],color:newTag.value.color,asset_types:[],free_input:newTag.value.free_input}
+    const values=tagValueRows.value.map(item=>item.value.trim())
+    if (values.some(value=>!value)) { notifyError('标签值不能为空'); return }
+    if (new Set(values.map(value=>value.toLocaleLowerCase())).size !== values.length) { notifyError('标签值不能重复'); return }
+    const body = {name:newTag.value.name.trim(),remark:newTag.value.remark.trim(),values,color:newTag.value.color,asset_types:[],free_input:newTag.value.free_input}
     if (editingTagKey.value) await api.updateTag(editingTagKey.value, body)
     else await api.createTag({...body,key:`tag_${crypto.randomUUID().replaceAll('-','')}`})
     tagOpen.value=false; editingTagKey.value=null; tagValueRows.value=[]; newTag.value={name:'',key:'',remark:'',values:'',color:'#64748b',free_input:false}; notify('标签字段已保存'); await loadTags()
@@ -1972,19 +2037,40 @@ async function saveFormat() { try { const body={remark:formatRemark.value.trim()
 function removeFormat(row:any) { askConfirmation(`确定要删除“${assetTypeLabels[row.asset_type]}”格式类别吗？`,async()=>{await api.deleteFormat(row.asset_type);notify('格式类别已删除');await loadFormats()}) }
 
 async function applyBatchTag() {
-  if (!batchTagValue.value.trim()) { notifyError('请选择标签值'); return }
+  if (batchTagBusy.value) return
+  const creating=batchTagAction.value==='add' && batchTagNewMode.value
+  const value=(creating ? batchTagNewValue.value : batchTagSelectedValue.value).trim()
+  if (!value) { notifyError(creating?'请输入新标签值':'请选择标签值'); return }
+  if (creating && batchTagValueDuplicate.value) { notifyError('标签值已存在，请选择已有标签值'); return }
+  if (creating && value.length > 100) { notifyError('标签值不能超过100字'); return }
+  batchTagBusy.value=true
   try {
-    const value = batchTagValue.value.trim()
     tagRows.value=(await api.tags()).items
-    if (!selectedTagDefinition(batchTagKey.value)?.values?.includes(value)) {
+    const definition=selectedTagDefinition(batchTagKey.value)
+    if (!definition) { notifyError('标签字段已变化，请重新选择'); return }
+    if (creating) {
+      if (!can('tag_manage')) { notifyError('当前账号无新增标签值权限'); return }
+      if (definition.values.some((item:string)=>item.trim().toLocaleLowerCase()===value.toLocaleLowerCase())) { notifyError('标签值已存在，请选择已有标签值'); return }
+      await api.addTagValue(batchTagKey.value,value)
+      tagRows.value=(await api.tags()).items
+    } else if (!definition.values.includes(value)) {
       batchTagValue.value=''
-      notifyError('标签值已变化，请选择标签管理中的有效值')
+      notifyError('标签值已变化，请重新选择')
       return
     }
     if (batchTagTarget.value === 'upload') {
       const current=uploadTags.value[batchTagKey.value] || []
       if (!current.includes(value)) uploadTags.value={...uploadTags.value,[batchTagKey.value]:[...current,value]}
       batchTagOpen.value=false
+      return
+    }
+    if (batchTagTarget.value === 'detail') {
+      await api.batchTags({asset_ids:[String(activeAsset.value.id)],set_tags:{[batchTagKey.value]:value},remove_tags:[],remove_tag_values:{}})
+      batchTagOpen.value=false
+      const current=activeAsset.value
+      await loadAssets()
+      if (current) await openAsset(current)
+      notify('标签已添加')
       return
     }
     const body = batchTagAction.value === 'add'
@@ -1996,6 +2082,7 @@ async function applyBatchTag() {
     batchTagOpen.value = false
     await loadAssets()
   } catch (error) { notifyError(error instanceof Error ? error.message : '批量标签失败') }
+  finally { batchTagBusy.value=false }
 }
 
 function showBatchResult(title:string, result:any) {
@@ -2009,8 +2096,9 @@ function showBatchResult(title:string, result:any) {
   batchResultOpen.value = true
 }
 
-function changeBatchTagKey() { batchTagValue.value='' }
-async function openBatchTag(target:'library'|'upload', action:'add'|'remove'='add') {
+function changeBatchTagKey() { batchTagValue.value='';batchTagNewMode.value=false;batchTagNewValue.value='' }
+function changeBatchTagValue(value:string) { batchTagNewMode.value=value==='action:create';batchTagNewValue.value='' }
+async function openBatchTag(target:'library'|'upload'|'detail', action:'add'|'remove'='add') {
   if (batchTagLoading.value) return
   batchTagLoading.value=true
   try {
@@ -2020,6 +2108,8 @@ async function openBatchTag(target:'library'|'upload', action:'add'|'remove'='ad
     batchTagAction.value=action
     batchTagKey.value=tagDefinitions.value[0].key
     batchTagValue.value=''
+    batchTagNewMode.value=false
+    batchTagNewValue.value=''
     batchTagOpen.value=true
   } catch (error) { notifyError(error instanceof Error ? error.message : '标签加载失败') }
   finally { batchTagLoading.value=false }
@@ -2108,7 +2198,7 @@ async function revokeActiveRelation() {
       <template v-else-if="page === 'library'">
         <section class="page-head">
           <div><h1>素材库</h1></div>
-          <div class="primary-actions"><button v-if="selectedCount" class="secondary" @click="clearSelection">× 取消选择</button><button class="secondary" :disabled="!filtered.length || allCurrentSelected" @click="selectCurrentPage">✓ 全选</button><button class="secondary" :disabled="!filtered.length" @click="invertCurrentPageSelection">⇄ 反选</button><button class="secondary" @click="resetLibraryPage">↻ 重置页面</button><button v-if="can('saved_view_manage')" class="secondary" @click="openSaveView">☆ 保存视图</button><button v-if="can('asset_upload')" class="primary" @click="openUpload">＋ 上传素材</button></div>
+          <div class="primary-actions"><button v-if="selectedCount" class="secondary" @click="clearSelection">× 取消选择</button><div class="selection-pair" role="group" aria-label="选择素材范围"><button class="secondary" :disabled="!filtered.length || allCurrentSelected" @click="selectCurrentPage">✓ 当页</button><button class="secondary" :disabled="!assetFilteredTotal || (Boolean(selectedSetId) && selectedCount===selectedSetTotal)" @click="selectAllFilteredAssets">全部</button></div><button class="secondary" :disabled="!filtered.length" @click="invertCurrentPageSelection">⇄ 反选</button><button class="secondary" @click="resetLibraryPage">↻ 重置页面</button><button v-if="can('saved_view_manage')" class="secondary" @click="openSaveView">☆ 保存视图</button><button v-if="can('asset_upload')" class="primary" @click="openUpload">＋ 上传素材</button></div>
         </section>
 
         <div class="library-shell">
@@ -2122,10 +2212,11 @@ async function revokeActiveRelation() {
             <div class="filter-rules">
               <div v-for="(rule,index) in filterRules" :key="rule.id" class="filter-rule">
                 <div class="rule-number">{{ index === 0 ? '当' : matchMode === 'all' ? '且' : '或' }}</div>
-                <select v-model="rule.tag" aria-label="标签名称" @change="changeRuleTag(rule)"><option v-for="tag in filterDefinitions" :key="tag.key" :value="tag.key">{{tag.label}}</option></select>
-                <select v-model="rule.operator" aria-label="筛选条件" @change="changeRuleOperator(rule)"><template v-if="isTimeFilter(rule.tag)"><option value="equals">等于</option><option value="lt">小于</option><option value="gt">大于</option><option value="between">位于</option></template><template v-else><option value="equals">等于</option><option v-if="rule.tag!=='remark'" value="notEquals">不等于</option><option value="contains">包含</option><option value="notContains">不包含</option></template></select>
+                <TagOptionSelect v-model="rule.tag" label="标签名称" :options="filterFieldOptions" searchable @change="changeRuleTag(rule)" />
+                <select v-model="rule.operator" aria-label="筛选条件" @change="changeRuleOperator(rule)"><template v-if="isTimeFilter(rule.tag)"><option value="equals">等于</option><option value="lt">小于</option><option value="gt">大于</option><option value="between">位于</option></template><template v-else><option value="contains">包含</option><option value="notContains">不包含</option></template></select>
                 <div v-if="isTimeFilter(rule.tag)" class="filter-time-values" :class="{range:rule.operator==='between'}"><input v-model="rule.value" type="datetime-local" step="1" aria-label="开始时间" @change="rule.operator==='between' && rule.valueEnd && new Date(rule.valueEnd).getTime() <= new Date(rule.value).getTime() ? rule.valueEnd=nextDateTimeValue(rule.value) : null" /><span v-if="rule.operator==='between'">至</span><input v-if="rule.operator==='between'" v-model="rule.valueEnd" type="datetime-local" step="1" :min="nextDateTimeValue(rule.value)" aria-label="结束时间" /></div>
-                <select v-else-if="selectedFilterDefinition(rule.tag)?.values?.length && !selectedFilterDefinition(rule.tag)?.free_input" v-model="rule.value" aria-label="标签值"><option value="" disabled>请选择</option><option v-for="value in selectedFilterDefinition(rule.tag)?.values" :key="value" :value="value">{{value}}</option></select>
+                <TagOptionSelect v-else-if="selectedFilterDefinition(rule.tag)?.values?.length && !useManualFilterInput(rule)" v-model="rule.value" class="filter-value-select" label="标签值" :options="filterValueOptions(rule)" placeholder="请选择" searchable @change="changeFilterValueChoice(rule,$event)" />
+                <div v-else-if="useManualFilterInput(rule)" class="filter-value-manual"><input v-model="rule.value" placeholder="请输入值" aria-label="标签值" /><button type="button" @click="returnToFilterValues(rule)">选标签值</button></div>
                 <input v-else v-model="rule.value" placeholder="请输入值" aria-label="标签值" />
                 <button class="remove-rule" aria-label="移除条件" @click="removeFilterRule(rule.id)">×</button>
               </div>
@@ -2234,11 +2325,12 @@ async function revokeActiveRelation() {
     <div v-if="activeAsset" class="detail-sheet-stage" :class="{'upload-conflict-stage':uploadOpen&&uploadConflictResult}" @click.self="closeAssetDetail">
     <aside class="detail-sheet" :class="{'is-scrolling':detailSheetScrolling,'upload-conflict-detail':uploadOpen&&uploadConflictResult}" @scroll.passive="showDetailScrollbar">
       <button class="close" @click="closeAssetDetail">×</button>
-      <div class="detail-preview annotation-preview" :class="{'media-detail':activeAsset.type==='图片'||activeAsset.type==='视频'}" :style="[{background:activeAsset.tone},detailMediaStyle]"><img v-if="activeAsset.type==='图片' && (activeAsset.download_url||activeAsset.preview_url)" :src="activeAsset.download_url||activeAsset.preview_url" :alt="activeAsset.name" title="点击查看原图" @click="openMediaViewer" /><video v-else-if="activeAsset.type==='视频' && activeAsset.download_url" :src="activeAsset.download_url" :poster="activeAsset.preview_url" preload="metadata" title="点击查看原视频" @click="openMediaViewer">当前浏览器不支持播放此视频</video><svg v-if="activeAsset.type==='图片' && activeAnnotationSource?.items?.length" class="annotation-layer" viewBox="0 0 100 100" preserveAspectRatio="none"><g v-for="item in activeAnnotationSource.items" :key="item.id"><polygon v-for="(polygon,index) in item.polygons || []" :key="`${item.id}-${index}`" :points="polygonPoints(polygon)" :fill="annotationColor(item.label)" fill-opacity=".18" :stroke="annotationColor(item.label)" vector-effect="non-scaling-stroke" /><rect :x="item.bbox.x*100" :y="item.bbox.y*100" :width="item.bbox.width*100" :height="item.bbox.height*100" fill="none" :stroke="annotationColor(item.label)" vector-effect="non-scaling-stroke" /><text :x="item.bbox.x*100" :y="Math.max(3,item.bbox.y*100)" :fill="annotationColor(item.label)" vector-effect="non-scaling-stroke">{{item.label}}{{item.confidence!=null?` ${(item.confidence*100).toFixed(0)}%`:''}}</text></g></svg><b v-if="activeAsset.type!=='图片'&&activeAsset.type!=='视频'">{{activeAsset.type}}</b><span>{{activeAsset.mark}}</span></div>
+      <div class="detail-preview annotation-preview" :class="{'media-detail':activeAsset.type==='图片'||activeAsset.type==='视频'}" :style="[{background:activeAsset.tone},detailMediaStyle]"><img v-if="activeAsset.type==='图片' && (activeAsset.download_url||activeAsset.preview_url)" :src="activeAsset.download_url||activeAsset.preview_url" :alt="activeAsset.name" title="点击查看原图" @click="openMediaViewer" /><video v-else-if="activeAsset.type==='视频' && activeAsset.download_url" :src="activeAsset.download_url" :poster="activeAsset.preview_url" preload="metadata" title="点击查看原视频" @click="openMediaViewer">当前浏览器不支持播放此视频</video><svg v-if="activeAsset.type==='图片' && activeAnnotationSource?.items?.length" class="annotation-layer" viewBox="0 0 100 100" preserveAspectRatio="none"><g v-for="item in activeAnnotationSource.items" :key="item.id"><polygon v-for="(polygon,index) in item.polygons || []" :key="`${item.id}-${index}`" :points="polygonPoints(polygon)" :fill="annotationColor(item.label)" fill-opacity=".18" :stroke="annotationColor(item.label)" vector-effect="non-scaling-stroke" /><rect :x="item.bbox.x*100" :y="item.bbox.y*100" :width="item.bbox.width*100" :height="item.bbox.height*100" fill="none" :stroke="annotationColor(item.label)" vector-effect="non-scaling-stroke" /><text v-if="item.label&&item.label!=='未命名类别'" :x="item.bbox.x*100" :y="Math.max(3,item.bbox.y*100)" :fill="annotationColor(item.label)" vector-effect="non-scaling-stroke">{{item.label}}{{item.confidence!=null?` ${(item.confidence*100).toFixed(0)}%`:''}}</text></g></svg><b v-if="activeAsset.type!=='图片'&&activeAsset.type!=='视频'">{{activeAsset.type}}</b><span>{{activeAsset.mark}}</span></div>
       <nav class="detail-navigation" aria-label="素材切换"><button :disabled="!hasPreviousAsset" aria-label="上一项素材" @click="openAdjacentAsset(-1)"><span>‹</span> 上一项</button><button :disabled="!hasNextAsset" aria-label="下一项素材" @click="openAdjacentAsset(1)">下一项 <span>›</span></button></nav>
       <section v-if="activeAsset.type==='图片'" class="annotation-source-panel"><div><b>标注预览</b><small v-if="annotationLoading">正在读取关联标注…</small><small v-else-if="!annotationSources.length">尚未建立图片与标注的对应关系</small><small v-else-if="activeAnnotationSource?.error">{{activeAnnotationSource.error}}</small><small v-else-if="activeAnnotationSource && !activeAnnotationSource.matched">关联标注中未找到当前图片</small><small v-else-if="!activeAnnotationSource?.items?.length">尚未建立图片与标注的对应关系</small><small v-else>{{activeAnnotationSource?.format}} · {{activeAnnotationSource.items.length}} 个标注<span v-if="activeAnnotationSource?.ignored_shapes"> · 已忽略 {{activeAnnotationSource.ignored_shapes}} 个未支持形状</span></small></div><select v-if="annotationSources.length" v-model="selectedAnnotationSourceId"><option v-for="source in annotationSources" :key="source.annotation_asset_id" :value="source.annotation_asset_id">{{source.annotation_name}} · {{source.format || '待识别'}}</option></select></section>
       <section v-if="activeAsset.datasets?.length" class="annotation-source-panel asset-dataset-panel"><div class="asset-dataset-title"><b>所属数据集</b><small>{{activeAsset.datasets.length}} 个数据集</small></div><div class="asset-dataset-list"><button v-for="dataset in activeAsset.datasets" :key="dataset.id" :title="dataset.name" @click="openAssociatedDataset(dataset.id)"><b>{{dataset.name}}</b><span>{{dataset.versions?.length?dataset.versions.join('、'):'当前数据集'}}</span></button></div></section>
       <h2>{{ activeAsset.name }}</h2>
+      <button v-if="can('asset_edit')" type="button" class="detail-add-tag" @click="openBatchTag('detail')">＋ 添加标签</button>
       <div v-if="assetTagEntries(activeAsset).length" class="detail-tags"><span v-for="tag in assetTagEntries(activeAsset)" :key="`${tag.key}-${tag.value}`" class="asset-tag" :style="{'--tag-color':tag.color}" :title="tag.label"><i>{{tag.value}}</i><button v-if="can('asset_edit')" :aria-label="`删除标签 ${tag.label} ${tag.value}`" title="删除标签" @click="removeAssetTag(tag.key,tag.value)">×</button></span></div>
       <section v-if="can('asset_edit')" class="asset-remark"><label>备注<textarea v-model="remarkDraft" rows="3" maxlength="1000" placeholder="请输入素材备注"></textarea></label><button class="secondary" :disabled="remarkSaving" @click="saveAssetRemark">{{remarkSaving?'保存中…':'保存备注'}}</button></section>
       <dl><dt>资产 ID</dt><dd>{{activeAsset.id}}</dd><dt>校验值</dt><dd>{{activeAsset.sha256 || '计算中'}}</dd><dt>对象大小</dt><dd>{{activeAsset.size ? `${(activeAsset.size/1024/1024).toFixed(2)} MB` : '未知'}}</dd><dt>处理状态</dt><dd :class="{failed:activeAsset.status==='failed'}">{{processingStatusText(activeAsset.status)}}</dd><dt>创建时间</dt><dd>{{activeAsset.createdAt}}</dd><dt>修改时间</dt><dd>{{activeAsset.updatedAt || activeAsset.createdAt}}</dd><template v-if="activeAsset.processing_error?.message"><dt>失败原因</dt><dd class="failed">{{activeAsset.processing_error.message}}</dd></template></dl>
@@ -2296,16 +2388,20 @@ async function revokeActiveRelation() {
     <PermissionImpactDialog v-if="permissionImpactOpen" :impact="permissionImpact" :busy="permissionImpactBusy" :menu-name="permissionMenuName" :action-name="permissionActionName" @cancel="closePermissionImpact" @confirm="confirmPermissionImpact" />
     <div v-if="columnSettingsOpen" class="modal-stage"><section class="upload-dialog compact-dialog column-settings-dialog"><button class="close" @click="columnSettingsOpen=false">×</button><h2>素材库列设置</h2><p>选择表格中需要展示的信息，名称列固定显示。</p><div class="column-option-list"><button v-for="column in assetColumnDefinitions" :key="column.key" type="button" :disabled="column.required" :class="{active:assetColumns.includes(column.key)}" @click="toggleAssetColumn(column.key)"><span>{{column.label}}</span><b>{{assetColumns.includes(column.key)?'✓':'×'}}</b></button></div><div class="dialog-actions"><button class="primary" @click="columnSettingsOpen=false">完成</button></div></section></div>
     <div v-if="batchTagOpen" class="modal-stage">
-      <section class="upload-dialog compact-dialog"><button class="close" @click="batchTagOpen=false">×</button><h2>为 {{batchTagTarget==='upload'?uploadFiles.length:selectedCount}} 项素材{{batchTagAction==='add'?'添加':'删除'}}标签</h2><div class="upload-fields"><label>标签<select v-model="batchTagKey" @change="changeBatchTagKey"><option v-for="tag in tagDefinitions" :key="tag.key" :value="tag.key">{{tag.label}}</option></select></label><div class="batch-tag-value-field"><label for="batch-tag-value">标签值</label><select v-if="selectedTagDefinition(batchTagKey)?.values?.length" id="batch-tag-value" v-model="batchTagValue"><option value="" disabled>请选择</option><option v-for="value in selectedTagDefinition(batchTagKey)?.values" :key="value" :value="value">{{value}}</option></select><p v-else class="batch-tag-no-values">暂无可用标签值，请先在标签管理中配置。</p></div></div><div class="dialog-actions"><button class="secondary" @click="batchTagOpen=false">取消</button><button class="primary" :disabled="!batchTagValue.trim()" @click="applyBatchTag">{{batchTagAction==='add'?'添加标签':'删除标签'}}</button></div></section>
+      <section class="upload-dialog compact-dialog batch-tag-dialog" role="dialog" aria-modal="true" aria-label="素材标签"><button class="close" @click="batchTagOpen=false">×</button><h2>为 {{batchTagTarget==='upload'?uploadFiles.length:batchTagTarget==='detail'?1:selectedCount}} 项素材{{batchTagAction==='add'?'添加':'删除'}}标签</h2>
+        <div class="upload-fields batch-tag-fields">
+          <div class="batch-tag-picker"><span>标签</span><TagOptionSelect v-model="batchTagKey" label="标签" :options="batchTagOptions" searchable @change="changeBatchTagKey" /></div>
+          <div class="batch-tag-value-field"><span>标签值</span><TagOptionSelect v-model="batchTagValue" label="标签值" :options="batchTagValueOptions" placeholder="请选择标签值" searchable @change="changeBatchTagValue" /><input v-if="batchTagNewMode" v-model="batchTagNewValue" aria-label="新标签值" maxlength="100" placeholder="输入新标签值" autofocus /><small v-if="batchTagNewMode&&batchTagValueDuplicate" class="batch-tag-error">标签值已存在，请选择已有标签值</small><small v-else-if="batchTagNewMode">新标签值会同时保存到标签管理</small><p v-else-if="!selectedTagDefinition(batchTagKey)?.values?.length&&batchTagAction==='remove'" class="batch-tag-no-values">暂无可用标签值。</p></div>
+        </div><div class="dialog-actions"><button class="secondary" :disabled="batchTagBusy" @click="batchTagOpen=false">取消</button><button class="primary" :disabled="batchTagBusy||(batchTagNewMode?(!batchTagNewValue.trim()||batchTagValueDuplicate):!batchTagValue.trim())" @click="applyBatchTag">{{batchTagBusy?'保存中…':batchTagAction==='add'?'添加标签':'删除标签'}}</button></div></section>
     </div>
     <div v-if="collectionOpen" class="modal-stage"><section class="upload-dialog compact-dialog"><button class="close" @click="collectionOpen=false">×</button><h2>用 {{selectedCount}} 项素材创建数据集</h2><div class="form-stack"><label>名称<input v-model="collectionName" maxlength="120" placeholder="例如 helmet_train_v1" /></label><label>说明<textarea v-model="collectionDescription" rows="3" maxlength="1000" /></label><label class="inline-check"><input v-model="collectionFreeze" type="checkbox" /> 创建后冻结，作为不可变训练集快照</label></div><div class="dialog-actions"><button class="secondary" @click="collectionOpen=false">取消</button><button class="primary" @click="createCollection">创建数据集</button></div></section></div>
     <div v-if="exportOpen" class="modal-stage"><section class="upload-dialog compact-dialog" role="dialog" aria-modal="true" aria-labelledby="asset-export-title"><button class="close" :disabled="exportBusy" aria-label="关闭导出弹窗" @click="exportOpen=false">×</button><h2 id="asset-export-title">导出素材</h2><p>已选 {{exportSelectedCount}} 项素材</p><div v-if="exportAnnotationCount" class="form-stack"><label>关联标注<select v-model="exportAnnotationChoice" :disabled="exportBusy"><option value="exclude">不导出关联标注</option><option value="include">导出关联标注</option></select></label><small>所选素材已关联 {{exportAnnotationCount}} 项标注；</small></div><div class="dialog-actions"><button class="secondary" :disabled="exportBusy" @click="exportOpen=false">取消</button><button class="primary" :disabled="exportBusy" @click="confirmAssetExport">{{exportBusy?'创建中…':'确认导出'}}</button></div></section></div>
     <div v-if="savedViewOpen" class="modal-stage"><section class="upload-dialog compact-dialog"><button class="close" @click="savedViewOpen=false">×</button><h2>{{editingViewId?'修改保存视图':'保存视图'}}</h2><div class="form-stack"><label>视图名称<input v-model="savedViewName" maxlength="100" autofocus @keyup.enter="saveCurrentView" /></label><label>共享范围<select v-model="savedViewScope"><option value="private">仅自己可见</option><option value="team">团队成员可见</option></select></label></div><div class="dialog-actions"><button class="secondary" @click="savedViewOpen=false">取消</button><button class="primary" @click="saveCurrentView">{{editingViewId?'保存修改':'保存视图'}}</button></div></section></div>
     <div v-if="batchResultOpen" class="modal-stage"><section class="upload-dialog batch-result-dialog"><button class="close" @click="batchResultOpen=false">×</button><h2>{{batchResultTitle}}</h2><div class="batch-result-summary"><span class="success">成功 {{batchResult.succeeded_count}} 项</span><span :class="{failed:batchResult.failed_count}">失败 {{batchResult.failed_count}} 项</span></div><div class="batch-result-list"><div v-for="item in batchResult.details" :key="`${item.id}-${item.status}`" :class="item.status"><b :title="item.name">{{item.name}}</b><span>{{item.status==='succeeded'?'成功':'失败'}}</span><small>{{item.message}}</small></div><p v-if="!batchResult.details.length">暂无可展示的结果明细</p></div><small v-if="batchResult.details_truncated" class="result-truncated">数据量较大，仅展示前 1000 项明细</small><div class="dialog-actions"><button class="primary" @click="batchResultOpen=false">完成</button></div></section></div>
-    <div v-if="tagOpen" class="modal-stage"><section class="upload-dialog compact-dialog tag-dialog"><button class="close" @click="tagOpen=false">×</button><h2>{{editingTagKey?'修改标签字段':'新建标签字段'}}</h2><div class="form-stack"><label>标签名称<input v-model="newTag.name" maxlength="50" placeholder="例如 天气" /></label><label>备注<input v-model="newTag.remark" maxlength="1000" placeholder="请输入备注（选填）" /></label><div class="tag-values-editor"><div class="field-label"><span>标签值</span><button class="add-value" type="button" @click="addTagValue">＋ 新增</button></div><p v-if="!tagValueRows.length" class="value-empty">暂无标签值，点击“新增”添加</p><div v-for="row in tagValueRows" :key="row.id" class="tag-value-row"><input v-model="row.value" :disabled="!row.editing" placeholder="请输入标签值" @keyup.enter="row.editing=false" /><button type="button" @click="toggleTagValueEdit(row)">{{row.editing?'完成':'修改'}}</button><button class="remove-value" type="button" @click="removeTagValue(row.id)">删除</button></div></div><label class="color-field">颜色<div class="color-control"><label class="color-picker-button" title="点击选择颜色"><span class="color-swatch large" :style="{background:newTag.color}"></span><span>选择颜色</span><input v-model="tagPickerColor" type="color" aria-label="选择颜色" @change="applyPickerColor" /></label><input v-model="newTag.color" class="color-code" aria-label="颜色值" maxlength="7" placeholder="#64748B" /></div></label><label class="inline-check"><input v-model="newTag.free_input" type="checkbox" /> 允许输入枚举以外的值</label></div><div class="dialog-actions"><button class="secondary" @click="tagOpen=false">取消</button><button class="primary" @click="createTag">保存标签</button></div></section></div>
+    <div v-if="tagOpen" class="modal-stage"><section class="upload-dialog compact-dialog tag-dialog"><button class="close" @click="tagOpen=false">×</button><h2>{{editingTagKey?'修改标签字段':'新建标签字段'}}</h2><div class="form-stack"><label>标签名称<input v-model="newTag.name" maxlength="50" placeholder="例如 天气" /></label><label>备注<input v-model="newTag.remark" maxlength="1000" placeholder="请输入备注（选填）" /></label><div class="tag-values-editor"><div class="field-label"><span>标签值</span><button class="add-value" type="button" @click="addTagValue">＋ 新增</button></div><p v-if="!tagValueRows.length" class="value-empty">暂无标签值，点击“新增”添加</p><div v-for="row in tagValueRows" :key="row.id" class="tag-value-row"><input v-model="row.value" :class="{duplicate:duplicateTagValueIds.has(row.id)}" :disabled="!row.editing" placeholder="请输入标签值" @keyup.enter="row.editing=false" /><button type="button" @click="toggleTagValueEdit(row)">{{row.editing?'完成':'修改'}}</button><button class="remove-value" type="button" @click="removeTagValue(row.id)">删除</button></div><small v-if="duplicateTagValueIds.size" class="tag-value-error">标签值不能重复</small></div><label class="color-field">颜色<div class="color-control"><label class="color-picker-button" title="点击选择颜色"><span class="color-swatch large" :style="{background:newTag.color}"></span><span>选择颜色</span><input v-model="tagPickerColor" type="color" aria-label="选择颜色" @change="applyPickerColor" /></label><input v-model="newTag.color" class="color-code" aria-label="颜色值" maxlength="7" placeholder="#64748B" /></div></label><label class="inline-check"><input v-model="newTag.free_input" type="checkbox" /> 允许输入枚举以外的值</label></div><div class="dialog-actions"><button class="secondary" @click="tagOpen=false">取消</button><button class="primary" :disabled="Boolean(duplicateTagValueIds.size)" @click="createTag">保存标签</button></div></section></div>
     <ConfirmationDialog v-if="confirmOpen" :title="confirmTitle" :message="confirmMessage" :action-text="confirmActionText" :busy="confirmBusy" :usage-impact="confirmUsageImpact" :delete-stage="deleteConfirmationStage" @cancel="cancelConfirmation" @confirm="runConfirmedAction" />
     <div v-if="userOpen" class="modal-stage"><section class="upload-dialog compact-dialog user-dialog"><button class="close" @click="userOpen=false">×</button><h2>{{editingUserId?'编辑用户':'新增用户'}}</h2><div class="form-stack"><label>用户名<input v-model="newUser.username" autocomplete="off" maxlength="50" placeholder="3–50 位英文、数字、下划线、点或连字符" /></label><label>{{editingUserId?'新密码（留空则不修改）':'初始密码'}}<input v-model="newUser.password" type="password" autocomplete="new-password" minlength="8" maxlength="128" placeholder="8–128 个字符" /></label><label>角色<select v-model="newUser.role" @change="onUserRoleChange"><option v-for="role in roleDefinitions" :key="role.key" :value="role.key">{{role.name}}</option><option v-for="role in permissionTemplates.filter(item=>!item.built_in)" :key="role.id" :value="`template:${role.id}`">{{role.name}}</option><option value="custom">临时自定义</option></select></label></div><fieldset class="permission-groups" aria-label="菜单与操作权限"><div class="permission-section-head"><strong>菜单与操作权限</strong><div v-if="newUser.role==='custom'" class="permission-bulk-toolbar"><button type="button" class="secondary" @click="selectAllUserPermissions">全选</button><button type="button" class="secondary" @click="clearAllUserPermissions">取消全选</button></div></div><p>{{newUser.role==='custom'?'点击菜单和操作权限可进行调整':'当前角色的权限明细'}}</p><div class="permission-groups-list"><section v-for="group in permissionGroups" :key="group.key" class="permission-menu-group" :class="{enabled:userMenuEnabled(group.key)}"><button type="button" class="permission-menu-title" :class="{allowed:userMenuEnabled(group.key)}" :disabled="newUser.role!=='custom'" @click="toggleUserMenu(group.key)"><span>{{group.name}}</span><b :aria-label="userMenuEnabled(group.key)?'有权限':'无权限'">{{userMenuEnabled(group.key)?'✓':'×'}}</b></button><div v-if="group.actions.length" class="permission-menu-actions"><button v-for="action in group.actions" :key="action.key" type="button" :class="{allowed:userActionEnabled(action.key)}" :disabled="newUser.role!=='custom'||!userMenuEnabled(group.key)" @click="toggleUserAction(action)"><span>{{action.name}}</span><b :aria-label="userActionEnabled(action.key)?'有权限':'无权限'">{{userActionEnabled(action.key)?'✓':'×'}}</b></button></div><small v-else>此菜单没有单独的操作权限</small></section></div></fieldset><label v-if="editingUserId" class="user-status-field">账号状态<select v-model="newUser.status"><option value="active">正常</option><option value="disabled">已停用</option></select></label><div class="dialog-actions"><button class="secondary" @click="userOpen=false">取消</button><button class="primary" @click="createUser">{{editingUserId?'保存修改':'创建用户'}}</button></div></section></div>
-    <div v-if="mediaViewerOpen && viewerAsset" class="media-viewer" @click.self="closeMediaViewer"><div class="media-viewer-tools"><button aria-label="缩小" title="缩小" :disabled="mediaViewerZoom<=.25" @click="changeMediaViewerZoom(-.25)">−</button><b>{{Math.round(mediaViewerZoom*100)}}%</b><button aria-label="放大" title="放大" :disabled="mediaViewerZoom>=4" @click="changeMediaViewerZoom(.25)">＋</button><button v-if="viewerAsset.type==='图片' && !pickerPreviewAsset" class="annotation-toggle" :class="{active:mediaViewerAnnotations}" @click="mediaViewerAnnotations=!mediaViewerAnnotations">{{mediaViewerAnnotations?'隐藏标注':'显示标注'}}</button></div><button class="media-viewer-close" aria-label="关闭大图" @click="closeMediaViewer">×</button><div class="media-viewer-scroll"><div v-if="viewerAsset.type==='图片'" class="original-media" :style="originalMediaStyle"><img :src="viewerAsset.download_url||viewerAsset.preview_url" :alt="viewerAsset.name" /><svg v-if="!pickerPreviewAsset && mediaViewerAnnotations && activeAnnotationSource?.items?.length" class="annotation-layer" viewBox="0 0 100 100" preserveAspectRatio="none"><g v-for="item in activeAnnotationSource.items" :key="item.id"><polygon v-for="(polygon,index) in item.polygons || []" :key="`${item.id}-${index}`" :points="polygonPoints(polygon)" :fill="annotationColor(item.label)" fill-opacity=".18" :stroke="annotationColor(item.label)" vector-effect="non-scaling-stroke" /><rect :x="item.bbox.x*100" :y="item.bbox.y*100" :width="item.bbox.width*100" :height="item.bbox.height*100" fill="none" :stroke="annotationColor(item.label)" vector-effect="non-scaling-stroke" /><text :x="item.bbox.x*100" :y="Math.max(3,item.bbox.y*100)" :fill="annotationColor(item.label)" vector-effect="non-scaling-stroke">{{item.label}}</text></g></svg></div><video v-else :src="viewerAsset.download_url" :poster="viewerAsset.preview_url" :style="originalMediaStyle" controls autoplay>当前浏览器不支持播放此视频</video></div></div>
+      <div v-if="mediaViewerOpen && viewerAsset" class="media-viewer" @click.self="closeMediaViewer"><div class="media-viewer-tools"><button aria-label="缩小" title="缩小" :disabled="mediaViewerZoom<=.25" @click="changeMediaViewerZoom(-.25)">−</button><b>{{Math.round(mediaViewerZoom*100)}}%</b><button aria-label="放大" title="放大" :disabled="mediaViewerZoom>=4" @click="changeMediaViewerZoom(.25)">＋</button><button v-if="viewerAsset.type==='图片' && !pickerPreviewAsset" class="annotation-toggle" :class="{active:mediaViewerAnnotations}" @click="mediaViewerAnnotations=!mediaViewerAnnotations">{{mediaViewerAnnotations?'隐藏标注':'显示标注'}}</button></div><button class="media-viewer-close" aria-label="关闭大图" @click="closeMediaViewer">×</button><div class="media-viewer-scroll"><div v-if="viewerAsset.type==='图片'" class="original-media" :style="originalMediaStyle"><img :src="viewerAsset.download_url||viewerAsset.preview_url" :alt="viewerAsset.name" /><svg v-if="!pickerPreviewAsset && mediaViewerAnnotations && activeAnnotationSource?.items?.length" class="annotation-layer" viewBox="0 0 100 100" preserveAspectRatio="none"><g v-for="item in activeAnnotationSource.items" :key="item.id"><polygon v-for="(polygon,index) in item.polygons || []" :key="`${item.id}-${index}`" :points="polygonPoints(polygon)" :fill="annotationColor(item.label)" fill-opacity=".18" :stroke="annotationColor(item.label)" vector-effect="non-scaling-stroke" /><rect :x="item.bbox.x*100" :y="item.bbox.y*100" :width="item.bbox.width*100" :height="item.bbox.height*100" fill="none" :stroke="annotationColor(item.label)" vector-effect="non-scaling-stroke" /><text v-if="item.label&&item.label!=='未命名类别'" :x="item.bbox.x*100" :y="Math.max(3,item.bbox.y*100)" :fill="annotationColor(item.label)" vector-effect="non-scaling-stroke">{{item.label}}</text></g></svg></div><video v-else :src="viewerAsset.download_url" :poster="viewerAsset.preview_url" :style="originalMediaStyle" controls autoplay>当前浏览器不支持播放此视频</video></div></div>
     <div v-if="formatOpen" class="modal-stage"><section class="upload-dialog compact-dialog tag-dialog"><button class="close" @click="formatOpen=false">×</button><h2>{{editingFormatType?'修改格式':'新增格式'}}</h2><div class="form-stack"><label>素材类型<select v-if="!editingFormatType" v-model="newFormatType"><option v-for="type in availableFormatTypes" :key="type" :value="type">{{assetTypeLabels[type]}}</option></select><input v-else :value="assetTypeLabels[editingFormatType]" disabled /></label><label>备注<input v-model="formatRemark" maxlength="200" placeholder="请输入备注" /></label><div class="tag-values-editor"><div class="field-label"><span>文件格式</span><button class="add-value" type="button" @click="addFormatValue">＋ 新增</button></div><p v-if="!formatValueRows.length" class="value-empty">暂无文件格式，点击“新增”添加</p><div v-for="row in formatValueRows" :key="row.id" class="tag-value-row"><input v-model="row.value" :disabled="row.protected || !row.editing" placeholder="例如 .jpg" @keyup.enter="row.editing=false" /><template v-if="!row.protected"><button type="button" @click="toggleFormatValueEdit(row)">{{row.editing?'完成':'修改'}}</button><button class="remove-value" type="button" @click="removeFormatValue(row.id)">删除</button></template></div></div></div><div class="dialog-actions"><button class="secondary" @click="formatOpen=false">取消</button><button class="primary" @click="saveFormat">保存格式</button></div></section></div>
     <div v-if="relationPickerOpen" class="modal-stage"><section class="upload-dialog relation-picker-dialog"><button class="close" @click="relationPickerOpen=false">×</button><h2>{{relationPickerContext==='model'?'选择模型':'选择关联素材'}}</h2>
       <div class="relation-picker-layout"><aside class="picker-filters"><label>搜索<input v-model="relationPickerQuery" placeholder="名称或备注" /></label><label v-if="relationPickerContext==='model-target'">资产类型<select v-model="relationPickerType"><option value="">全部类型</option><option value="image">图片</option><option value="video">视频</option><option value="annotation">标注</option><option value="archive">压缩文件</option><option value="collection">数据集</option></select></label><button v-if="relationPickerType!=='collection'" class="untagged-filter picker-untagged-filter" :class="{active:relationPickerNoTags}" @click="relationPickerNoTags=!relationPickerNoTags">无标签</button><div v-if="relationPickerType!=='collection'" class="advanced-head"><div><b>高级筛选条件</b><small>多个条件可组合</small></div><button @click="addPickerRule">＋ 条件</button></div><div v-if="relationPickerType!=='collection'" class="match-mode"><span>符合</span><button :class="{active:relationPickerMatch==='all'}" @click="relationPickerMatch='all'">全部</button><button :class="{active:relationPickerMatch==='any'}" @click="relationPickerMatch='any'">任一</button></div><div v-if="relationPickerType!=='collection'" class="picker-filter-rules"><div v-for="rule in relationPickerRules" :key="rule.id" class="picker-filter-rule"><select v-model="rule.tag" @change="changeRuleTag(rule)"><option v-for="field in filterDefinitions" :key="field.key" :value="field.key">{{field.label}}</option></select><select v-model="rule.operator" @change="changeRuleOperator(rule)"><template v-if="isTimeFilter(rule.tag)"><option value="equals">等于</option><option value="lt">小于</option><option value="gt">大于</option><option value="between">位于</option></template><template v-else><option value="equals">等于</option><option v-if="rule.tag!=='remark'" value="notEquals">不等于</option><option value="contains">包含</option><option value="notContains">不包含</option></template></select><div v-if="isTimeFilter(rule.tag)" class="filter-time-values" :class="{range:rule.operator==='between'}"><input v-model="rule.value" type="datetime-local" step="1" /><span v-if="rule.operator==='between'">至</span><input v-if="rule.operator==='between'" v-model="rule.valueEnd" type="datetime-local" step="1" :min="nextDateTimeValue(rule.value)" /></div><select v-else-if="selectedFilterDefinition(rule.tag)?.values?.length&&!selectedFilterDefinition(rule.tag)?.free_input" v-model="rule.value"><option value="" disabled>请选择</option><option v-for="value in selectedFilterDefinition(rule.tag)?.values" :key="value" :value="value">{{value}}</option></select><input v-else v-model="rule.value" placeholder="请输入值" /><button class="remove-rule" @click="relationPickerRules=relationPickerRules.filter(item=>item.id!==rule.id)">×</button></div></div><button class="apply-filter" @click="applyPickerFilters">应用筛选</button></aside>

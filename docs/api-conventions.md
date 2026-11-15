@@ -6,6 +6,14 @@
 
 分页列表响应包含 `items`、`page`、`page_size` 和 `total`；指标与分类等非分页列表按各接口返回，不强制分页字段。素材列表还返回 `next_cursor`；按相同筛选和排序传入 `after=<next_cursor>` 可连续读取下一页，原有页码参数仍可使用。批量操作返回成功数、失败数和逐项 `details`；单项失败不回滚已成功项，明细达到保护上限时返回 `details_truncated=true`。
 
+## v2.3.0 候选接口变化
+
+- `POST /tag-definitions/{key}/values`：向既有标签字段新增唯一标签值；相同值返回 409。
+- `GET /assets` 等共用的 `tag=字段:条件:值` 筛选：标签字段的 `contains`／`notContains` 对完整标签值判断；文字输入使用 `textContains`／`textNotContains` 保留模糊匹配。备注和时间筛选规则不变。依赖旧模糊语义的客户端须调整请求。
+- `GET /datasets/{dataset_id}/members?ids_only=true`：成员项增加 `type`，用于跨页选择时排除标注素材。
+- `GET /projects/overview`：不再返回页面已移除的项目文件明细；旧消费者若读取 `projects[].files` 需更新。
+- `GET /system/overview`：要求系统概览菜单权限。
+
 ## v2.0.0–v2.2.0 接口补充
 
 以下路径均在 `/api/v1` 下，完整请求模型以 OpenAPI 为准。候选产品版本为 2.2.0，接口前缀仍为 `/api/v1`。

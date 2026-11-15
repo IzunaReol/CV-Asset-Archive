@@ -110,8 +110,12 @@ def asset_filter_clause(key: str, operator: str, value: str) -> dict[str, Any]:
     if operator == "notEquals" and key != "remark":
         return {field: {"$ne": value}}
     if operator == "contains":
-        return {field: {"$regex": re.escape(value), "$options": "i"}}
+        return {field: {"$regex": re.escape(value), "$options": "i"}} if key == "remark" else {field: value}
     if operator == "notContains":
+        return {field: {"$not": {"$regex": re.escape(value), "$options": "i"}}} if key == "remark" else {field: {"$ne": value}}
+    if operator == "textContains" and key != "remark":
+        return {field: {"$regex": re.escape(value), "$options": "i"}}
+    if operator == "textNotContains" and key != "remark":
         return {field: {"$not": {"$regex": re.escape(value), "$options": "i"}}}
     raise AppError(400, "INVALID_TAG_OPERATOR", "不支持的筛选条件")
 

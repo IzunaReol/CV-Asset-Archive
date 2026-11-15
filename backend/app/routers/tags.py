@@ -6,7 +6,7 @@ from ..audit import record_audit
 from ..database import db
 from ..dependencies import TagManageUser, TagReadUser
 from ..errors import AppError
-from ..schemas import TagDefinitionCreate, TagDefinitionUpdate
+from ..schemas import TagDefinitionCreate, TagDefinitionUpdate, TagValueCreate
 from ..utils import new_id, now, public_document
 
 router = APIRouter(prefix="/tag-definitions", tags=["tags"])
@@ -59,6 +59,31 @@ async def update_tag(
         changes={"name": body.name, "values": body.values},
     )
     return public_document(await db.tag_definitions.find_one({"key": key})) or {}
+
+
+@router.post("/{key}/values", status_code=201)
+async def add_tag_value(
+    key: str, body: TagValueCreate, request: Request, user: TagManageUser
+) -> dict[str, Any]:
+    for _ in range(5):
+        definition = await db.tag_definitions.find_one({"key": key})
+        if not definition:
+            raise AppError(404, "TAG_DEFINITION_NOT_FOUND", "标签字段不存在")
+        values = definition.get("values") or []
+        if any(value.strip().casefold() == body.value.casefold() for value in values):
+            raise AppError(409, "TAG_VALUE_EXISTS", "标签值已存在，请选择已有标签值")
+        result = await db.tag_definitions.update_one(
+            {"key": key, "values": values},
+            {"$set": {"values": [*values, body.value], "updated_at": now()}},
+        )
+        if result.modified_count:
+            await record_audit(
+                actor=user, action="tag_definition.value_added", object_type="tag_definition",
+                object_id=key, request_id=request.state.request_id,
+                changes={"value": body.value},
+            )
+            return public_document(await db.tag_definitions.find_one({"key": key})) or {}
+    raise AppError(409, "TAG_DEFINITION_CHANGED", "标签值已变化，请重试")
 
 
 @router.delete("/{key}", status_code=204)

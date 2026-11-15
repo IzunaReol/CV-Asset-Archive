@@ -1,4 +1,5 @@
 import asyncio
+from typing import get_args, get_type_hints
 
 import pytest
 
@@ -6,9 +7,10 @@ from app.dependencies import (
     ensure_action_access, ensure_data_management_access, require_action, require_menu,
     require_roles, require_scoped_action,
 )
+from app.routers.system import system_overview
 from app.schemas import Role
 from app.errors import AppError
-from app.permissions import effective_action_permissions
+from app.permissions import ACTION_DEFINITIONS, MENU_DEFINITIONS, effective_action_permissions
 
 
 def test_data_manager_and_admin_have_destructive_access():
@@ -132,3 +134,35 @@ def test_user_menu_allows_read_without_user_management_action():
     assert asyncio.run(require_menu("admin")(user)) == user
     with pytest.raises(AppError):
         asyncio.run(require_action("user_manage")(user))
+
+
+@pytest.mark.parametrize("menu", [item["key"] for item in MENU_DEFINITIONS])
+def test_each_custom_menu_grant_is_isolated(menu):
+    user = {"roles": ["custom"], "menu_permissions": [menu], "action_permissions": []}
+    assert asyncio.run(require_menu(menu)(user)) == user
+    for other in (item["key"] for item in MENU_DEFINITIONS if item["key"] != menu):
+        with pytest.raises(AppError) as error:
+            asyncio.run(require_menu(other)(user))
+        assert error.value.status_code == 403
+
+
+@pytest.mark.parametrize("definition", ACTION_DEFINITIONS, ids=lambda item: item["key"])
+def test_each_custom_action_requires_both_action_and_owning_menu(definition):
+    action, menu = definition["key"], definition["menu"]
+    allowed = {"roles": ["custom"], "menu_permissions": [menu], "action_permissions": [action]}
+    assert asyncio.run(require_action(action)(allowed)) == allowed
+    for denied in (
+        {**allowed, "menu_permissions": []},
+        {**allowed, "action_permissions": []},
+    ):
+        with pytest.raises(AppError) as error:
+            asyncio.run(require_action(action)(denied))
+        assert error.value.status_code == 403
+
+
+def test_system_overview_api_rejects_role_without_overview_menu():
+    annotation = get_type_hints(system_overview, include_extras=True)["user"]
+    dependency = get_args(annotation)[1].dependency
+    with pytest.raises(AppError) as error:
+        asyncio.run(dependency({"roles": ["custom"], "menu_permissions": ["library"]}))
+    assert error.value.status_code == 403

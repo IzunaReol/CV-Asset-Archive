@@ -370,6 +370,16 @@ class TagDefinitionCreate(BaseModel):
     asset_types: list[AssetType] = Field(default_factory=list)
     free_input: bool = False
 
+    @field_validator("values")
+    @classmethod
+    def validate_values(cls, values: list[str]) -> list[str]:
+        cleaned = [value.strip() for value in values]
+        if any(not value or len(value) > 100 for value in cleaned):
+            raise ValueError("标签值不能为空或超过100字")
+        if len({value.casefold() for value in cleaned}) != len(cleaned):
+            raise ValueError("标签值不能重复")
+        return cleaned
+
 
 class TagDefinitionUpdate(BaseModel):
     name: str = Field(min_length=1, max_length=50)
@@ -378,3 +388,20 @@ class TagDefinitionUpdate(BaseModel):
     color: str = Field(default="#64748b", pattern=r"^#[0-9a-fA-F]{6}$")
     asset_types: list[AssetType] = Field(default_factory=list)
     free_input: bool = False
+
+    @field_validator("values")
+    @classmethod
+    def validate_values(cls, values: list[str]) -> list[str]:
+        return TagDefinitionCreate.validate_values(values)
+
+
+class TagValueCreate(BaseModel):
+    value: str = Field(min_length=1, max_length=100)
+
+    @field_validator("value")
+    @classmethod
+    def normalize_value(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("标签值不能为空")
+        return cleaned

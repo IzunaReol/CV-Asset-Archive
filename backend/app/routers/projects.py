@@ -10,7 +10,6 @@ from ..errors import AppError
 from ..permissions import effective_menu_permissions
 
 router = APIRouter(prefix="/projects", tags=["projects"])
-FILE_PREVIEW_LIMIT = 50
 
 
 def _asset_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
@@ -145,36 +144,6 @@ async def project_overview(
             )
         }
         result["summary"]["model_count"] = len({model_id for rows in model_project_sources.values() for model_id in rows})
-        result["summary"]["file_count"] = await db.assets.count_documents(
-            {"archived_at": None, "type": {"$ne": "model"}, "tags.project": {"$in": selected}}
-        )
-
-    file_stats_by_project: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    file_previews_by_project: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    if "library" in menus:
-        file_cursor = await db.assets.aggregate([
-            {"$match": {"archived_at": None, "type": {"$ne": "model"}, "tags.project": {"$in": selected}}},
-            {"$set": {"_projects": {"$setUnion": [{"$cond": [
-                {"$isArray": "$tags.project"}, "$tags.project", ["$tags.project"],
-            ]}, []]}}},
-            {"$unwind": "$_projects"},
-            {"$match": {"_projects": {"$in": selected}}},
-            {"$facet": {
-                "counts": [{"$group": {"_id": {"project": "$_projects", "type": "$type"}, "count": {"$sum": 1}}}],
-                "previews": [{"$group": {
-                    "_id": "$_projects",
-                    "items": {"$topN": {"n": FILE_PREVIEW_LIMIT,
-                        "sortBy": {"updated_at": -1, "id": 1},
-                        "output": {"id": "$id", "name": "$name", "type": "$type", "size": "$size",
-                                   "tags": {"algorithm": "$tags.algorithm"}, "updated_at": "$updated_at"}}},
-                }}],
-            }},
-        ], allowDiskUse=True)
-        file_rows = await file_cursor.to_list(length=1)
-        file_result = file_rows[0] if file_rows else {"counts": [], "previews": []}
-        for row in file_result["counts"]:
-            file_stats_by_project[row["_id"]["project"]].append({"_id": {"type": row["_id"]["type"]}, "count": row["count"]})
-        file_previews_by_project = {row["_id"]: row["items"] for row in file_result["previews"]}
 
     for project in selected:
         project_datasets: list[dict[str, Any]] = []
@@ -214,16 +183,10 @@ async def project_overview(
         for item in models:
             item.pop("latest_version_created_at")
 
-        file_counts = _asset_counts(file_stats_by_project[project])
-        files = file_previews_by_project.get(project, [])
-        file_total = sum(file_counts.values())
-
         result["projects"].append({
             "name": project,
             "dataset_count": len(project_datasets), "dataset_counts": dataset_counts,
             "datasets": project_datasets,
             "model_count": len(models), "models": models,
-            "file_count": file_total, "file_counts": file_counts,
-            "files": files, "files_truncated": file_total > len(files),
         })
     return result

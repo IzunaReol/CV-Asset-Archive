@@ -519,6 +519,8 @@ test('数据集图片可批量设置用途、自动分配并选择导出类型',
   await expect(firstCard.locator('.member-card-badge-row')).toHaveCount(2)
   await expect(firstCard.locator('.member-card-badge-row').first()).toHaveText('未划分')
   await expect(firstCard.locator('.member-card-badge-row').last()).toHaveText('已关联标注')
+  const badgeSizes=await firstCard.locator('.member-card-badge-row em').evaluateAll(items=>items.map(item=>getComputedStyle(item).fontSize))
+  expect(badgeSizes).toEqual(['11px','11px'])
   await expect(page.getByLabel('图片用途筛选')).toHaveCount(0)
   await expect(page.locator('.split-filter-reset')).toHaveCount(0)
   await firstCard.locator('.member-preview').click()
@@ -1585,7 +1587,7 @@ test('删除素材前展示数据集、历史版本和模型引用', async ({ pa
   await page.addInitScript(value => localStorage.setItem('cv-archive-session', JSON.stringify(value)), tokens)
   await page.goto('/')
   await page.getByRole('button', { name: /素材库/ }).click()
-  await page.getByRole('button', { name: '✓ 全选' }).click()
+  await page.getByRole('group', { name: '选择素材范围' }).getByRole('button', { name: '✓ 当页' }).click()
   await page.locator('.batch-bar').getByRole('button', { name: '删除', exact: true }).click()
   const impact = page.getByLabel('素材使用影响')
   await expect(page.locator('.confirm-dialog')).toContainText('确定要删除1项吗？其中共1项存在关联关系。')
@@ -1615,6 +1617,71 @@ test('素材库表格模式隐藏卡片密度选项', async ({ page }) => {
   await expect(page.getByRole('button', { name: '紧凑', exact: true })).toBeVisible()
 })
 
+test('素材库高级筛选展示自定义标签值并保留手动输入', async ({ page }) => {
+  const asset={id:'asset-1',name:'测试图片.jpg',type:'image',size:1024,status:'ready',tags:{},media:{},created_at:'2026-10-02T01:00:00Z'}
+  await mockApi(page,[asset])
+  await page.route('**/api/v1/tag-definitions',route=>json(route,{items:[{key:'defect',name:'缺陷类型',values:['漏件','错件'],free_input:true,color:'#2fa783'}]}))
+  await page.addInitScript(value=>localStorage.setItem('cv-archive-session',JSON.stringify(value)),tokens)
+  await page.goto('/')
+  await page.locator('.sidebar nav').getByRole('button',{name:/素材库/}).click()
+  await expect(page.locator('.filter-rule')).toHaveCount(0)
+  await page.locator('.filters .advanced-head').getByRole('button',{name:'＋ 条件'}).click()
+  const rule=page.locator('.filter-rule').first()
+  await rule.getByRole('button',{name:'标签名称'}).click()
+  await page.getByRole('listbox',{name:'标签名称'}).getByRole('option',{name:'缺陷类型'}).click()
+  await rule.getByRole('button',{name:'标签值'}).click()
+  const values=page.getByRole('listbox',{name:'标签值'})
+  await expect(values.getByRole('option')).toHaveText(['漏件','错件','输入其他值…'])
+  await values.getByRole('option',{name:'漏件'}).click()
+  await expect(rule.getByRole('combobox',{name:'筛选条件'}).getByRole('option')).toHaveText(['包含','不包含'])
+  const selectedRequest=page.waitForRequest(request=>request.url().includes('/api/v1/assets?')&&new URL(request.url()).searchParams.getAll('tag').includes('defect:contains:漏件'))
+  await page.getByRole('button',{name:'应用筛选'}).click()
+  await selectedRequest
+  await rule.getByRole('button',{name:'标签值'}).click()
+  await page.getByRole('listbox',{name:'标签值'}).getByRole('option',{name:'输入其他值…'}).click()
+  await expect(rule.getByRole('textbox',{name:'标签值'})).toBeVisible()
+  await rule.getByRole('textbox',{name:'标签值'}).fill('自定义缺陷')
+  const manualRequest=page.waitForRequest(request=>request.url().includes('/api/v1/assets?')&&new URL(request.url()).searchParams.getAll('tag').includes('defect:textContains:自定义缺陷'))
+  await page.getByRole('button',{name:'应用筛选'}).click()
+  await manualRequest
+  await rule.getByRole('button',{name:'选标签值'}).click()
+  await expect(rule.getByRole('button',{name:'标签值'})).toBeVisible()
+})
+
+test('添加素材高级筛选通过自绘菜单按完整标签值提交', async ({ page }) => {
+  const rows = ['未出脚','出脚'].map((value,index)=>({id:`asset-${index}`,name:`${value}.jpg`,type:'image',size:100,tags:{scene:[value]},created_at:'2026-10-02T01:00:00Z'}))
+  await mockApi(page,rows)
+  await page.route('**/api/v1/tag-definitions',route=>json(route,{items:[{key:'scene',name:'场景',values:['未出脚','出脚'],color:'#2fa783'}]}))
+  const dataset={id:'dataset-1',name:'测试数据集',status:'待整理',member_count:0,total_size:0,classification_rule:'standard',counts:{},projects:['测试项目']}
+  await page.route('**/api/v1/datasets**',route=>{
+    const path=new URL(route.request().url()).pathname
+    if(path.endsWith('/creators'))return json(route,{items:[]})
+    if(path.endsWith('/members/status'))return json(route,{existing_ids:[]})
+    if(path.endsWith('/members')||path.endsWith('/versions')||path.endsWith('/models')||path.endsWith('/tag-distribution'))return json(route,{items:[],total:0})
+    if(path.endsWith('/split-stats'))return json(route,{image_count:0,counts:{unassigned:0,train:0,val:0,test:0}})
+    if(path.endsWith('/datasets'))return json(route,{items:[dataset],total:1})
+    return json(route,dataset)
+  })
+  await page.route(/\/api\/v1\/datasets\/dataset-1\/members\/status$/,route=>json(route,{existing_ids:[]}))
+  await page.addInitScript(value=>localStorage.setItem('cv-archive-session',JSON.stringify(value)),tokens)
+  await page.goto('/')
+  await page.locator('.sidebar nav').getByRole('button',{name:/数据集/}).click()
+  await page.locator('.dataset-table').getByRole('button',{name:/测试数据集/}).click()
+  await page.getByRole('button',{name:'数据管理'}).click()
+  await page.getByRole('button',{name:'＋ 添加素材'}).click()
+  const picker=page.locator('.advanced-member-picker')
+  await picker.getByRole('button',{name:'＋ 条件'}).click()
+  await expect(picker.locator('.candidate-rules>div')).toHaveCount(1)
+  await picker.getByRole('button',{name:'标签名称'}).click()
+  await page.getByRole('listbox',{name:'标签名称'}).getByRole('option',{name:'场景'}).click()
+  await picker.getByRole('button',{name:'标签值'}).click()
+  await page.getByRole('listbox',{name:'标签值'}).getByRole('option',{name:'出脚',exact:true}).click()
+  await expect(picker.getByRole('combobox',{name:'筛选条件'}).getByRole('option')).toHaveText(['包含','不包含'])
+  const request=page.waitForRequest(value=>value.url().includes('/api/v1/assets?')&&new URL(value.url()).searchParams.getAll('tag').includes('scene:contains:出脚'))
+  await picker.getByRole('button',{name:'应用筛选'}).click()
+  await request
+})
+
 test('批量添加标签读取最新标签值且只能选择已有值', async ({ page }) => {
   const asset = { id: 'asset-1', name: '测试图片.jpg', type: 'image', size: 1024, status: 'ready', tags: {}, media: {}, created_at: '2026-10-02T01:00:00Z' }
   await mockApi(page, [asset])
@@ -1635,21 +1702,176 @@ test('批量添加标签读取最新标签值且只能选择已有值', async ({
   await page.locator('.batch-bar').getByRole('button', { name: '添加标签' }).click()
   const dialog = page.locator('.compact-dialog').filter({ hasText: '为 1 项素材添加标签' })
   await expect.poll(() => tagLoads).toBeGreaterThan(previousLoads)
-  await expect(dialog.getByLabel('标签值').locator('option')).toContainText(['请选择', '新标签值'])
-  await expect(dialog.getByLabel('标签值').locator('option', { hasText: '旧标签值' })).toHaveCount(0)
+  await dialog.getByRole('button', { name: '标签值', exact:true }).click()
+  await expect(page.getByRole('listbox', {name:'标签值'}).getByRole('option', {name:'新标签值'})).toBeVisible()
+  await expect(page.getByRole('listbox', {name:'标签值'}).getByRole('option', {name:'旧标签值'})).toHaveCount(0)
   await expect(dialog.getByRole('button', { name: '输入自定义值' })).toHaveCount(0)
   await expect(dialog.locator('input[placeholder="请输入标签值"]')).toHaveCount(0)
-  await dialog.getByLabel('标签值').selectOption('新标签值')
+  await page.getByRole('listbox', {name:'标签值'}).getByRole('option', {name:'新标签值'}).click()
   await expect(dialog.getByRole('button', { name: '添加标签' })).toBeEnabled()
   values = ['更新后的值']
   await dialog.getByRole('button', { name: '添加标签' }).click()
-  await expect(page.getByText('标签值已变化，请选择标签管理中的有效值')).toBeVisible()
+  await expect(page.getByText('标签值已变化，请重新选择')).toBeVisible()
   expect(submitted).toBe(0)
   values = []
   await dialog.getByRole('button', { name: '取消' }).click()
   await page.locator('.batch-bar').getByRole('button', { name: '添加标签' }).click()
-  await expect(dialog.getByText('暂无可用标签值，请先在标签管理中配置。')).toBeVisible()
+  await dialog.getByRole('button', {name:'标签值',exact:true}).click()
+  await expect(page.getByRole('listbox', {name:'标签值'}).getByRole('option', {name:'<新建标签值>'})).toBeVisible()
   await expect(dialog.getByRole('button', { name: '添加标签' })).toBeDisabled()
+})
+
+test('大量标签值只渲染可见菜单项且仍可搜索末尾值', async ({ page }) => {
+  const asset = { id: 'asset-1', name: '测试图片.jpg', type: 'image', size: 1024, status: 'ready', tags: {}, media: {}, created_at: '2026-10-02T01:00:00Z' }
+  await mockApi(page, [asset])
+  await page.route('**/api/v1/tag-definitions', route => json(route, { items: [{ key: 'scene', name: '场景', values: Array.from({length: 2000}, (_, index) => `值${index}`), free_input: false }] }))
+  await page.addInitScript(value => localStorage.setItem('cv-archive-session', JSON.stringify(value)), tokens)
+  await page.goto('/')
+  await page.locator('.sidebar nav').getByRole('button', { name: /素材库/ }).click()
+  await page.getByLabel('选择 测试图片.jpg').click()
+  await page.locator('.batch-bar').getByRole('button', { name: '添加标签' }).click()
+  const dialog = page.locator('.compact-dialog').filter({ hasText: '为 1 项素材添加标签' })
+  await dialog.getByRole('button', { name: '标签值', exact: true }).click()
+  const list = page.getByRole('listbox', { name: '标签值' })
+  await expect(list.getByRole('option')).toHaveCount(12)
+  await page.getByRole('textbox', { name: '搜索标签值' }).fill('值1999')
+  await list.getByRole('option', { name: '值1999' }).click()
+  await expect(dialog.getByRole('button', { name: '标签值', exact: true })).toContainText('值1999')
+})
+
+test('素材添加标签两个下拉框样式一致并可新增唯一标签值', async ({ page }) => {
+  const asset = { id: 'asset-1', name: '测试图片.jpg', type: 'image', size: 1024, status: 'ready', tags: {}, media: {}, created_at: '2026-10-02T01:00:00Z' }
+  await mockApi(page, [asset])
+  const values = ['漏件']
+  let created = 0
+  let applied = 0
+  await page.route('**/api/v1/tag-definitions', route => json(route, { items: [
+    { key: 'scene', name: '场景', color: '#64748b', values: ['室内'] },
+    { key: 'defect', name: '缺陷类型', color: '#2fa783', values },
+  ] }))
+  await page.route('**/api/v1/tag-definitions/defect/values', async route => {
+    created++
+    values.push(route.request().postDataJSON().value)
+    return json(route, { key: 'defect', values }, 201)
+  })
+  await page.route('**/api/v1/assets/batch-tags', route => { applied++; return json(route, { succeeded: ['asset-1'], failed: [] }) })
+  await page.addInitScript(value => localStorage.setItem('cv-archive-session', JSON.stringify(value)), tokens)
+  await page.goto('/')
+  await page.getByRole('button', { name: /素材库/ }).click()
+  await page.getByLabel('选择 测试图片.jpg').click()
+  await page.locator('.batch-bar').getByRole('button', { name: '添加标签' }).click()
+  const dialog = page.locator('.batch-tag-dialog')
+  const selectors=dialog.locator('.tag-option-trigger')
+  await expect(selectors).toHaveCount(2)
+  const geometry=await selectors.evaluateAll(elements => elements.map(element => {
+    const rect=element.getBoundingClientRect()
+    const style=getComputedStyle(element)
+    return {width:rect.width,height:rect.height,fontSize:style.fontSize,borderRadius:style.borderRadius}
+  }))
+  expect(geometry[0]).toEqual(geometry[1])
+  await dialog.getByRole('button', {name:'标签',exact:true}).click()
+  await expect(page.getByRole('listbox', {name:'标签'}).getByRole('option', {name:'缺陷类型'}).locator('.tag-option-dot')).toHaveCSS('background-color','rgb(47, 167, 131)')
+  await page.getByRole('listbox', {name:'标签'}).getByRole('option', {name:'缺陷类型'}).click()
+  await dialog.getByRole('button', {name:'标签值',exact:true}).click()
+  await page.getByRole('listbox', {name:'标签值'}).getByRole('option', {name:'<新建标签值>'}).click()
+  await dialog.getByLabel('新标签值').fill(' 漏件 ')
+  await expect(dialog.getByText('标签值已存在，请选择已有标签值')).toBeVisible()
+  await expect(dialog.getByRole('button', { name: '添加标签' })).toBeDisabled()
+  await dialog.getByLabel('新标签值').fill('错件')
+  await dialog.getByRole('button', { name: '添加标签' }).click()
+  await expect.poll(() => created).toBe(1)
+  await expect.poll(() => applied).toBe(1)
+  expect(values).toEqual(['漏件', '错件'])
+})
+
+test('已有标签值与新建选项内部标记相同仍可正常添加', async ({ page }) => {
+  const asset = {id:'asset-1',name:'测试图片.jpg',type:'image',size:1024,status:'ready',tags:{},media:{},created_at:'2026-10-02T01:00:00Z'}
+  await mockApi(page,[asset])
+  let appliedValue = ''
+  let created = 0
+  await page.route('**/api/v1/tag-definitions', route => json(route,{items:[{key:'defect',name:'缺陷类型',color:'#2fa783',values:['__new__']}]}))
+  await page.route('**/api/v1/tag-definitions/defect/values', route => {created++;return json(route,{key:'defect',values:['__new__']},201)})
+  await page.route('**/api/v1/assets/batch-tags', route => {appliedValue=route.request().postDataJSON().set_tags.defect;return json(route,{succeeded:['asset-1'],failed:[]})})
+  await page.addInitScript(value => localStorage.setItem('cv-archive-session',JSON.stringify(value)),tokens)
+  await page.goto('/')
+  await page.getByRole('button',{name:/素材库/}).click()
+  await page.getByLabel('选择 测试图片.jpg').click()
+  await page.locator('.batch-bar').getByRole('button',{name:'添加标签'}).click()
+  const dialog=page.locator('.batch-tag-dialog')
+  await dialog.getByRole('button',{name:'标签',exact:true}).click()
+  await page.getByRole('listbox',{name:'标签'}).getByRole('option',{name:'缺陷类型'}).click()
+  await dialog.getByRole('button',{name:'标签值',exact:true}).click()
+  await page.getByRole('listbox',{name:'标签值'}).getByRole('option',{name:'__new__'}).click()
+  await expect(dialog.getByLabel('新标签值')).toHaveCount(0)
+  await dialog.getByRole('button',{name:'添加标签'}).click()
+  await expect.poll(() => appliedValue).toBe('__new__')
+  expect(created).toBe(0)
+})
+
+test('窄屏标签弹窗中的两个选择框保持在弹窗边界内', async ({ page }) => {
+  await page.setViewportSize({width:390,height:680})
+  await mockApi(page,[{id:'asset-1',name:'测试图片.jpg',type:'image',size:1024,status:'ready',tags:{},media:{},created_at:'2026-10-02T01:00:00Z'}])
+  await page.route('**/api/v1/tag-definitions', route => json(route, {items:Array.from({length:12},(_,i)=>({key:`scene_${i}`,name:`场景 ${i}`,values:['室内'],color:'#64748b'}))}))
+  await page.addInitScript(value => localStorage.setItem('cv-archive-session', JSON.stringify(value)), tokens)
+  await page.goto('/')
+  await page.getByRole('button', {name:/素材库/}).click()
+  await page.getByLabel('选择 测试图片.jpg').click()
+  await page.locator('.batch-bar').getByRole('button', {name:'添加标签'}).click()
+  const dialog=page.locator('.batch-tag-dialog')
+  const bounds=await dialog.evaluate(element => {
+    const outer=element.getBoundingClientRect()
+    const selects=[...element.querySelectorAll('.tag-option-trigger')].map(item=>item.getBoundingClientRect())
+    return {outer:{left:outer.left,right:outer.right,top:outer.top,bottom:outer.bottom},selects:selects.map(item=>({left:item.left,right:item.right,top:item.top,bottom:item.bottom}))}
+  })
+  expect(bounds.selects).toHaveLength(2)
+  for (const select of bounds.selects) {
+    expect(select.left).toBeGreaterThanOrEqual(bounds.outer.left)
+    expect(select.right).toBeLessThanOrEqual(bounds.outer.right)
+    expect(select.bottom).toBeLessThanOrEqual(bounds.outer.bottom)
+  }
+  await dialog.getByRole('button', {name:'标签',exact:true}).click()
+  const popup=page.getByRole('listbox',{name:'标签'})
+  await expect(popup).toBeVisible()
+  const colors=await page.evaluate(() => ({popup:getComputedStyle(document.querySelector('.tag-option-popup')!).backgroundColor,dialog:getComputedStyle(document.querySelector('.batch-tag-dialog')!).backgroundColor}))
+  expect(colors.popup).toBe(colors.dialog)
+  const popupBounds=await popup.boundingBox()
+  expect(popupBounds).not.toBeNull()
+  expect(popupBounds!.y + popupBounds!.height).toBeLessThanOrEqual(680)
+  expect(popupBounds!.y + popupBounds!.height).toBeGreaterThan(bounds.outer.bottom)
+  await page.getByLabel('搜索标签').fill('场景 11')
+  await popup.getByRole('option', {name:'场景 11'}).click()
+  await expect(dialog.getByRole('button', {name:'标签',exact:true})).toContainText('场景 11')
+  await dialog.getByRole('button', {name:'标签值',exact:true}).click()
+  await expect(page.getByRole('listbox',{name:'标签值'}).getByRole('option',{name:'室内'})).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('listbox',{name:'标签值'})).toHaveCount(0)
+  await expect(dialog).toBeVisible()
+})
+
+test('标签字段新建和编辑时阻止重复标签值', async ({ page }) => {
+  await mockApi(page)
+  let values = ['漏件']
+  let saved = 0
+  await page.route('**/api/v1/tag-definitions', route => json(route, { items: [{key:'defect',name:'缺陷类型',values,color:'#2fa783'}] }))
+  await page.route('**/api/v1/tag-definitions/defect', route => {
+    saved++
+    values=route.request().postDataJSON().values
+    return json(route,{key:'defect',name:'缺陷类型',values,color:'#2fa783'})
+  })
+  await page.addInitScript(value => localStorage.setItem('cv-archive-session', JSON.stringify(value)), tokens)
+  await page.goto('/')
+  await page.getByRole('button', {name:'标签管理'}).click()
+  await page.locator('.tag-admin').getByRole('button', {name:'修改'}).click()
+  const dialog=page.locator('.tag-dialog').filter({hasText:'修改标签字段'})
+  await dialog.getByRole('button', {name:'新增'}).click()
+  await dialog.getByPlaceholder('请输入标签值').last().fill(' 漏件 ')
+  await expect(dialog.getByText('标签值不能重复')).toBeVisible()
+  await expect(dialog.getByRole('button', {name:'保存标签'})).toBeDisabled()
+  expect(saved).toBe(0)
+  await dialog.getByPlaceholder('请输入标签值').last().fill('错件')
+  await dialog.getByRole('button', {name:'保存标签'}).click()
+  await expect.poll(() => saved).toBe(1)
+  expect(values).toEqual(['漏件','错件'])
 })
 
 test('无关联素材只需一次删除确认且不显示无关素材明细', async ({ page }) => {
@@ -1668,7 +1890,7 @@ test('无关联素材只需一次删除确认且不显示无关素材明细', as
   await page.addInitScript(value => localStorage.setItem('cv-archive-session', JSON.stringify(value)), tokens)
   await page.goto('/')
   await page.getByRole('button', { name: /素材库/ }).click()
-  await page.getByRole('button', { name: '✓ 全选' }).click()
+  await page.getByRole('group', { name: '选择素材范围' }).getByRole('button', { name: '✓ 当页' }).click()
   await page.locator('.batch-bar').getByRole('button', { name: '删除', exact: true }).click()
   await expect(page.getByLabel('素材使用影响')).toContainText('存在 0 项关联关系')
   await expect(page.locator('.usage-impact-list article')).toHaveCount(0)
@@ -1918,4 +2140,131 @@ test('只有用户菜单但无管理用户权限时隐藏全部用户操作按�
   await expect(page.getByRole('button', { name: '按角色新增', exact: true })).toHaveCount(0)
   await expect(page.locator('.admin-users').getByRole('button', { name: '编辑', exact: true })).toHaveCount(0)
   await expect(page.locator('.admin-users').getByRole('button', { name: '删除', exact: true })).toHaveCount(0)
+})
+
+test('素材库当页与全部分别选择当前页和全部筛选结果', async ({ page }) => {
+  const rows=Array.from({length:21},(_,index)=>({id:`asset-${index+1}`,name:`图片 ${index+1}.jpg`,type:'image',size:10,status:'ready',tags:{},media:{},created_at:'2026-10-02T01:00:00Z'}))
+  await mockApi(page,rows.slice(0,20),21)
+  let selectionRequest:any=null
+  await page.route(/\/api\/v1\/assets(?:\?|$)/,route=>{
+    const params=new URL(route.request().url()).searchParams
+    const pageNumber=Number(params.get('page')||1)
+    return json(route,{items:rows.slice((pageNumber-1)*20,pageNumber*20),total:21,next_cursor:null})
+  })
+  await page.route(/\/api\/v1\/assets\/selection-sets(?:\?|$)/,route=>{
+    selectionRequest=route.request().postDataJSON()
+    return json(route,{selection_id:'selection-all',total:21},201)
+  })
+  await page.addInitScript(value=>localStorage.setItem('cv-archive-session',JSON.stringify(value)),tokens)
+  await page.goto('/')
+  await page.locator('.sidebar nav').getByRole('button',{name:/素材库/}).click()
+  await page.locator('.pagination select').selectOption('20')
+  const pair=page.getByRole('group',{name:'选择素材范围'})
+  await expect(pair.getByRole('button',{name:'✓ 当页'})).toBeVisible()
+  await expect(pair.getByRole('button',{name:'全部'})).toBeVisible()
+  await pair.getByRole('button',{name:'✓ 当页'}).click()
+  await expect(page.locator('.batch-bar')).toContainText('已选 20 项')
+  await page.locator('.pagination').getByRole('button',{name:'›'}).click()
+  await expect(page.getByLabel('选择 图片 21.jpg')).toBeVisible()
+  await expect(page.locator('.batch-bar')).toContainText('已选 20 项')
+  await pair.getByRole('button',{name:'全部'}).click()
+  await expect(page.locator('.batch-bar')).toContainText('已选 21 项')
+  expect(selectionRequest).toMatchObject({q:'',no_tags:false,asset_type:[]})
+})
+
+test('数据集当页与全部跨页选择并保留图片类型', async ({ page }) => {
+  await mockApi(page)
+  const dataset={id:'dataset-1',name:'权限测试数据集',status:'待整理',member_count:201,total_size:201,classification_rule:'standard',counts:{image:201},projects:['测试项目']}
+  const rows=Array.from({length:201},(_,index)=>({id:`image-${index+1}`,name:`图片 ${index+1}.jpg`,type:'image',size:1,dataset_split:'unassigned',has_annotation:false}))
+  const requestedPages:number[]=[]
+  await page.route('**/api/v1/datasets**',route=>{
+    const url=new URL(route.request().url()),path=url.pathname
+    if(path.endsWith('/creators'))return json(route,{items:[]})
+    if(path.endsWith('/split-stats'))return json(route,{image_count:201,counts:{unassigned:201,train:0,val:0,test:0}})
+    if(path.endsWith('/members')){
+      const size=Number(url.searchParams.get('page_size')||50),number=Number(url.searchParams.get('page')||1)
+      if(url.searchParams.get('ids_only')==='true')requestedPages.push(number)
+      const items=rows.slice((number-1)*size,number*size).map(item=>url.searchParams.get('ids_only')==='true'?{id:item.id,type:item.type}:item)
+      return json(route,{items,total:201})
+    }
+    if(path.endsWith('/versions')||path.endsWith('/models')||path.endsWith('/tag-distribution'))return json(route,{items:[],total:0})
+    if(path.endsWith('/datasets'))return json(route,{items:[dataset],total:1})
+    return json(route,dataset)
+  })
+  await page.route(/\/api\/v1\/datasets\/dataset-1\/members(?:\?|$)/,route=>{
+    const url=new URL(route.request().url())
+    const size=Number(url.searchParams.get('page_size')||50),number=Number(url.searchParams.get('page')||1)
+    if(url.searchParams.get('ids_only')==='true')requestedPages.push(number)
+    const items=rows.slice((number-1)*size,number*size).map(item=>url.searchParams.get('ids_only')==='true'?{id:item.id,type:item.type}:item)
+    return json(route,{items,total:201})
+  })
+  await page.addInitScript(value=>localStorage.setItem('cv-archive-session',JSON.stringify(value)),tokens)
+  await page.goto('/')
+  await page.locator('.sidebar nav').getByRole('button',{name:/数据集/}).click()
+  await page.locator('.dataset-table').getByRole('button',{name:/权限测试数据集/}).click()
+  await page.getByRole('button',{name:'数据管理'}).click()
+  await expect(page.locator('.member-grid article')).toHaveCount(50)
+  const pair=page.getByRole('group',{name:'选择数据集成员范围'})
+  await pair.getByRole('button',{name:'当页'}).click()
+  await expect(page.locator('.batch-bar')).toContainText('已选 50 项')
+  await pair.getByRole('button',{name:'全部'}).click()
+  await expect(page.locator('.batch-bar')).toContainText('已选 201 项')
+  expect(requestedPages).toEqual([1,2])
+  await expect(page.locator('.batch-split')).toContainText('批量设置图片分类（201 张）')
+})
+
+for(const [menu,label] of [
+  ['overview','系统概览'],['project_overview','项目概览'],['library','素材库'],['datasets','数据集'],
+  ['relations','关联关系'],['lineage','模型溯源'],['downloads','任务中心'],['trash','回收站'],
+  ['tags','标签管理'],['formats','格式管理'],['parameters','参数管理'],['admin','用户管理'],
+  ['roles','角色管理'],['logs','系统日志'],
+] as const) {
+  test(`仅授予${label}菜单时侧栏只显示该菜单`,async ({page})=>{
+    const roleTokens={...tokens,user:{id:`role-${menu}`,username:`role-${menu}`,roles:['custom'],menu_permissions:[menu],action_permissions:[]}}
+    await mockApi(page,[],0,roleTokens)
+    await page.addInitScript(value=>localStorage.setItem('cv-archive-session',JSON.stringify(value)),roleTokens)
+    await page.goto('/')
+    const nav=page.locator('.sidebar nav')
+    await expect(nav.locator('button')).toHaveCount(1)
+    await expect(nav.locator('button').first()).toContainText(label)
+    await expect(nav.locator('button').first()).toHaveClass(/active/)
+  })
+}
+
+test('操作权限缺少归属菜单时界面不暴露操作',async ({page})=>{
+  const roleTokens={...tokens,user:{id:'scoped-role',username:'scoped-role',roles:['custom'],menu_permissions:['library'],action_permissions:['asset_upload','export_create','tag_manage']}}
+  const asset={id:'asset-1',name:'测试素材.jpg',type:'image',size:10,status:'ready',tags:{},media:{},created_at:'2026-10-02T01:00:00Z'}
+  await mockApi(page,[asset],1,roleTokens)
+  await page.addInitScript(value=>localStorage.setItem('cv-archive-session',JSON.stringify(value)),roleTokens)
+  await page.goto('/')
+  await expect(page.getByRole('button',{name:/上传素材/})).toBeVisible()
+  await expect(page.locator('.sidebar nav').getByRole('button',{name:/任务中心|标签管理/})).toHaveCount(0)
+  await page.getByLabel('选择 测试素材.jpg').click()
+  await expect(page.locator('.batch-bar').getByRole('button',{name:'导出'})).toHaveCount(0)
+})
+
+test('素材详情标签删除按钮完整可见且无类别标注只显示框',async ({page})=>{
+  const asset={id:'asset-1',name:'测试素材.jpg',type:'image',size:10,status:'ready',tags:{scene:'室内'},media:{width:100,height:100},created_at:'2026-10-02T01:00:00Z'}
+  await mockApi(page,[asset])
+  await page.route('**/api/v1/tag-definitions',route=>json(route,{items:[{key:'scene',name:'场景',color:'#2fa783',values:['室内']}]}))
+  await page.route('**/api/v1/assets/asset-1/annotation-overlays',route=>json(route,{sources:[{
+    annotation_asset_id:'annotation-1',annotation_name:'测试标注.txt',format:'YOLO',matched:true,
+    items:[{id:'box-1',label:'未命名类别',bbox:{x:.1,y:.1,width:.3,height:.3},polygons:[]},{id:'box-2',label:'安全帽',bbox:{x:.5,y:.5,width:.2,height:.2},polygons:[]}],
+  }]}))
+  await page.addInitScript(value=>localStorage.setItem('cv-archive-session',JSON.stringify(value)),tokens)
+  await page.goto('/')
+  await page.locator('.sidebar nav').getByRole('button',{name:/素材库/}).click()
+  await page.locator('.asset-grid article').first().getByRole('button',{name:'IMG'}).click()
+  const tag=page.locator('.detail-tags .asset-tag').first()
+  await tag.hover()
+  const remove=tag.getByRole('button',{name:/删除标签/})
+  await expect(remove).toBeVisible()
+  const geometry=await remove.evaluate(element=>{
+    const rect=element.getBoundingClientRect(),point=document.elementFromPoint(rect.left+rect.width/2,rect.top+rect.height/2)
+    const sheet=element.closest('.detail-sheet')!.getBoundingClientRect()
+    return {visible:point===element||element.contains(point),width:rect.width,height:rect.height,withinSheet:rect.left>=sheet.left&&rect.right<=sheet.right&&rect.top>=sheet.top&&rect.bottom<=sheet.bottom}
+  })
+  expect(geometry).toMatchObject({visible:true,width:18,height:18,withinSheet:true})
+  await expect(page.locator('.detail-preview .annotation-layer rect')).toHaveCount(2)
+  await expect(page.locator('.detail-preview .annotation-layer text')).toHaveText(['安全帽'])
 })

@@ -62,7 +62,7 @@ async def test_project_overview_groups_current_members_and_deduplicates_models(m
     monkeypatch.setattr(projects, "db", database)
     result = await projects.project_overview({"roles": ["admin"]}, projects=["A", "B"])
 
-    assert result["summary"] == {"project_count": 2, "dataset_count": 2, "model_count": 1, "file_count": 1}
+    assert result["summary"] == {"project_count": 2, "dataset_count": 2, "model_count": 1, "file_count": 0}
     a, b = result["projects"]
     assert a["dataset_count"] == 2
     assert [item["name"] for item in a["datasets"]] == ["数据集一", "旧数据集"]
@@ -71,14 +71,11 @@ async def test_project_overview_groups_current_members_and_deduplicates_models(m
     assert b["dataset_count"] == 1
     assert b["dataset_counts"]["image"] == 2
     database.dataset_memberships.aggregate.assert_awaited_once()
-    assets.aggregate.assert_awaited_once()
-    assert assets.count_documents.await_count == 1
-    assert a["files"] == b["files"] == [file]
-    file_pipeline = assets.aggregate.await_args.args[0]
-    assert file_pipeline[-1]["$facet"]["previews"][0]["$group"]["items"]["$topN"]["n"] == 50
+    assets.aggregate.assert_not_awaited()
+    assets.count_documents.assert_not_awaited()
     assert a["models"][0]["sources"] == ["数据集关联", "项目标签"]
     assert b["models"][0]["sources"] == ["数据集关联"]
-    assert a["file_count"] == b["file_count"] == 1
+    assert "files" not in a and "files" not in b
 
 
 @pytest.mark.asyncio

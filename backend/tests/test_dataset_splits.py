@@ -156,12 +156,13 @@ async def test_member_list_accepts_multiple_split_filters(monkeypatch):
         async def to_list(self, length):
             return self.rows
 
-    aggregate = AsyncMock(side_effect=[Cursor([{"count": 2}]), Cursor([{"id": "train-image"}, {"id": "test-image"}])])
+    aggregate = AsyncMock(side_effect=[Cursor([{"count": 2}]), Cursor([{"id": "train-image", "type": "image"}, {"id": "test-image", "type": "image"}])])
     monkeypatch.setattr(datasets, "_get_dataset", AsyncMock(return_value={"id": "dataset"}))
     monkeypatch.setattr(datasets, "db", SimpleNamespace(dataset_memberships=SimpleNamespace(aggregate=aggregate)))
     result = await datasets.list_members("dataset", {}, page=1, page_size=50, q="", asset_type=[], tag=[], match="all", no_tags=False, ids_only=True, split=["train", "test"])
     assert result["total"] == 2
     assert [item["id"] for item in result["items"]] == ["train-image", "test-image"]
+    assert [item["type"] for item in result["items"]] == ["image", "image"]
     first_pipeline = aggregate.await_args_list[0].args[0]
     assert first_pipeline[1] == {"$match": {"split": {"$in": ["test", "train"]}}}
     assert {"type": "image", "dataset_split": {"$in": ["test", "train"]}} in first_pipeline[6]["$match"]["$and"]

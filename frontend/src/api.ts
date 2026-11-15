@@ -213,6 +213,7 @@ export const api = {
   tags: () => request<any>('/tag-definitions'),
   createTag: (body:Record<string, unknown>) => request<any>('/tag-definitions', {method:'POST',body:JSON.stringify(body)}),
   updateTag: (key:string, body:Record<string, unknown>) => request<any>(`/tag-definitions/${encodeURIComponent(key)}`, {method:'PATCH',body:JSON.stringify(body)}),
+  addTagValue: (key:string, value:string) => request<any>(`/tag-definitions/${encodeURIComponent(key)}/values`, {method:'POST',body:JSON.stringify({value})}),
   deleteTag: (key:string) => request<void>(`/tag-definitions/${encodeURIComponent(key)}`, {method:'DELETE'}),
   users: () => request<any>('/users'),
   roles: () => request<any>('/roles'),

@@ -85,11 +85,10 @@ def test_updated_at_filter_falls_back_to_created_at() -> None:
     [
         ("equals", {"tags.scene": "室内"}),
         ("notEquals", {"tags.scene": {"$ne": "室内"}}),
-        ("contains", {"tags.scene": {"$regex": "室内", "$options": "i"}}),
-        (
-            "notContains",
-            {"tags.scene": {"$not": {"$regex": "室内", "$options": "i"}}},
-        ),
+        ("contains", {"tags.scene": "室内"}),
+        ("notContains", {"tags.scene": {"$ne": "室内"}}),
+        ("textContains", {"tags.scene": {"$regex": "室内", "$options": "i"}}),
+        ("textNotContains", {"tags.scene": {"$not": {"$regex": "室内", "$options": "i"}}}),
     ],
 )
 def test_tag_filter_operators(operator: str, expected: dict) -> None:
@@ -98,6 +97,11 @@ def test_tag_filter_operators(operator: str, expected: dict) -> None:
 
 def test_tag_filter_escapes_regex_characters() -> None:
     assert asset_filter_clause("remark", "contains", "a.b")["remark"]["$regex"] == "a\\.b"
+
+
+def test_tag_contains_matches_complete_value_not_substring() -> None:
+    assert asset_filter_clause("scene", "contains", "出脚") == {"tags.scene": "出脚"}
+    assert asset_filter_clause("scene", "notContains", "出脚") == {"tags.scene": {"$ne": "出脚"}}
 
 
 def test_invalid_filter_operator_is_rejected() -> None:
